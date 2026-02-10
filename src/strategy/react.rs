@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::confirm;
+use crate::confirm::{self, Confirmer};
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::llm::{self, Message, OllamaClient};
@@ -20,6 +20,7 @@ impl LoopStrategy for ReactStrategy {
         llm: &OllamaClient,
         max_steps: usize,
         sensitive_patterns: &[String],
+        confirmer: &dyn Confirmer,
     ) -> Result<String> {
         let system_prompt = build_system_prompt(contract, tools);
         let mut history: Vec<Message> = vec![
@@ -73,7 +74,7 @@ impl LoopStrategy for ReactStrategy {
                         .unwrap_or("(action)")
                 );
 
-                match confirm::confirm(&action_desc) {
+                match confirmer.confirm(&action_desc).await {
                     Ok(true) => {} // approved
                     _ => {
                         history.push(Message::user(

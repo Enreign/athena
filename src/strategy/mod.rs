@@ -2,6 +2,7 @@ pub mod react;
 
 use async_trait::async_trait;
 
+use crate::confirm::Confirmer;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::llm::OllamaClient;
@@ -26,6 +27,7 @@ pub trait LoopStrategy: Send + Sync {
         llm: &OllamaClient,
         max_steps: usize,
         sensitive_patterns: &[String],
+        confirmer: &dyn Confirmer,
     ) -> Result<String>;
 }
 

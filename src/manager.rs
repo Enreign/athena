@@ -1,3 +1,4 @@
+use crate::confirm::Confirmer;
 use crate::config::{AgentConfig, Config};
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
@@ -29,7 +30,7 @@ impl Manager {
     }
 
     /// Handle a user message: classify, delegate or answer directly
-    pub async fn handle(&self, user_input: &str) -> Result<String> {
+    pub async fn handle(&self, user_input: &str, confirmer: &dyn Confirmer) -> Result<String> {
         // Load relevant memories for context
         let memories = self.memory.search(user_input).unwrap_or_default();
         let memory_context = if memories.is_empty() {
@@ -59,7 +60,7 @@ impl Manager {
                     constraints: vec![],
                 };
 
-                let result = self.executor.run(&contract, agent, &self.llm).await?;
+                let result = self.executor.run(&contract, agent, &self.llm, confirmer).await?;
 
                 // Optionally save a lesson
                 self.maybe_save_lesson(user_input, &result).await;

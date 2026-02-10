@@ -1,3 +1,4 @@
+use crate::confirm::Confirmer;
 use crate::config::{AgentConfig, DockerConfig};
 use crate::docker::DockerSession;
 use crate::error::Result;
@@ -22,6 +23,7 @@ impl Executor {
         contract: &TaskContract,
         agent: &AgentConfig,
         llm: &OllamaClient,
+        confirmer: &dyn Confirmer,
     ) -> Result<String> {
         tracing::info!(agent = %agent.name, goal = %contract.goal, "Starting executor");
 
@@ -38,6 +40,7 @@ impl Executor {
             llm,
             self.max_steps,
             &self.sensitive_patterns,
+            confirmer,
         ).await;
 
         // Always clean up the container

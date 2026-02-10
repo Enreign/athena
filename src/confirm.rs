@@ -1,35 +1,47 @@
+use async_trait::async_trait;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{AthenaError, Result};
 
-static AUTO_APPROVE: AtomicBool = AtomicBool::new(false);
-
-/// Set auto-approve mode (skip all confirmation prompts)
-pub fn set_auto_approve(enabled: bool) {
-    AUTO_APPROVE.store(enabled, Ordering::Relaxed);
+/// Frontend-agnostic confirmation trait.
+/// CLI reads from stdin, Telegram sends inline keyboards, etc.
+#[async_trait]
+pub trait Confirmer: Send + Sync {
+    async fn confirm(&self, action: &str) -> Result<bool>;
 }
 
-/// Prompt user for confirmation of a sensitive action.
-/// Returns Ok(true) if approved, Err(Cancelled) if denied.
-pub fn confirm(action: &str) -> Result<bool> {
-    if AUTO_APPROVE.load(Ordering::Relaxed) {
-        eprintln!("⚡ Auto-approved: {}", action);
-        return Ok(true);
-    }
+/// CLI confirmer: reads y/N from stdin, supports auto-approve mode.
+pub struct CliConfirmer {
+    pub auto_approve: bool,
+}
 
-    eprint!("\n⚠  Action: {}\n   Approve? [y/N] ", action);
-    io::stderr().flush().unwrap();
+#[async_trait]
+impl Confirmer for CliConfirmer {
+    async fn confirm(&self, action: &str) -> Result<bool> {
+        if self.auto_approve {
+            eprintln!("⚡ Auto-approved: {}", action);
+            return Ok(true);
+        }
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)
-        .map_err(|e| AthenaError::Tool(format!("Failed to read input: {}", e)))?;
+        let action = action.to_string();
+        tokio::task::spawn_blocking(move || {
+            eprint!("\n⚠  Action: {}\n   Approve? [y/N] ", action);
+            io::stderr().flush().unwrap();
 
-    let answer = input.trim().to_lowercase();
-    if answer == "y" || answer == "yes" {
-        Ok(true)
-    } else {
-        Err(AthenaError::Cancelled)
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| AthenaError::Tool(format!("Failed to read input: {}", e)))?;
+
+            let answer = input.trim().to_lowercase();
+            if answer == "y" || answer == "yes" {
+                Ok(true)
+            } else {
+                Err(AthenaError::Cancelled)
+            }
+        })
+        .await
+        .map_err(|e| AthenaError::Tool(format!("Confirmation task failed: {}", e)))?
     }
 }
 

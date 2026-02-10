@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use confirm::CliConfirmer;
 use config::Config;
 use llm::OllamaClient;
 use manager::Manager;
@@ -80,11 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Set auto-approve if --yes flag or stdin is not a TTY (piped input)
-    if cli.auto_approve || !atty::is(atty::Stream::Stdin) {
-        confirm::set_auto_approve(true);
-    }
-
+    let auto_approve = cli.auto_approve || !atty::is(atty::Stream::Stdin);
     let config = Config::load(cli.config.as_deref())?;
 
     // Initialize database
@@ -95,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Memory { action }) => handle_memory(action, &memory)?,
         Some(Commands::Agents) => handle_agents(&config),
-        Some(Commands::Chat) | None => run_chat(config, memory).await?,
+        Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
     Ok(())
@@ -151,7 +148,7 @@ fn handle_agents(config: &Config) {
     }
 }
 
-async fn run_chat(config: Config, memory: Arc<MemoryStore>) -> anyhow::Result<()> {
+async fn run_chat(config: Config, memory: Arc<MemoryStore>, auto_approve: bool) -> anyhow::Result<()> {
     let llm = OllamaClient::new(config.ollama.clone());
 
     // Health check
@@ -165,6 +162,7 @@ async fn run_chat(config: Config, memory: Arc<MemoryStore>) -> anyhow::Result<()
     }
 
     let manager = Manager::new(&config, llm, memory.clone());
+    let confirmer = CliConfirmer { auto_approve };
 
     eprintln!("Athena ready. Type /help for commands.\n");
 
@@ -226,7 +224,7 @@ async fn run_chat(config: Config, memory: Arc<MemoryStore>) -> anyhow::Result<()
         }
 
         // Handle via manager
-        match manager.handle(input).await {
+        match manager.handle(input, &confirmer).await {
             Ok(response) => {
                 println!("\n{}\n", response);
             }
