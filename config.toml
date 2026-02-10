@@ -40,3 +40,8 @@ strategy = "react"
 host_path = "."
 container_path = "/workspace"
 read_only = true
+
+[telegram]
+# token = "your-bot-token"   # or set ATHENA_TELEGRAM_TOKEN env var
+allowed_chats = []             # empty = allow all (logs warning)
+confirm_timeout_secs = 300

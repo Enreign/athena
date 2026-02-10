@@ -10,6 +10,8 @@ mod manager;
 mod memory;
 mod profiles;
 mod strategy;
+#[cfg(feature = "telegram")]
+mod telegram;
 mod tools;
 
 use clap::{Parser, Subcommand};
@@ -47,6 +49,9 @@ enum Commands {
     },
     /// List configured agents
     Agents,
+    /// Run as a Telegram bot (requires --features telegram)
+    #[cfg(feature = "telegram")]
+    Telegram,
 }
 
 #[derive(Subcommand)]
@@ -98,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
             for a in handle.list_agents() {
                 println!("  {} — {} [{}]", a.name, a.description, a.tools.join(", "));
             }
+        }
+        #[cfg(feature = "telegram")]
+        Some(Commands::Telegram) => {
+            let handle = AthenaCore::start(config.clone(), memory).await?;
+            telegram::run_telegram(handle, config.telegram).await?;
         }
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Secure autonomous multi-agent system"
 
+[features]
+default = []
+telegram = ["teloxide"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
@@ -25,3 +29,4 @@ dirs = "6"
 async-trait = "0.1"
 futures = "0.3"
 atty = "0.2"
+teloxide = { version = "0.13", features = ["macros"], optional = true }

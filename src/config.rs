@@ -15,6 +15,34 @@ pub struct Config {
     pub manager: ManagerConfig,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelegramConfig {
+    /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
+    pub token: Option<String>,
+    /// Allowed chat IDs (empty = allow all, logs warning)
+    #[serde(default)]
+    pub allowed_chats: Vec<i64>,
+    /// Confirmation timeout in seconds
+    #[serde(default = "default_confirm_timeout")]
+    pub confirm_timeout_secs: u64,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            token: None,
+            allowed_chats: vec![],
+            confirm_timeout_secs: default_confirm_timeout(),
+        }
+    }
+}
+
+fn default_confirm_timeout() -> u64 {
+    300
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -149,6 +177,7 @@ impl Default for Config {
             db: DbConfig::default(),
             manager: ManagerConfig::default(),
             agents: default_agents(),
+            telegram: TelegramConfig::default(),
         }
     }
 }
