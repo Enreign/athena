@@ -39,7 +39,7 @@ struct ShellTool;
 impl Tool for ShellTool {
     fn name(&self) -> &str { "shell" }
     fn description(&self) -> &str { "Run a shell command: {\"tool\": \"shell\", \"params\": {\"command\": \"...\"}}" }
-    fn needs_confirmation(&self) -> bool { true }
+    fn needs_confirmation(&self) -> bool { false } // Handled by sensitive pattern check in strategy
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let cmd = params.get("command")

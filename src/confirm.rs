@@ -1,12 +1,25 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{AthenaError, Result};
+
+static AUTO_APPROVE: AtomicBool = AtomicBool::new(false);
+
+/// Set auto-approve mode (skip all confirmation prompts)
+pub fn set_auto_approve(enabled: bool) {
+    AUTO_APPROVE.store(enabled, Ordering::Relaxed);
+}
 
 /// Prompt user for confirmation of a sensitive action.
 /// Returns Ok(true) if approved, Err(Cancelled) if denied.
 pub fn confirm(action: &str) -> Result<bool> {
-    print!("\n⚠  Action: {}\n   Approve? [y/N] ", action);
-    io::stdout().flush().unwrap();
+    if AUTO_APPROVE.load(Ordering::Relaxed) {
+        eprintln!("⚡ Auto-approved: {}", action);
+        return Ok(true);
+    }
+
+    eprint!("\n⚠  Action: {}\n   Approve? [y/N] ", action);
+    io::stderr().flush().unwrap();
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)

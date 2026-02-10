@@ -49,8 +49,21 @@ impl LoopStrategy for ReactStrategy {
             let tool = tools.get(tool_name)
                 .ok_or_else(|| AthenaError::Tool(format!("Unknown tool: {}", tool_name)))?;
 
-            // Confirmation for sensitive operations
-            if tool.needs_confirmation() {
+            // Determine if confirmation is needed:
+            // - file_write always confirms
+            // - shell confirms only if command matches sensitive patterns
+            let needs_confirm = if tool.needs_confirmation() {
+                true // file_write
+            } else if tool_name == "shell" {
+                params.get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|cmd| confirm::is_sensitive(cmd, sensitive_patterns))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if needs_confirm {
                 let action_desc = format!(
                     "[{}] {}",
                     tool_name,
@@ -60,21 +73,9 @@ impl LoopStrategy for ReactStrategy {
                         .unwrap_or("(action)")
                 );
 
-                // Check sensitive patterns for extra warning
-                let is_sensitive = if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                    confirm::is_sensitive(cmd, sensitive_patterns)
-                } else {
-                    false
-                };
-
-                if is_sensitive {
-                    eprintln!("🔴 SENSITIVE command detected!");
-                }
-
                 match confirm::confirm(&action_desc) {
                     Ok(true) => {} // approved
                     _ => {
-                        // Denied — tell the LLM it was blocked
                         history.push(Message::user(
                             "The user denied this action. Try a different approach or explain what you need."
                         ));

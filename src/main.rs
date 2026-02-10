@@ -26,6 +26,10 @@ struct Cli {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
+    /// Auto-approve all tool executions (skip confirmation prompts)
+    #[arg(short = 'y', long = "yes")]
+    auto_approve: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -69,9 +73,17 @@ async fn main() -> anyhow::Result<()> {
                 .add_directive("athena=info".parse().unwrap()),
         )
         .with_target(false)
+        .with_ansi(atty::is(atty::Stream::Stderr))
+        .compact()
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
+
+    // Set auto-approve if --yes flag or stdin is not a TTY (piped input)
+    if cli.auto_approve || !atty::is(atty::Stream::Stdin) {
+        confirm::set_auto_approve(true);
+    }
 
     let config = Config::load(cli.config.as_deref())?;
 

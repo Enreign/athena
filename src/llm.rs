@@ -130,11 +130,35 @@ impl OllamaClient {
     }
 }
 
+/// Sanitize common LLM JSON errors:
+/// - \' → ' (invalid JSON escape, common in shell-influenced output)
+/// - Trailing commas before } or ]
+fn sanitize_json(text: &str) -> String {
+    let mut out = text.to_string();
+    // Fix invalid \' escape (single quotes don't need escaping in JSON)
+    out = out.replace("\\'", "'");
+    // Fix trailing commas: , } or , ]
+    let re = regex::Regex::new(r",\s*([}\]])").unwrap();
+    out = re.replace_all(&out, "$1").to_string();
+    out
+}
+
+/// Try parsing JSON with sanitization fallback
+fn try_parse_json(text: &str) -> Option<Value> {
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        return Some(v);
+    }
+    // Retry with sanitized text
+    let sanitized = sanitize_json(text);
+    serde_json::from_str::<Value>(&sanitized).ok()
+}
+
 /// Extract JSON from LLM text output.
-/// Handles: raw JSON, ```json blocks, JSON embedded in prose.
+/// Handles: raw JSON, ```json blocks, JSON embedded in prose,
+/// and common LLM JSON errors (invalid escapes, trailing commas).
 pub fn extract_json(text: &str) -> Option<Value> {
     // Try parsing the whole thing first
-    if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
+    if let Some(v) = try_parse_json(text.trim()) {
         return Some(v);
     }
 
@@ -142,7 +166,7 @@ pub fn extract_json(text: &str) -> Option<Value> {
     if let Some(start) = text.find("```json") {
         let after = &text[start + 7..];
         if let Some(end) = after.find("```") {
-            if let Ok(v) = serde_json::from_str::<Value>(after[..end].trim()) {
+            if let Some(v) = try_parse_json(after[..end].trim()) {
                 return Some(v);
             }
         }
@@ -164,7 +188,7 @@ pub fn extract_json(text: &str) -> Option<Value> {
             } else {
                 block
             };
-            if let Ok(v) = serde_json::from_str::<Value>(block.trim()) {
+            if let Some(v) = try_parse_json(block.trim()) {
                 return Some(v);
             }
         }
@@ -184,7 +208,7 @@ pub fn extract_json(text: &str) -> Option<Value> {
                 if depth == 0 {
                     if let Some(s) = start {
                         let candidate = &text[s..=i];
-                        if let Ok(v) = serde_json::from_str::<Value>(candidate) {
+                        if let Some(v) = try_parse_json(candidate) {
                             return Some(v);
                         }
                     }
@@ -226,5 +250,21 @@ mod tests {
     #[test]
     fn test_extract_json_none() {
         assert!(extract_json("just plain text").is_none());
+    }
+
+    #[test]
+    fn test_extract_json_invalid_escape() {
+        // LLMs often produce \' which is invalid JSON
+        let text = r#"{"tool": "shell", "params": {"command": "grep -rH \'TODO\' src/"}}"#;
+        let v = extract_json(text).unwrap();
+        assert_eq!(v["tool"], "shell");
+        assert_eq!(v["params"]["command"], "grep -rH 'TODO' src/");
+    }
+
+    #[test]
+    fn test_extract_json_trailing_comma() {
+        let text = r#"{"tool": "shell", "params": {"command": "ls",}}"#;
+        let v = extract_json(text).unwrap();
+        assert_eq!(v["tool"], "shell");
     }
 }
