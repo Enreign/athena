@@ -1,5 +1,6 @@
 use crate::confirm::Confirmer;
 use crate::config::{AgentConfig, Config};
+use crate::core::SessionContext;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::llm::{self, Message, OllamaClient};
@@ -30,7 +31,7 @@ impl Manager {
     }
 
     /// Handle a user message: classify, delegate or answer directly
-    pub async fn handle(&self, user_input: &str, confirmer: &dyn Confirmer) -> Result<String> {
+    pub async fn handle(&self, user_input: &str, _session: &SessionContext, confirmer: &dyn Confirmer) -> Result<String> {
         // Load relevant memories for context
         let memories = self.memory.search(user_input).unwrap_or_default();
         let memory_context = if memories.is_empty() {

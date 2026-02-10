@@ -1,5 +1,6 @@
 mod config;
 mod confirm;
+mod core;
 mod db;
 mod docker;
 mod error;
@@ -16,8 +17,7 @@ use std::sync::Arc;
 
 use confirm::CliConfirmer;
 use config::Config;
-use llm::OllamaClient;
-use manager::Manager;
+use core::{AthenaCore, CoreEvent, SessionContext};
 use memory::MemoryStore;
 
 #[derive(Parser)]
@@ -91,7 +91,13 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Memory { action }) => handle_memory(action, &memory)?,
-        Some(Commands::Agents) => handle_agents(&config),
+        Some(Commands::Agents) => {
+            // Start core to get merged agent list (config + profiles)
+            let handle = AthenaCore::start(config, memory).await?;
+            for a in handle.list_agents() {
+                println!("  {} — {} [{}]", a.name, a.description, a.tools.join(", "));
+            }
+        }
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
@@ -116,9 +122,9 @@ fn handle_memory(action: MemoryAction, memory: &MemoryStore) -> anyhow::Result<(
             println!("Stored memory: {}", &id[..8]);
         }
         MemoryAction::Retire { id } => {
-            // Support short IDs
             let memories = memory.list()?;
-            let full_id = memories.iter()
+            let full_id = memories
+                .iter()
                 .find(|m| m.id.starts_with(&id))
                 .map(|m| m.id.clone());
 
@@ -133,36 +139,19 @@ fn handle_memory(action: MemoryAction, memory: &MemoryStore) -> anyhow::Result<(
     Ok(())
 }
 
-fn handle_agents(config: &Config) {
-    println!("Configured agents:\n");
-    for agent in &config.agents {
-        println!("  {} — {}", agent.name, agent.description);
-        println!("    Tools: {}", agent.tools.join(", "));
-        println!("    Strategy: {}", agent.strategy);
-        for m in &agent.mounts {
-            println!("    Mount: {} → {} ({})",
-                m.host_path, m.container_path,
-                if m.read_only { "ro" } else { "rw" });
-        }
-        println!();
-    }
-}
+async fn run_chat(
+    config: Config,
+    memory: Arc<MemoryStore>,
+    auto_approve: bool,
+) -> anyhow::Result<()> {
+    let handle = AthenaCore::start(config, memory).await?;
+    let confirmer: Arc<dyn confirm::Confirmer> = Arc::new(CliConfirmer { auto_approve });
 
-async fn run_chat(config: Config, memory: Arc<MemoryStore>, auto_approve: bool) -> anyhow::Result<()> {
-    let llm = OllamaClient::new(config.ollama.clone());
-
-    // Health check
-    eprint!("Connecting to Ollama... ");
-    match llm.health_check().await {
-        Ok(()) => eprintln!("ok (model: {})", config.ollama.model),
-        Err(e) => {
-            eprintln!("failed: {}", e);
-            return Err(e.into());
-        }
-    }
-
-    let manager = Manager::new(&config, llm, memory.clone());
-    let confirmer = CliConfirmer { auto_approve };
+    let session = SessionContext {
+        platform: "cli".into(),
+        user_id: "local".into(),
+        chat_id: "local".into(),
+    };
 
     eprintln!("Athena ready. Type /help for commands.\n");
 
@@ -176,7 +165,10 @@ async fn run_chat(config: Config, memory: Arc<MemoryStore>, auto_approve: bool) 
     loop {
         let line = match rl.readline("you> ") {
             Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
+            Err(
+                rustyline::error::ReadlineError::Interrupted
+                | rustyline::error::ReadlineError::Eof,
+            ) => {
                 break;
             }
             Err(e) => {
@@ -204,35 +196,54 @@ async fn run_chat(config: Config, memory: Arc<MemoryStore>, auto_approve: bool) 
                 continue;
             }
             "/agents" => {
-                for a in &config.agents {
-                    println!("  {} — {} [{}]", a.name, a.description, a.tools.join(", "));
+                for a in handle.list_agents() {
+                    println!(
+                        "  {} — {} [{}]",
+                        a.name,
+                        a.description,
+                        a.tools.join(", ")
+                    );
                 }
                 continue;
             }
             "/memories" => {
-                let memories = memory.list()?;
-                if memories.is_empty() {
-                    println!("No memories.");
-                } else {
-                    for m in &memories {
-                        println!("  [{}] {} — {}", &m.id[..8], m.category, m.content);
+                match handle.list_memories() {
+                    Ok(memories) if memories.is_empty() => println!("No memories."),
+                    Ok(memories) => {
+                        for m in &memories {
+                            println!("  [{}] {} — {}", &m.id[..8], m.category, m.content);
+                        }
                     }
+                    Err(e) => eprintln!("Error: {}", e),
                 }
                 continue;
             }
             _ => {}
         }
 
-        // Handle via manager
-        match manager.handle(input, &confirmer).await {
-            Ok(response) => {
-                println!("\n{}\n", response);
-            }
-            Err(error::AthenaError::Cancelled) => {
-                println!("Action cancelled.");
-            }
+        // Send through core
+        let mut events = match handle
+            .chat(session.clone(), input, confirmer.clone())
+            .await
+        {
+            Ok(rx) => rx,
             Err(e) => {
                 eprintln!("Error: {}", e);
+                continue;
+            }
+        };
+
+        while let Some(event) = events.recv().await {
+            match event {
+                CoreEvent::Status(s) => eprintln!("  {}", s),
+                CoreEvent::Response(r) => println!("\n{}\n", r),
+                CoreEvent::Error(e) => {
+                    if e.contains("cancelled") {
+                        println!("Action cancelled.");
+                    } else {
+                        eprintln!("Error: {}", e);
+                    }
+                }
             }
         }
     }
