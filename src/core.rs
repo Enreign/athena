@@ -135,6 +135,7 @@ impl AthenaCore {
         // Spawn the core event loop
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
+                tracing::debug!(input = %req.input, "Core received request");
                 let manager = manager.clone();
                 tokio::spawn(async move {
                     let _ = req
@@ -142,14 +143,17 @@ impl AthenaCore {
                         .send(CoreEvent::Status("Thinking...".into()))
                         .await;
 
+                    tracing::debug!("Calling manager.handle()");
                     match manager
                         .handle(&req.input, &req.session, req.confirmer.as_ref())
                         .await
                     {
                         Ok(response) => {
+                            tracing::debug!(len = response.len(), "Manager returned response");
                             let _ = req.event_tx.send(CoreEvent::Response(response)).await;
                         }
                         Err(e) => {
+                            tracing::error!(error = %e, "Manager returned error");
                             let _ = req
                                 .event_tx
                                 .send(CoreEvent::Error(e.to_string()))

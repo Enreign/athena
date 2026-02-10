@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
 use teloxide::prelude::*;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup};
 
 use crate::config::TelegramConfig;
 use crate::confirm::Confirmer;
@@ -173,19 +173,24 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         chat_id: chat_id.0.to_string(),
     };
 
+    tracing::debug!("Sending Working... status message");
     // Send "Working..." status message that we'll update
     let status_msg = bot
         .send_message(chat_id, "Working...")
         .await?;
+    tracing::debug!(msg_id = %status_msg.id, "Status message sent");
 
+    tracing::debug!("Sending to core via handle.chat()");
     let mut events = match state.handle.chat(session, &text, confirmer).await {
         Ok(rx) => rx,
         Err(e) => {
+            tracing::error!(error = %e, "handle.chat() failed");
             bot.edit_message_text(chat_id, status_msg.id, format!("Error: {}", e))
                 .await?;
             return Ok(());
         }
     };
+    tracing::debug!("Waiting for core events");
 
     while let Some(event) = events.recv().await {
         match event {
@@ -315,6 +320,16 @@ pub async fn run_telegram(handle: CoreHandle, config: TelegramConfig) -> anyhow:
         pending,
         config,
     };
+
+    // Register bot commands menu (the "/" button in Telegram)
+    let commands = vec![
+        BotCommand::new("help", "Show available commands"),
+        BotCommand::new("agents", "List configured agents"),
+        BotCommand::new("memories", "List saved memories"),
+    ];
+    bot.set_my_commands(commands)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to set bot commands: {}", e))?;
 
     eprintln!("Telegram bot starting...");
 
