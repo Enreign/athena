@@ -1,0 +1,69 @@
+# LLM provider: "ollama" (default), "openrouter", or "zen"
+[llm]
+provider = "ollama"
+
+[ollama]
+url = "http://localhost:11434"
+model = "qwen2.5:7b"
+temperature = 0.3
+max_tokens = 4096
+
+# Uncomment to use OpenRouter (set OPENROUTER_API_KEY env or api_key below)
+# [openrouter]
+# model = "google/gemini-2.5-flash"                # agent/ReAct loop
+# classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
+# url = "https://openrouter.ai/api/v1"
+# api_key = ""
+# temperature = 0.3
+# max_tokens = 4096
+
+# Uncomment to use Opencode Zen (set OPENCODE_API_KEY env or api_key below)
+# [zen]
+# model = "zen-v1"
+# classifier_model = "zen-v1-mini"  # optional, defaults to model
+# url = "https://opencode.ai/zen/v1"
+# api_key = ""
+# temperature = 0.3
+# max_tokens = 4096
+
+[docker]
+image = "ubuntu:24.04"
+socket_path = "/var/run/docker.sock"
+runtime = "runc"
+memory_limit = 268435456
+cpu_quota = 50000
+timeout_secs = 120
+
+[db]
+path = "~/.athena/athena.db"
+
+[manager]
+max_steps = 15
+sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
+
+[[agents]]
+name = "coder"
+description = "Reads, writes, and modifies code files. Can run build/test commands."
+tools = ["file_read", "file_write", "shell"]
+strategy = "react"
+
+[[agents.mounts]]
+host_path = "."
+container_path = "/workspace"
+read_only = false
+
+[[agents]]
+name = "scout"
+description = "Explores files and runs read-only commands. Cannot modify anything."
+tools = ["file_read", "shell"]
+strategy = "react"
+
+[[agents.mounts]]
+host_path = "."
+container_path = "/workspace"
+read_only = true
+
+[telegram]
+# token = "your-bot-token"   # or set ATHENA_TELEGRAM_TOKEN env var
+allowed_chats = []             # empty = allow all (logs warning)
+confirm_timeout_secs = 300
