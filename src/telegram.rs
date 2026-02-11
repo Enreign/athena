@@ -65,27 +65,40 @@ struct TelegramState {
     handle: CoreHandle,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     config: TelegramConfig,
+    /// M7: Per-chat rate limiting — tracks last request time per chat
+    last_request: Arc<Mutex<HashMap<i64, tokio::time::Instant>>>,
 }
 
-/// Split a message into chunks at 4000 chars (Telegram limit is 4096).
+/// L3: Split a message into chunks at `max` bytes, respecting UTF-8 char boundaries.
 fn chunk_message(text: &str, max: usize) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
         let end = (start + max).min(text.len());
+        // Walk back to a valid char boundary if we landed in the middle of a character
+        let mut actual_end = end;
+        while actual_end > start && !text.is_char_boundary(actual_end) {
+            actual_end -= 1;
+        }
         // Try to break at a newline if possible
-        let actual_end = if end < text.len() {
-            text[start..end]
-                .rfind('\n')
-                .map(|pos| start + pos + 1)
-                .unwrap_or(end)
-        } else {
-            end
-        };
+        if actual_end < text.len() {
+            if let Some(pos) = text[start..actual_end].rfind('\n') {
+                actual_end = start + pos + 1;
+            }
+        }
         chunks.push(&text[start..actual_end]);
         start = actual_end;
     }
     chunks
+}
+
+/// Check if a chat is authorized
+fn is_authorized(chat_id: i64, config: &TelegramConfig) -> bool {
+    if !config.allowed_chats.is_empty() {
+        return config.allowed_chats.contains(&chat_id);
+    }
+    // If allowed_chats is empty, only allow if allow_all is explicitly set
+    config.allow_all
 }
 
 /// Handle an incoming text message.
@@ -97,20 +110,14 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
 
     let chat_id = msg.chat.id;
 
-    // Auth check
-    if !state.config.allowed_chats.is_empty()
-        && !state.config.allowed_chats.contains(&chat_id.0)
-    {
+    // C2: Auth check using allow_all
+    if !is_authorized(chat_id.0, &state.config) {
         bot.send_message(chat_id, "Unauthorized.")
             .await?;
         return Ok(());
     }
 
-    if state.config.allowed_chats.is_empty() {
-        tracing::warn!(chat_id = chat_id.0, "Processing message from unfiltered chat");
-    }
-
-    // Slash commands
+    // Slash commands (no rate limit for these)
     if text == "/start" || text == "/help" {
         bot.send_message(
             chat_id,
@@ -148,11 +155,26 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
                 bot.send_message(chat_id, &out).await?;
             }
             Err(e) => {
-                bot.send_message(chat_id, &format!("Error: {}", e))
+                tracing::error!(error = %e, "Failed to list memories");
+                bot.send_message(chat_id, "An internal error occurred. Please try again later.")
                     .await?;
             }
         }
         return Ok(());
+    }
+
+    // M7: Per-chat rate limiting (5-second cooldown before LLM-invoking messages)
+    {
+        let mut last_req = state.last_request.lock().await;
+        let now = tokio::time::Instant::now();
+        if let Some(last) = last_req.get(&chat_id.0) {
+            if now.duration_since(*last) < tokio::time::Duration::from_secs(5) {
+                bot.send_message(chat_id, "Please wait a few seconds before sending another request.")
+                    .await?;
+                return Ok(());
+            }
+        }
+        last_req.insert(chat_id.0, now);
     }
 
     // Build confirmer for this chat
@@ -184,9 +206,10 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
     let mut events = match state.handle.chat(session, &text, confirmer).await {
         Ok(rx) => rx,
         Err(e) => {
+            // M2: Log details, send generic message to user
             tracing::error!(error = %e, "handle.chat() failed");
-            bot.edit_message_text(chat_id, status_msg.id, format!("Error: {}", e))
-                .await?;
+            let _ = bot.edit_message_text(chat_id, status_msg.id, "An error occurred while processing your request.")
+                .await;
             return Ok(());
         }
     };
@@ -209,8 +232,10 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
                 }
             }
             CoreEvent::Error(e) => {
+                // M2: Log details, send generic message to user
+                tracing::error!(error = %e, chat_id = chat_id.0, "Task error");
                 let _ = bot
-                    .edit_message_text(chat_id, status_msg.id, format!("Error: {}", e))
+                    .edit_message_text(chat_id, status_msg.id, "An error occurred while processing your request.")
                     .await;
             }
         }
@@ -286,11 +311,22 @@ pub async fn run_telegram(handle: CoreHandle, config: TelegramConfig) -> anyhow:
 
     let bot = Bot::new(&token);
 
-    if config.allowed_chats.is_empty() {
-        tracing::warn!("No allowed_chats configured — bot will respond to ALL chats");
+    // C2: Enforce allow_all — refuse to start if no allowed_chats and allow_all is false
+    if config.allowed_chats.is_empty() && !config.allow_all {
+        return Err(anyhow::anyhow!(
+            "Telegram bot refused to start: allowed_chats is empty and allow_all is false. \
+             Set allowed_chats to specific chat IDs or set allow_all = true in [telegram] config."
+        ));
+    }
+
+    if config.allow_all {
+        tracing::warn!("allow_all is true — bot will respond to ALL chats");
     }
 
     let pending: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let last_request: Arc<Mutex<HashMap<i64, tokio::time::Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     // Spawn stale confirmation cleanup task
@@ -319,6 +355,7 @@ pub async fn run_telegram(handle: CoreHandle, config: TelegramConfig) -> anyhow:
         handle,
         pending,
         config,
+        last_request,
     };
 
     // Register bot commands menu (the "/" button in Telegram)

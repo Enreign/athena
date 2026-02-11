@@ -26,6 +26,10 @@ pub struct Config {
     pub agents: Vec<AgentConfig>,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -42,7 +46,7 @@ impl Default for LlmConfig {
 
 fn default_provider() -> String { "ollama".into() }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct OpenRouterConfig {
     #[serde(default = "default_openrouter_url")]
     pub url: String,
@@ -55,9 +59,22 @@ pub struct OpenRouterConfig {
     pub max_tokens: u32,
 }
 
+impl std::fmt::Debug for OpenRouterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenRouterConfig")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("classifier_model", &self.classifier_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
+}
+
 fn default_openrouter_url() -> String { "https://openrouter.ai/api/v1".into() }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct ZenConfig {
     #[serde(default = "default_zen_url")]
     pub url: String,
@@ -70,18 +87,45 @@ pub struct ZenConfig {
     pub max_tokens: u32,
 }
 
+impl std::fmt::Debug for ZenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZenConfig")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("classifier_model", &self.classifier_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
+}
+
 fn default_zen_url() -> String { "https://opencode.ai/zen/v1".into() }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct TelegramConfig {
     /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
     pub token: Option<String>,
-    /// Allowed chat IDs (empty = allow all, logs warning)
+    /// Allowed chat IDs (empty = deny all unless allow_all = true)
     #[serde(default)]
     pub allowed_chats: Vec<i64>,
+    /// Allow all chats (must be explicitly set to true)
+    #[serde(default)]
+    pub allow_all: bool,
     /// Confirmation timeout in seconds
     #[serde(default = "default_confirm_timeout")]
     pub confirm_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("token", &"[REDACTED]")
+            .field("allowed_chats", &self.allowed_chats)
+            .field("allow_all", &self.allow_all)
+            .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .finish()
+    }
 }
 
 impl Default for TelegramConfig {
@@ -89,6 +133,7 @@ impl Default for TelegramConfig {
         Self {
             token: None,
             allowed_chats: vec![],
+            allow_all: false,
             confirm_timeout_secs: default_confirm_timeout(),
         }
     }
@@ -97,6 +142,46 @@ impl Default for TelegramConfig {
 fn default_confirm_timeout() -> u64 {
     300
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmbeddingConfig {
+    #[serde(default = "default_embedding_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_model_dir")]
+    pub model_dir: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_embedding_enabled(),
+            model_dir: default_model_dir(),
+        }
+    }
+}
+
+fn default_embedding_enabled() -> bool { true }
+fn default_model_dir() -> String { "~/.athena/models/all-MiniLM-L6-v2".into() }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryConfig {
+    #[serde(default = "default_half_life")]
+    pub recency_half_life_days: f32,
+    #[serde(default = "default_dedup_threshold")]
+    pub dedup_threshold: f32,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            recency_half_life_days: default_half_life(),
+            dedup_threshold: default_dedup_threshold(),
+        }
+    }
+}
+
+fn default_half_life() -> f32 { 30.0 }
+fn default_dedup_threshold() -> f32 { 0.95 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OllamaConfig {
@@ -181,6 +266,20 @@ fn default_sensitive_patterns() -> Vec<String> {
         r"sudo".into(),
         r"curl.*\|.*sh".into(),
         r"chmod.*777".into(),
+        r"unlink\s".into(),
+        r"shred\s".into(),
+        r"find\s.*-delete".into(),
+        r"dd\s.*of=".into(),
+        r"curl\s".into(),
+        r"wget\s".into(),
+        r"nc\s".into(),
+        r"apt\s".into(),
+        r"pip\s".into(),
+        r"kill\s".into(),
+        r"config\.toml".into(),
+        r"\.env".into(),
+        r"/etc/".into(),
+        r"~/\.ssh".into(),
     ]
 }
 
@@ -236,6 +335,8 @@ impl Default for Config {
             manager: ManagerConfig::default(),
             agents: default_agents(),
             telegram: TelegramConfig::default(),
+            embedding: EmbeddingConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
@@ -295,7 +396,24 @@ impl Config {
         let config: Config = toml::from_str(&contents)
             .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?;
 
+        config.validate();
         Ok(config)
+    }
+
+    /// Warn about potentially insecure configuration
+    fn validate(&self) {
+        // M3: Warn on non-loopback HTTP URLs
+        let url = &self.ollama.url;
+        if url.starts_with("http://") {
+            if let Some(host) = url.strip_prefix("http://").and_then(|s| s.split(':').next()) {
+                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
+                    tracing::warn!(
+                        url = %url,
+                        "Ollama URL uses unencrypted HTTP to a non-loopback address — traffic may be intercepted"
+                    );
+                }
+            }
+        }
     }
 
     /// Build the configured LLM provider
@@ -415,6 +533,18 @@ impl Config {
             home.join(&self.db.path[2..])
         } else {
             PathBuf::from(&self.db.path)
+        };
+        Ok(path)
+    }
+
+    /// Resolve the embedding model directory, expanding ~ to home dir
+    pub fn resolve_model_dir(&self) -> Result<PathBuf> {
+        let path = if self.embedding.model_dir.starts_with("~/") {
+            let home = dirs::home_dir()
+                .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
+            home.join(&self.embedding.model_dir[2..])
+        } else {
+            PathBuf::from(&self.embedding.model_dir)
         };
         Ok(path)
     }

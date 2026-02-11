@@ -3,6 +3,7 @@ mod confirm;
 mod core;
 mod db;
 mod docker;
+mod embeddings;
 mod error;
 mod executor;
 mod llm;
@@ -15,12 +16,14 @@ mod telegram;
 mod tools;
 
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use confirm::CliConfirmer;
 use config::Config;
 use core::{AthenaCore, CoreEvent, SessionContext};
+use embeddings::Embedder;
 use memory::MemoryStore;
 
 #[derive(Parser)]
@@ -80,23 +83,48 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "athena=info".parse().unwrap()),
         )
         .with_target(false)
-        .with_ansi(atty::is(atty::Stream::Stderr))
+        .with_ansi(std::io::stderr().is_terminal())
         .compact()
         .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
 
-    let auto_approve = cli.auto_approve || !atty::is(atty::Stream::Stdin);
+    let auto_approve = cli.auto_approve;
     let config = Config::load(cli.config.as_deref())?;
 
     // Initialize database
     let db_path = config.db_path()?;
     let conn = db::init_db(&db_path)?;
-    let memory = Arc::new(MemoryStore::new(conn));
+    let memory = Arc::new(MemoryStore::new(
+        conn,
+        config.memory.recency_half_life_days,
+        config.memory.dedup_threshold,
+    ));
+
+    // Initialize embedder for CLI memory commands (lightweight, no LLM needed)
+    let embedder = if config.embedding.enabled {
+        config.resolve_model_dir().ok().and_then(|dir| {
+            Embedder::ensure_model(&dir).ok()?;
+            match Embedder::new(&dir) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    tracing::warn!("Embedder unavailable for CLI: {}", e);
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+
+    // Backfill any memories missing embeddings (runs on every CLI invocation, fast no-op if none)
+    if let Some(ref e) = embedder {
+        core::backfill_embeddings(&memory, e);
+    }
 
     match cli.command {
-        Some(Commands::Memory { action }) => handle_memory(action, &memory)?,
+        Some(Commands::Memory { action }) => handle_memory(action, &memory, embedder.as_ref())?,
         Some(Commands::Agents) => {
             // Start core to get merged agent list (config + profiles)
             let handle = AthenaCore::start(config, memory).await?;
@@ -115,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_memory(action: MemoryAction, memory: &MemoryStore) -> anyhow::Result<()> {
+fn handle_memory(action: MemoryAction, memory: &MemoryStore, embedder: Option<&Embedder>) -> anyhow::Result<()> {
     match action {
         MemoryAction::List => {
             let memories = memory.list()?;
@@ -129,7 +157,8 @@ fn handle_memory(action: MemoryAction, memory: &MemoryStore) -> anyhow::Result<(
             }
         }
         MemoryAction::Add { category, content } => {
-            let id = memory.store(&category, &content)?;
+            let embedding = embedder.and_then(|e| e.embed(&content).ok());
+            let id = memory.store(&category, &content, embedding.as_deref())?;
             println!("Stored memory: {}", &id[..8]);
         }
         MemoryAction::Retire { id } => {
@@ -260,6 +289,19 @@ async fn run_chat(
     }
 
     let _ = rl.save_history(&history_path);
+
+    // L7: Restrict history file permissions to owner-only
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if history_path.exists() {
+            let _ = std::fs::set_permissions(
+                &history_path,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
+    }
+
     eprintln!("Goodbye.");
     Ok(())
 }

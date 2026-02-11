@@ -25,6 +25,9 @@ pub enum AthenaError {
 
     #[error("Timeout after {0}s")]
     Timeout(u64),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 impl From<bollard::errors::Error> for AthenaError {

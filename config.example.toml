@@ -27,6 +27,8 @@ max_tokens = 4096
 # max_tokens = 4096
 
 [docker]
+# Pin images by digest for reproducibility, e.g.:
+# image = "ubuntu@sha256:<digest>"
 image = "ubuntu:24.04"
 socket_path = "/var/run/docker.sock"
 runtime = "runc"
@@ -39,7 +41,8 @@ path = "~/.athena/athena.db"
 
 [manager]
 max_steps = 15
-sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
+# Sensitive patterns have comprehensive defaults — uncomment to override:
+# sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
 
 [[agents]]
 name = "coder"
@@ -63,7 +66,18 @@ host_path = "."
 container_path = "/workspace"
 read_only = true
 
+[embedding]
+enabled = true
+# model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+
+[memory]
+# Half-life for recency decay in days. Memories older than this get 50% weight.
+# recency_half_life_days = 30.0
+# Cosine similarity threshold for deduplication. Memories above this are merged.
+# dedup_threshold = 0.95
+
 [telegram]
 # token = "your-bot-token"   # or set ATHENA_TELEGRAM_TOKEN env var
-allowed_chats = []             # empty = allow all (logs warning)
+allowed_chats = [374512753]    # list of allowed chat IDs
+allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
 confirm_timeout_secs = 300

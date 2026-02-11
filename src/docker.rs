@@ -45,9 +45,11 @@ impl DockerSession {
             mounts: Some(mounts),
             readonly_rootfs: Some(true),
             cap_drop: Some(vec!["ALL".into()]),
+            security_opt: Some(vec!["no-new-privileges:true".into()]),
             network_mode: Some("none".into()),
             memory: Some(docker_config.memory_limit),
             cpu_quota: Some(docker_config.cpu_quota),
+            pids_limit: Some(256),
             // Writable /tmp for tools that need scratch space
             tmpfs: Some(HashMap::from([
                 ("/tmp".into(), "rw,noexec,nosuid,size=64m".into()),
@@ -59,6 +61,7 @@ impl DockerSession {
 
         let config = ContainerConfig {
             image: Some(docker_config.image.clone()),
+            user: Some("65534:65534".into()),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             working_dir: Some(
                 agent.mounts.first()
@@ -112,9 +115,10 @@ impl DockerSession {
 
     /// Execute a command with stdin input (for file writes)
     pub async fn exec_with_stdin(&self, cmd: &str, stdin_data: &str) -> Result<String> {
-        // Write via shell heredoc to avoid stdin attachment complexity
-        let escaped = stdin_data.replace('\'', "'\\''");
-        let full_cmd = format!("printf '%s' '{}' | {}", escaped, cmd);
+        // Encode stdin data as base64 to avoid shell injection via crafted content
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(stdin_data.as_bytes());
+        let full_cmd = format!("echo '{}' | base64 -d | {}", encoded, cmd);
         self.exec(&full_cmd).await
     }
 

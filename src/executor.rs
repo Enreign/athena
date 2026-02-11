@@ -1,4 +1,4 @@
-use crate::confirm::Confirmer;
+use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::config::{AgentConfig, DockerConfig};
 use crate::docker::DockerSession;
 use crate::error::Result;
@@ -9,12 +9,13 @@ use crate::tools::ToolRegistry;
 pub struct Executor {
     docker_config: DockerConfig,
     max_steps: usize,
-    sensitive_patterns: Vec<String>,
+    sensitive_patterns: SensitivePatterns,
 }
 
 impl Executor {
     pub fn new(docker_config: DockerConfig, max_steps: usize, sensitive_patterns: Vec<String>) -> Self {
-        Self { docker_config, max_steps, sensitive_patterns }
+        let compiled = SensitivePatterns::new(&sensitive_patterns);
+        Self { docker_config, max_steps, sensitive_patterns: compiled }
     }
 
     /// Run a task contract using the specified agent

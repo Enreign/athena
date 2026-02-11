@@ -45,14 +45,34 @@ impl Confirmer for CliConfirmer {
     }
 }
 
-/// Check if a command matches any sensitive patterns
-pub fn is_sensitive(cmd: &str, patterns: &[String]) -> bool {
-    for pat in patterns {
-        if let Ok(re) = regex::Regex::new(pat) {
-            if re.is_match(cmd) {
-                return true;
-            }
-        }
-    }
-    false
+/// Precompiled sensitive patterns for O(1) matching via RegexSet
+pub struct SensitivePatterns {
+    regex_set: regex::RegexSet,
 }
+
+impl SensitivePatterns {
+    /// Compile patterns into a RegexSet. Invalid patterns are logged and skipped.
+    pub fn new(patterns: &[String]) -> Self {
+        let valid: Vec<&str> = patterns
+            .iter()
+            .filter(|p| {
+                if regex::Regex::new(p).is_err() {
+                    tracing::warn!(pattern = %p, "Skipping invalid sensitive pattern");
+                    false
+                } else {
+                    true
+                }
+            })
+            .map(|p| p.as_str())
+            .collect();
+        let regex_set = regex::RegexSet::new(&valid)
+            .expect("all patterns were pre-validated");
+        Self { regex_set }
+    }
+
+    /// Check if a command matches any sensitive pattern
+    pub fn is_match(&self, cmd: &str) -> bool {
+        self.regex_set.is_match(cmd)
+    }
+}
+

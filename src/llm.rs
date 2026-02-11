@@ -317,6 +317,10 @@ impl LlmProvider for OpenAiCompatibleClient {
 // JSON extraction helpers
 // ---------------------------------------------------------------------------
 
+/// Static regex for trailing comma cleanup (compiled once)
+static TRAILING_COMMA_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r",\s*([}\]])").unwrap());
+
 /// Sanitize common LLM JSON errors:
 /// - \' → ' (invalid JSON escape, common in shell-influenced output)
 /// - Trailing commas before } or ]
@@ -325,8 +329,7 @@ fn sanitize_json(text: &str) -> String {
     // Fix invalid \' escape (single quotes don't need escaping in JSON)
     out = out.replace("\\'", "'");
     // Fix trailing commas: , } or , ]
-    let re = regex::Regex::new(r",\s*([}\]])").unwrap();
-    out = re.replace_all(&out, "$1").to_string();
+    out = TRAILING_COMMA_RE.replace_all(&out, "$1").to_string();
     out
 }
 

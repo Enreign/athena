@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::confirm::{self, Confirmer};
+use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::llm::{self, LlmProvider, Message};
@@ -19,7 +19,7 @@ impl LoopStrategy for ReactStrategy {
         docker: &DockerSession,
         llm: &dyn LlmProvider,
         max_steps: usize,
-        sensitive_patterns: &[String],
+        sensitive_patterns: &SensitivePatterns,
         confirmer: &dyn Confirmer,
     ) -> Result<String> {
         let system_prompt = build_system_prompt(contract, tools);
@@ -58,7 +58,7 @@ impl LoopStrategy for ReactStrategy {
             } else if tool_name == "shell" {
                 params.get("command")
                     .and_then(|v| v.as_str())
-                    .map(|cmd| confirm::is_sensitive(cmd, sensitive_patterns))
+                    .map(|cmd| sensitive_patterns.is_match(cmd))
                     .unwrap_or(false)
             } else {
                 false

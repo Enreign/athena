@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::confirm::Confirmer;
+use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::manager::Manager;
 use crate::memory::MemoryStore;
@@ -14,6 +15,12 @@ pub struct SessionContext {
     pub platform: String,
     pub user_id: String,
     pub chat_id: String,
+}
+
+impl SessionContext {
+    pub fn session_key(&self) -> String {
+        format!("{}:{}:{}", self.platform, self.user_id, self.chat_id)
+    }
 }
 
 /// Progressive updates from core to frontend.
@@ -126,6 +133,34 @@ impl AthenaCore {
             }
         }
 
+        // Initialize embedding model on blocking thread (ensure_model may download via reqwest::blocking)
+        let embedder: Option<Arc<Embedder>> = if config.embedding.enabled {
+            let cfg = config.clone();
+            match tokio::task::spawn_blocking(move || init_embedder(&cfg)).await {
+                Ok(Ok(e)) => Some(Arc::new(e)),
+                Ok(Err(e)) => {
+                    tracing::warn!("Embedding model unavailable, falling back to keyword search: {}", e);
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("Embedder init task panicked: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Embedding model disabled in config");
+            None
+        };
+
+        // Spawn background backfill of existing memories without embeddings
+        if let Some(ref embedder) = embedder {
+            let embedder = embedder.clone();
+            let memory_for_backfill = memory.clone();
+            tokio::task::spawn_blocking(move || {
+                backfill_embeddings(&memory_for_backfill, &embedder);
+            });
+        }
+
         // Merge config agents with ~/.athena/agents/*.toml profiles
         let merged_agents = profiles::load_agents(&config)?;
 
@@ -139,7 +174,25 @@ impl AthenaCore {
             })
             .collect();
 
-        let manager = Arc::new(Manager::new(&config, merged_agents, llm, classifier, memory.clone()));
+        // Spawn periodic conversation cleanup
+        {
+            let memory_for_cleanup = memory.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    interval.tick().await;
+                    if let Ok(n) = memory_for_cleanup.cleanup_conversations(7) {
+                        if n > 0 {
+                            tracing::info!("Cleaned up {} old conversation turns", n);
+                        }
+                    }
+                }
+            });
+        }
+
+        let manager = Arc::new(Manager::new(
+            &config, merged_agents, llm, classifier, memory.clone(), embedder,
+        ));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
         // Spawn the core event loop
@@ -180,4 +233,41 @@ impl AthenaCore {
             memory,
         })
     }
+}
+
+fn init_embedder(config: &Config) -> Result<Embedder> {
+    let model_dir = config.resolve_model_dir()?;
+    Embedder::ensure_model(&model_dir)?;
+    Embedder::new(&model_dir)
+}
+
+pub fn backfill_embeddings(memory: &MemoryStore, embedder: &Embedder) {
+    let missing = match memory.memories_without_embeddings() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Failed to query memories for backfill: {}", e);
+            return;
+        }
+    };
+
+    if missing.is_empty() {
+        return;
+    }
+
+    tracing::info!("Backfilling embeddings for {} memories", missing.len());
+    let mut done = 0;
+    for (id, content) in &missing {
+        match embedder.embed(content) {
+            Ok(vec) => {
+                if let Err(e) = memory.backfill_embedding(id, &vec) {
+                    tracing::warn!("Failed to backfill memory {}: {}", &id[..8], e);
+                }
+                done += 1;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to embed memory {}: {}", &id[..8], e);
+            }
+        }
+    }
+    tracing::info!("Backfilled {}/{} memory embeddings", done, missing.len());
 }

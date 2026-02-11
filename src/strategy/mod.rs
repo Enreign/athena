@@ -2,7 +2,7 @@ pub mod react;
 
 use async_trait::async_trait;
 
-use crate::confirm::Confirmer;
+use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::llm::LlmProvider;
@@ -26,7 +26,7 @@ pub trait LoopStrategy: Send + Sync {
         docker: &DockerSession,
         llm: &dyn LlmProvider,
         max_steps: usize,
-        sensitive_patterns: &[String],
+        sensitive_patterns: &SensitivePatterns,
         confirmer: &dyn Confirmer,
     ) -> Result<String>;
 }

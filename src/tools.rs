@@ -22,6 +22,51 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult>;
 }
 
+/// Sensitive filenames that should never be read or written inside containers
+const SENSITIVE_FILENAMES: &[&str] = &[
+    "config.toml",
+    ".env",
+    ".env.local",
+    "credentials.json",
+    "secrets.toml",
+];
+
+/// Sensitive file extensions
+const SENSITIVE_EXTENSIONS: &[&str] = &[".pem", ".key"];
+
+/// Validate a path for safety: no traversal, must be under /workspace, no sensitive files
+fn validate_path(path: &str) -> std::result::Result<(), &'static str> {
+    // Reject path traversal
+    if path.contains("..") {
+        return Err("Path traversal (..) not allowed");
+    }
+
+    // Reject absolute paths outside /workspace
+    if path.starts_with('/') && !path.starts_with("/workspace") {
+        return Err("Absolute paths must be under /workspace");
+    }
+
+    // Check filename against sensitive names
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    for &sensitive in SENSITIVE_FILENAMES {
+        if filename == sensitive {
+            return Err("Access to sensitive file denied");
+        }
+    }
+
+    for &ext in SENSITIVE_EXTENSIONS {
+        if filename.ends_with(ext) {
+            return Err("Access to sensitive file type denied");
+        }
+    }
+
+    Ok(())
+}
+
 /// Truncate output to prevent context bloat
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -69,11 +114,10 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_read: missing 'path' param".into()))?;
 
-        // Basic path validation (must be under a mount point, no traversal)
-        if path.contains("..") {
+        if let Err(reason) = validate_path(path) {
             return Ok(ToolResult {
                 success: false,
-                output: "Path traversal not allowed".into(),
+                output: reason.into(),
             });
         }
 
@@ -104,10 +148,10 @@ impl Tool for FileWriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_write: missing 'content' param".into()))?;
 
-        if path.contains("..") {
+        if let Err(reason) = validate_path(path) {
             return Ok(ToolResult {
                 success: false,
-                output: "Path traversal not allowed".into(),
+                output: reason.into(),
             });
         }
 
