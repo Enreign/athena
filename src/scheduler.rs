@@ -152,8 +152,6 @@ impl CronEngine {
                 let sleep_dur = randomness::jitter_interval(30, 0.2);
                 tokio::time::sleep(sleep_dur).await;
 
-                this.observer.log(ObserverCategory::CronTick, "Cron engine tick");
-
                 match this.memory.due_scheduled_jobs() {
                     Ok(jobs) if !jobs.is_empty() => {
                         this.observer.log(
@@ -178,10 +176,12 @@ impl CronEngine {
         let messages = vec![Message::user(&job.prompt)];
         match self.llm.chat(&messages).await {
             Ok(response) => {
+                let response_trimmed = response.trim().to_string();
+                let _ = self.memory.store("cron", &response_trimmed, None);
                 let pulse = Pulse::new(
                     PulseSource::CronJob(job.name.clone()),
                     Urgency::Medium,
-                    response.trim().to_string(),
+                    response_trimmed,
                 );
                 self.pulse_bus.send(pulse);
 

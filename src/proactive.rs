@@ -112,7 +112,10 @@ If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. 
                         continue;
                     }
 
-                    // Stochastic gate
+                    // Always store pattern as memory (enriches future scans)
+                    let _ = memory.store("pattern", trimmed, None);
+
+                    // Stochastic gate for pulse delivery
                     if randomness::should_speak(0.6, spontaneity) {
                         let pulse = Pulse::new(
                             PulseSource::MemoryScan,
@@ -149,9 +152,9 @@ pub fn spawn_idle_musings(
             // Check every ~5 min
             tokio::time::sleep(randomness::jitter_interval(300, 0.3)).await;
 
-            let (threshold, enabled, all) = {
+            let (threshold, spontaneity, enabled, all) = {
                 let k = knobs.read().unwrap();
-                (k.idle_threshold_secs, k.idle_musings_enabled, k.all_proactive)
+                (k.idle_threshold_secs, k.spontaneity, k.idle_musings_enabled, k.all_proactive)
             };
 
             if !all || !enabled {
@@ -203,15 +206,23 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
                         format!("Generated musing: \"{}\"", truncate(&trimmed, 60)),
                     );
 
-                    // Store as memory
+                    // Always store as memory
                     let _ = memory.store("musing", &trimmed, None);
 
-                    let pulse = Pulse::new(
-                        PulseSource::IdleMusing,
-                        Urgency::Low,
-                        trimmed,
-                    );
-                    pulse_bus.send(pulse);
+                    // Stochastic gate for pulse delivery
+                    if randomness::should_speak(0.5, spontaneity) {
+                        let pulse = Pulse::new(
+                            PulseSource::IdleMusing,
+                            Urgency::Low,
+                            trimmed,
+                        );
+                        pulse_bus.send(pulse);
+                    } else {
+                        observer.log(
+                            ObserverCategory::StochasticRoll,
+                            format!("Idle musing suppressed by gate (spontaneity={:.2})", spontaneity),
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Idle musing LLM call failed: {}", e);
@@ -292,6 +303,7 @@ If yes, write it (1-2 sentences). If not, respond with: NO_FOLLOWUP"#,
                 if trimmed == "NO_FOLLOWUP" || trimmed.contains("NO_FOLLOWUP") {
                     return;
                 }
+                let _ = memory.store("reentry", trimmed, None);
                 let pulse = Pulse::new(
                     PulseSource::ConversationReentry,
                     Urgency::Low,

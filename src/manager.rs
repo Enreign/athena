@@ -20,6 +20,7 @@ pub struct Manager {
     memory: Arc<MemoryStore>,
     embedder: Option<Arc<Embedder>>,
     persona_soul: Option<String>,
+    self_knowledge: Option<String>,
     mood: Arc<MoodState>,
     knobs: SharedKnobs,
 }
@@ -33,6 +34,7 @@ impl Manager {
         memory: Arc<MemoryStore>,
         embedder: Option<Arc<Embedder>>,
         persona_soul: Option<String>,
+        self_knowledge: Option<String>,
         mood: Arc<MoodState>,
         knobs: SharedKnobs,
     ) -> Self {
@@ -50,6 +52,7 @@ impl Manager {
             memory,
             embedder,
             persona_soul,
+            self_knowledge,
             mood,
             knobs,
         }
@@ -225,8 +228,13 @@ impl Manager {
             None => String::new(),
         };
 
+        let self_knowledge_section = match &self.self_knowledge {
+            Some(knowledge) => format!("{}\n\n", knowledge),
+            None => String::new(),
+        };
+
         let system = format!(
-r#"{}You are a manager that classifies user requests and delegates tasks.
+r#"{}{}You are a manager that classifies user requests and delegates tasks.
 When answering simple questions directly, stay in character — use the personality and tone from your soul document above. You know the user personally; use their profile to give personal, contextual answers.
 
 Available ghosts:
@@ -245,6 +253,7 @@ Respond with JSON:
 - Simple: {{"type": "simple", "answer": "your direct answer (in character, using user profile context)"}}
 - Complex: {{"type": "complex", "ghost": "<ghost_name>", "goal": "<clear goal for ghost>", "context": "<relevant context>"}}"#,
             persona_section,
+            self_knowledge_section,
             ghost_list,
             memory_context,
             user_context,

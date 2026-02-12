@@ -102,10 +102,7 @@ impl MoodState {
                 format!("Mood shift: {} -> {} (energy: {:.2}, valence: {:.2})", old_modifier, modifier, energy, valence),
             );
         } else {
-            observer.log(
-                ObserverCategory::EnergyShift,
-                format!("Energy: {:.2}, Valence: {:.2}, Modifier: {}", energy, valence, modifier),
-            );
+            tracing::debug!(energy = %energy, valence = %valence, modifier = %modifier, "Mood drift (no shift)");
         }
     }
 

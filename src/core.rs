@@ -299,9 +299,10 @@ impl AthenaCore {
         cron_engine.clone().spawn_tick_loop();
 
         let persona_soul = config.persona.soul.clone();
+        let self_knowledge = config.persona.self_knowledge.clone();
         let manager = Arc::new(Manager::new(
             &config, merged_ghosts, llm, classifier, memory.clone(), embedder, persona_soul,
-            mood.clone(), knobs.clone(),
+            self_knowledge, mood.clone(), knobs.clone(),
         ));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 

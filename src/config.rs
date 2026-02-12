@@ -345,6 +345,8 @@ pub struct GhostConfig {
     /// Runtime-loaded soul content (not serialized)
     #[serde(skip)]
     pub soul: Option<String>,
+    /// Docker image override (uses global docker.image if None)
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -354,6 +356,11 @@ pub struct PersonaConfig {
     /// Runtime-loaded soul content (not serialized)
     #[serde(skip)]
     pub soul: Option<String>,
+    /// Path to technical self-knowledge document
+    pub self_file: Option<String>,
+    /// Runtime-loaded self-knowledge content (not serialized)
+    #[serde(skip)]
+    pub self_knowledge: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -478,6 +485,7 @@ fn default_ghosts() -> Vec<GhostConfig> {
             strategy: "react".into(),
             soul_file: None,
             soul: None,
+            image: None,
         },
         GhostConfig {
             name: "scout".into(),
@@ -491,6 +499,7 @@ fn default_ghosts() -> Vec<GhostConfig> {
             strategy: "react".into(),
             soul_file: None,
             soul: None,
+            image: None,
         },
     ]
 }
@@ -537,6 +546,15 @@ impl Config {
                     self.persona.soul = Some(content);
                 }
                 Err(e) => tracing::warn!("Failed to load persona soul {}: {}", path, e),
+            }
+        }
+        if let Some(ref path) = self.persona.self_file {
+            match load_soul_file(path) {
+                Ok(content) => {
+                    tracing::info!("Loaded self-knowledge from {}", path);
+                    self.persona.self_knowledge = Some(content);
+                }
+                Err(e) => tracing::warn!("Failed to load self-knowledge {}: {}", path, e),
             }
         }
         for ghost in &mut self.ghosts {
@@ -718,7 +736,7 @@ impl Config {
 }
 
 /// Resolve a path (expanding ~) and read the file contents.
-fn load_soul_file(path: &str) -> std::result::Result<String, String> {
+pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
     let resolved = if path.starts_with("~/") {
         dirs::home_dir()
             .map(|h| h.join(&path[2..]))

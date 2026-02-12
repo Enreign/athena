@@ -78,10 +78,6 @@ pub fn spawn_heartbeat_loop(
             }
 
             let sleep_dur = randomness::jitter_interval(interval, jitter);
-            observer.log(
-                ObserverCategory::Heartbeat,
-                format!("Sleeping for {}s until next heartbeat", sleep_dur.as_secs()),
-            );
             tokio::time::sleep(sleep_dur).await;
 
             // Re-check knobs after sleeping
@@ -91,8 +87,6 @@ pub fn spawn_heartbeat_loop(
                     continue;
                 }
             }
-
-            observer.log(ObserverCategory::Heartbeat, "Heartbeat tick - waking up");
 
             // 1. Load HEARTBEAT.md items and sample a subset
             let items = load_heartbeat_items(&soul_file);
@@ -163,6 +157,7 @@ Based on all this, do you have anything worth sharing? If yes, write a brief, na
                             "Heartbeat: nothing to say (suppressed)",
                         );
                     } else {
+                        let _ = memory.store("heartbeat", trimmed, None);
                         let pulse = Pulse::new(
                             PulseSource::Heartbeat,
                             Urgency::Low,

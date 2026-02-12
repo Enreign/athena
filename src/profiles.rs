@@ -16,6 +16,8 @@ struct GhostProfile {
     mounts: Vec<MountConfig>,
     /// Path to a soul file (markdown identity document)
     soul_file: Option<String>,
+    /// Docker image override
+    image: Option<String>,
 }
 
 fn default_strategy() -> String {
@@ -57,6 +59,19 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
             Ok(profile) => {
                 tracing::info!("Loaded ghost profile: {} ({})", profile.name, path.display());
 
+                let soul = profile.soul_file.as_ref().and_then(|path| {
+                    match crate::config::load_soul_file(path) {
+                        Ok(content) => {
+                            tracing::info!("Loaded soul for profile ghost '{}' from {}", profile.name, path);
+                            Some(content)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load soul for profile ghost '{}': {}", profile.name, e);
+                            None
+                        }
+                    }
+                });
+
                 let ghost = GhostConfig {
                     name: profile.name.clone(),
                     description: profile.description,
@@ -64,7 +79,8 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
                     strategy: profile.strategy,
                     mounts: profile.mounts,
                     soul_file: profile.soul_file,
-                    soul: None,
+                    soul,
+                    image: profile.image,
                 };
 
                 // Deduplicate: profile overrides config ghost with same name

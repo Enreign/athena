@@ -59,8 +59,10 @@ impl DockerSession {
 
         let container_name = format!("athena-{}-{}", ghost.name, uuid::Uuid::new_v4().simple());
 
+        let image = ghost.image.as_deref().unwrap_or(&docker_config.image);
+
         let config = ContainerConfig {
-            image: Some(docker_config.image.clone()),
+            image: Some(image.to_string()),
             user: Some("65534:65534".into()),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             working_dir: Some(

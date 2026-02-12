@@ -164,6 +164,13 @@ pub fn spawn_uds_listener(observer: ObserverHandle) {
             }
         };
 
+        // Restrict socket permissions to owner only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+
         tracing::debug!("Observer UDS listener started at {}", path.display());
 
         loop {
