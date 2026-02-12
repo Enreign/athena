@@ -151,7 +151,7 @@ Based on all this, do you have anything worth sharing? If yes, write a brief, na
             match llm.chat(&messages).await {
                 Ok(response) => {
                     let trimmed = response.trim();
-                    if trimmed == "NOTHING_TO_SAY" || trimmed.contains("NOTHING_TO_SAY") {
+                    if crate::proactive::is_refusal(trimmed) {
                         observer.log(
                             ObserverCategory::Heartbeat,
                             "Heartbeat: nothing to say (suppressed)",

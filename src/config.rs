@@ -125,6 +125,12 @@ pub struct TelegramConfig {
     /// Confirmation timeout in seconds
     #[serde(default = "default_confirm_timeout")]
     pub confirm_timeout_secs: u64,
+    /// Speech-to-text API URL (OpenAI Whisper-compatible endpoint)
+    pub stt_url: Option<String>,
+    /// STT API key (or set ATHENA_STT_API_KEY env var)
+    pub stt_api_key: Option<String>,
+    /// STT model name (default: whisper-large-v3)
+    pub stt_model: Option<String>,
 }
 
 impl std::fmt::Debug for TelegramConfig {
@@ -134,6 +140,9 @@ impl std::fmt::Debug for TelegramConfig {
             .field("allowed_chats", &self.allowed_chats)
             .field("allow_all", &self.allow_all)
             .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("stt_url", &self.stt_url)
+            .field("stt_api_key", &"[REDACTED]")
+            .field("stt_model", &self.stt_model)
             .finish()
     }
 }
@@ -145,6 +154,9 @@ impl Default for TelegramConfig {
             allowed_chats: vec![],
             allow_all: false,
             confirm_timeout_secs: default_confirm_timeout(),
+            stt_url: None,
+            stt_api_key: None,
+            stt_model: None,
         }
     }
 }

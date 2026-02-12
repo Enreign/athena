@@ -96,6 +96,26 @@ impl Manager {
             }
         }
 
+        // Summarize old turns if conversation is long (keep last 10 as full messages)
+        let (conversation_summary, recent_messages) = if recent.len() > 12 {
+            let split = recent.len() - 10;
+            let old = &recent[..split];
+            let summary_lines: Vec<String> = old
+                .iter()
+                .map(|(role, content)| {
+                    let truncated = if content.len() > 150 {
+                        format!("{}...", &content[..content.floor_char_boundary(150)])
+                    } else {
+                        content.clone()
+                    };
+                    format!("[{}] {}", role, truncated)
+                })
+                .collect();
+            (Some(summary_lines.join("\n")), recent[split..].to_vec())
+        } else {
+            (None, recent.clone())
+        };
+
         // Build enriched query from conversation context
         let user_context: Vec<&str> = recent
             .iter()
@@ -181,7 +201,8 @@ impl Manager {
         // Classify the request (pass conversation history for context)
         let classification = self.classify(
             user_input, &memory_context, &user_context_section,
-            &mood_section, &relationship_section, &recent,
+            &mood_section, &relationship_section, &recent_messages,
+            conversation_summary.as_deref(),
         ).await?;
 
         let answer = match classification {
@@ -222,6 +243,7 @@ impl Manager {
         &self, user_input: &str, memory_context: &str, user_context: &str,
         mood_section: &str, relationship_section: &str,
         recent_turns: &[(String, String)],
+        conversation_summary: Option<&str>,
     ) -> Result<Classification> {
         let ghost_list: String = self.ghosts.iter()
             .map(|g| format!("- {} — {}", g.name, g.description))
@@ -277,6 +299,13 @@ Respond with JSON:
             mood_section,
             relationship_section,
         );
+
+        // Append conversation summary to system prompt if available
+        let system = if let Some(summary) = conversation_summary {
+            format!("{}\n\nPrevious conversation (summarized):\n{}", system, summary)
+        } else {
+            system
+        };
 
         // Build message list: system prompt, then recent conversation history, then current input
         let mut messages = vec![Message::system(&system)];

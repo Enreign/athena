@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::core::SessionContext;
 use crate::knobs::SharedKnobs;
 use crate::llm::{LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
-use crate::pulse::{Pulse, PulseBus, PulseSource, Urgency};
+use crate::pulse::{Pulse, PulseBus, PulseSource, PulseTarget, Urgency};
 use crate::randomness;
 
 /// Tracks the timestamp of the last user interaction (epoch seconds).
@@ -107,7 +108,7 @@ If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. 
             match llm.chat(&messages).await {
                 Ok(response) => {
                     let trimmed = response.trim();
-                    if trimmed == "NO_PATTERN" || trimmed.contains("NO_PATTERN") {
+                    if is_refusal(trimmed) {
                         observer.log(ObserverCategory::MemoryScan, "No patterns found");
                         continue;
                     }
@@ -300,15 +301,17 @@ If yes, write it (1-2 sentences). If not, respond with: NO_FOLLOWUP"#,
         match llm.chat(&messages).await {
             Ok(response) => {
                 let trimmed = response.trim();
-                if trimmed == "NO_FOLLOWUP" || trimmed.contains("NO_FOLLOWUP") {
+                if is_refusal(trimmed) {
                     return;
                 }
                 let _ = memory.store("reentry", trimmed, None);
+                // Target the specific session that originated the conversation
+                let target = parse_session_target(&session_key);
                 let pulse = Pulse::new(
                     PulseSource::ConversationReentry,
                     Urgency::Low,
                     trimmed.to_string(),
-                );
+                ).with_target(target);
                 pulse_bus.send(pulse);
             }
             Err(e) => {
@@ -316,6 +319,58 @@ If yes, write it (1-2 sentences). If not, respond with: NO_FOLLOWUP"#,
             }
         }
     });
+}
+
+/// Check if an LLM response is a refusal / "nothing to say" variant.
+/// Catches exact magic strings, short negatives, and common refusal phrases.
+pub fn is_refusal(text: &str) -> bool {
+    let t = text.trim();
+    let lower = t.to_lowercase();
+
+    // Exact magic strings from prompts
+    if lower.contains("nothing_to_say") || lower.contains("no_pattern") || lower.contains("no_followup") {
+        return true;
+    }
+
+    // Very short responses that are just negatives
+    if t.len() < 20 {
+        let stripped = lower.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
+        if matches!(stripped, "no" | "nothing" | "none" | "nope" | "n/a" | "na" | "not" | "pass") {
+            return true;
+        }
+    }
+
+    // Common refusal phrases
+    if lower.contains("nothing to say")
+        || lower.contains("nothing to share")
+        || lower.contains("nothing worth")
+        || lower.contains("nothing stands out")
+        || lower.contains("nothing meaningful")
+        || lower.contains("no meaningful")
+        || lower.contains("don't have anything")
+        || lower.contains("i have nothing")
+        || lower.contains("no pattern")
+        || lower.contains("no follow")
+        || lower.contains("no insight")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Parse a session key "platform:user_id:chat_id" into a targeted PulseTarget.
+fn parse_session_target(session_key: &str) -> PulseTarget {
+    let parts: Vec<&str> = session_key.splitn(3, ':').collect();
+    if parts.len() == 3 {
+        PulseTarget::Session(SessionContext {
+            platform: parts[0].to_string(),
+            user_id: parts[1].to_string(),
+            chat_id: parts[2].to_string(),
+        })
+    } else {
+        PulseTarget::Broadcast
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

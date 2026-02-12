@@ -62,6 +62,76 @@ async fn send_html(bot: &Bot, chat_id: ChatId, html: &str) -> ResponseResult<()>
     Ok(())
 }
 
+/// Transcribe a Telegram voice message using a Whisper-compatible STT API.
+async fn transcribe_voice(
+    bot: &Bot,
+    voice: &teloxide::types::Voice,
+    config: &TelegramConfig,
+) -> std::result::Result<String, String> {
+    let stt_url = config
+        .stt_url
+        .as_deref()
+        .ok_or("Voice messages require STT configuration. Set [telegram] stt_url in config.")?;
+    let stt_key = config
+        .stt_api_key
+        .clone()
+        .or_else(|| std::env::var("ATHENA_STT_API_KEY").ok())
+        .ok_or("STT API key not configured. Set stt_api_key or ATHENA_STT_API_KEY env var.")?;
+    let stt_model = config.stt_model.as_deref().unwrap_or("whisper-large-v3");
+
+    // Download voice file from Telegram
+    let file = bot
+        .get_file(&voice.file.id)
+        .await
+        .map_err(|e| format!("Failed to get voice file: {}", e))?;
+
+    let download_url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot.token(),
+        file.path
+    );
+    let bytes = reqwest::get(&download_url)
+        .await
+        .map_err(|e| format!("Failed to download voice: {}", e))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read voice data: {}", e))?;
+
+    // POST to Whisper-compatible STT API
+    let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name("voice.ogg")
+        .mime_str("audio/ogg")
+        .unwrap();
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", stt_model.to_string());
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(stt_url)
+        .bearer_auth(&stt_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("STT request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("STT error ({}): {}", status, body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse STT response: {}", e))?;
+
+    json["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "STT response missing 'text' field".to_string())
+}
+
 // ── Confirmer ────────────────────────────────────────────────────────
 
 /// Telegram confirmer: sends inline keyboard, waits on oneshot with timeout.
@@ -164,13 +234,8 @@ fn is_authorized(chat_id: i64, config: &TelegramConfig) -> bool {
 
 // ── Message handler ──────────────────────────────────────────────────
 
-/// Handle an incoming text message.
+/// Handle an incoming message (text, voice, or photo).
 async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> ResponseResult<()> {
-    let text = match msg.text() {
-        Some(t) => t.to_string(),
-        None => return Ok(()),
-    };
-
     let chat_id = msg.chat.id;
 
     // C2: Auth check using allow_all
@@ -180,6 +245,42 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
             .await?;
         return Ok(());
     }
+
+    // ── Extract text from message (text, voice, or photo) ─────────
+
+    let text = if let Some(t) = msg.text() {
+        t.to_string()
+    } else if let Some(voice) = msg.voice() {
+        match transcribe_voice(&bot, voice, &state.config).await {
+            Ok(transcript) => {
+                // Show transcription to user
+                send_html(&bot, chat_id, &format!("<i>🎙 {}</i>", escape_html(&transcript))).await?;
+                transcript
+            }
+            Err(e) => {
+                send_html(&bot, chat_id, &format!("<i>{}</i>", escape_html(&e))).await?;
+                return Ok(());
+            }
+        }
+    } else if msg.photo().is_some() {
+        send_html(
+            &bot,
+            chat_id,
+            "<i>I can't process images yet — please describe what you need in text.</i>",
+        )
+        .await?;
+        return Ok(());
+    } else if msg.document().is_some() {
+        send_html(
+            &bot,
+            chat_id,
+            "<i>I can't process files yet — please paste the relevant content as text.</i>",
+        )
+        .await?;
+        return Ok(());
+    } else {
+        return Ok(());
+    };
 
     // ── Slash commands (no rate limit) ───────────────────────────────
 
@@ -675,9 +776,16 @@ pub async fn run_telegram(
                     escape_html(label),
                     escape_html(&pulse.content)
                 );
-                for &chat_id in &allowed_chats {
+                // Targeted delivery: send to specific chat or broadcast to all
+                let target_chats: Vec<i64> = match &pulse.target {
+                    crate::pulse::PulseTarget::Session(ctx) if ctx.platform == "telegram" => {
+                        ctx.chat_id.parse::<i64>().ok().into_iter().collect()
+                    }
+                    _ => allowed_chats.clone(),
+                };
+                for chat_id in &target_chats {
                     let _ = bot_for_pulses
-                        .send_message(ChatId(chat_id), &html)
+                        .send_message(ChatId(*chat_id), &html)
                         .parse_mode(ParseMode::Html)
                         .await;
                 }
