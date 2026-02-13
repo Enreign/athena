@@ -8,7 +8,7 @@ use bollard::Docker;
 use futures::StreamExt;
 use std::collections::HashMap;
 
-use crate::config::{AgentConfig, Config, DockerConfig};
+use crate::config::{GhostConfig, Config, DockerConfig};
 use crate::error::{AthenaError, Result};
 
 pub struct DockerSession {
@@ -18,9 +18,9 @@ pub struct DockerSession {
 }
 
 impl DockerSession {
-    /// Create and start a hardened container for an agent task
+    /// Create and start a hardened container for a ghost task
     pub async fn new(
-        agent: &AgentConfig,
+        ghost: &GhostConfig,
         docker_config: &DockerConfig,
     ) -> Result<Self> {
         let docker = Docker::connect_with_socket(
@@ -30,7 +30,7 @@ impl DockerSession {
         )?;
 
         // Build mounts
-        let mounts: Vec<Mount> = agent.mounts.iter().map(|m| {
+        let mut mounts: Vec<Mount> = ghost.mounts.iter().map(|m| {
             let host = Config::resolve_mount_path(&m.host_path);
             Mount {
                 target: Some(m.container_path.clone()),
@@ -41,13 +41,29 @@ impl DockerSession {
             }
         }).collect();
 
+        // Mount host cargo registry (read-only) so `cargo check/test` works offline
+        let cargo_home = std::env::var("CARGO_HOME")
+            .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
+        let cargo_registry = format!("{}/registry", cargo_home);
+        if std::path::Path::new(&cargo_registry).exists() {
+            mounts.push(Mount {
+                target: Some("/usr/local/cargo/registry".into()),
+                source: Some(cargo_registry),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
         let host_config = HostConfig {
             mounts: Some(mounts),
             readonly_rootfs: Some(true),
             cap_drop: Some(vec!["ALL".into()]),
+            security_opt: Some(vec!["no-new-privileges:true".into()]),
             network_mode: Some("none".into()),
             memory: Some(docker_config.memory_limit),
             cpu_quota: Some(docker_config.cpu_quota),
+            pids_limit: Some(256),
             // Writable /tmp for tools that need scratch space
             tmpfs: Some(HashMap::from([
                 ("/tmp".into(), "rw,noexec,nosuid,size=64m".into()),
@@ -55,13 +71,16 @@ impl DockerSession {
             ..Default::default()
         };
 
-        let container_name = format!("athena-{}-{}", agent.name, uuid::Uuid::new_v4().simple());
+        let container_name = format!("athena-{}-{}", ghost.name, uuid::Uuid::new_v4().simple());
+
+        let image = ghost.image.as_deref().unwrap_or(&docker_config.image);
 
         let config = ContainerConfig {
-            image: Some(docker_config.image.clone()),
+            image: Some(image.to_string()),
+            user: Some("65534:65534".into()),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             working_dir: Some(
-                agent.mounts.first()
+                ghost.mounts.first()
                     .map(|m| m.container_path.clone())
                     .unwrap_or_else(|| "/".into())
             ),
@@ -80,7 +99,7 @@ impl DockerSession {
             .start_container(&resp.id, None::<StartContainerOptions<String>>)
             .await?;
 
-        tracing::info!(container_id = %resp.id, agent = %agent.name, "Container started");
+        tracing::info!(container_id = %resp.id, ghost = %ghost.name, "Container started");
 
         Ok(Self {
             docker,
@@ -112,9 +131,10 @@ impl DockerSession {
 
     /// Execute a command with stdin input (for file writes)
     pub async fn exec_with_stdin(&self, cmd: &str, stdin_data: &str) -> Result<String> {
-        // Write via shell heredoc to avoid stdin attachment complexity
-        let escaped = stdin_data.replace('\'', "'\\''");
-        let full_cmd = format!("printf '%s' '{}' | {}", escaped, cmd);
+        // Encode stdin data as base64 to avoid shell injection via crafted content
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(stdin_data.as_bytes());
+        let full_cmd = format!("echo '{}' | base64 -d | {}", encoded, cmd);
         self.exec(&full_cmd).await
     }
 

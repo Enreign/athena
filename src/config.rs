@@ -23,9 +23,23 @@ pub struct Config {
     #[serde(default)]
     pub manager: ManagerConfig,
     #[serde(default)]
-    pub agents: Vec<AgentConfig>,
+    pub ghosts: Vec<GhostConfig>,
+    #[serde(default)]
+    pub persona: PersonaConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub mood: MoodConfig,
+    #[serde(default)]
+    pub proactive: ProactiveConfig,
+    #[serde(default)]
+    pub initiative: InitiativeConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -42,7 +56,7 @@ impl Default for LlmConfig {
 
 fn default_provider() -> String { "ollama".into() }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct OpenRouterConfig {
     #[serde(default = "default_openrouter_url")]
     pub url: String,
@@ -53,11 +67,28 @@ pub struct OpenRouterConfig {
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+}
+
+impl std::fmt::Debug for OpenRouterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenRouterConfig")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("classifier_model", &self.classifier_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
+            .finish()
+    }
 }
 
 fn default_openrouter_url() -> String { "https://openrouter.ai/api/v1".into() }
+fn default_context_window() -> u64 { 128_000 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct ZenConfig {
     #[serde(default = "default_zen_url")]
     pub url: String,
@@ -68,20 +99,59 @@ pub struct ZenConfig {
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+}
+
+impl std::fmt::Debug for ZenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZenConfig")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("classifier_model", &self.classifier_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
+            .finish()
+    }
 }
 
 fn default_zen_url() -> String { "https://opencode.ai/zen/v1".into() }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct TelegramConfig {
     /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
     pub token: Option<String>,
-    /// Allowed chat IDs (empty = allow all, logs warning)
+    /// Allowed chat IDs (empty = deny all unless allow_all = true)
     #[serde(default)]
     pub allowed_chats: Vec<i64>,
+    /// Allow all chats (must be explicitly set to true)
+    #[serde(default)]
+    pub allow_all: bool,
     /// Confirmation timeout in seconds
     #[serde(default = "default_confirm_timeout")]
     pub confirm_timeout_secs: u64,
+    /// Speech-to-text API URL (OpenAI Whisper-compatible endpoint)
+    pub stt_url: Option<String>,
+    /// STT API key (or set ATHENA_STT_API_KEY env var)
+    pub stt_api_key: Option<String>,
+    /// STT model name (default: whisper-large-v3)
+    pub stt_model: Option<String>,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("token", &"[REDACTED]")
+            .field("allowed_chats", &self.allowed_chats)
+            .field("allow_all", &self.allow_all)
+            .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("stt_url", &self.stt_url)
+            .field("stt_api_key", &"[REDACTED]")
+            .field("stt_model", &self.stt_model)
+            .finish()
+    }
 }
 
 impl Default for TelegramConfig {
@@ -89,7 +159,11 @@ impl Default for TelegramConfig {
         Self {
             token: None,
             allowed_chats: vec![],
+            allow_all: false,
             confirm_timeout_secs: default_confirm_timeout(),
+            stt_url: None,
+            stt_api_key: None,
+            stt_model: None,
         }
     }
 }
@@ -97,6 +171,148 @@ impl Default for TelegramConfig {
 fn default_confirm_timeout() -> u64 {
     300
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmbeddingConfig {
+    #[serde(default = "default_embedding_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_model_dir")]
+    pub model_dir: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_embedding_enabled(),
+            model_dir: default_model_dir(),
+        }
+    }
+}
+
+fn default_embedding_enabled() -> bool { true }
+fn default_model_dir() -> String { "~/.athena/models/all-MiniLM-L6-v2".into() }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryConfig {
+    #[serde(default = "default_half_life")]
+    pub recency_half_life_days: f32,
+    #[serde(default = "default_dedup_threshold")]
+    pub dedup_threshold: f32,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            recency_half_life_days: default_half_life(),
+            dedup_threshold: default_dedup_threshold(),
+        }
+    }
+}
+
+fn default_half_life() -> f32 { 30.0 }
+fn default_dedup_threshold() -> f32 { 0.95 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HeartbeatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_heartbeat_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_heartbeat_jitter")]
+    pub jitter: f64,
+    pub soul_file: Option<String>,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_heartbeat_interval(),
+            jitter: default_heartbeat_jitter(),
+            soul_file: None,
+        }
+    }
+}
+
+fn default_heartbeat_interval() -> u64 { 1800 }
+fn default_heartbeat_jitter() -> f64 { 0.2 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MoodConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub timezone_offset: i32,
+    #[serde(default = "default_mood_drift_interval")]
+    pub drift_interval_secs: u64,
+}
+
+impl Default for MoodConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timezone_offset: 0,
+            drift_interval_secs: default_mood_drift_interval(),
+        }
+    }
+}
+
+fn default_mood_drift_interval() -> u64 { 900 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProactiveConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_memory_scan_interval")]
+    pub memory_scan_interval_secs: u64,
+    #[serde(default = "default_idle_threshold")]
+    pub idle_threshold_secs: u64,
+    #[serde(default = "default_spontaneity")]
+    pub spontaneity: f32,
+    #[serde(default = "default_reentry_delay")]
+    pub reentry_delay_secs: u64,
+    #[serde(default = "default_reentry_jitter")]
+    pub reentry_jitter: f64,
+}
+
+impl Default for ProactiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            memory_scan_interval_secs: default_memory_scan_interval(),
+            idle_threshold_secs: default_idle_threshold(),
+            spontaneity: default_spontaneity(),
+            reentry_delay_secs: default_reentry_delay(),
+            reentry_jitter: default_reentry_jitter(),
+        }
+    }
+}
+
+fn default_memory_scan_interval() -> u64 { 3600 }
+fn default_idle_threshold() -> u64 { 1800 }
+fn default_spontaneity() -> f32 { 0.3 }
+fn default_reentry_delay() -> u64 { 7200 } // 2 hours
+fn default_reentry_jitter() -> f64 { 0.7 } // ±70% → 36min to 3h24m
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct InitiativeConfig {
+    #[serde(default = "default_tolerance")]
+    pub tolerance: f32,
+    pub quiet_hours_start: Option<u32>,
+    pub quiet_hours_end: Option<u32>,
+}
+
+impl Default for InitiativeConfig {
+    fn default() -> Self {
+        Self {
+            tolerance: default_tolerance(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+        }
+    }
+}
+
+fn default_tolerance() -> f32 { 0.5 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OllamaConfig {
@@ -139,10 +355,12 @@ pub struct ManagerConfig {
     pub max_steps: usize,
     #[serde(default = "default_sensitive_patterns")]
     pub sensitive_patterns: Vec<String>,
+    /// Directory containing dynamic tool YAML definitions (default: ~/.athena/dynamic_tools/)
+    pub dynamic_tools_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct AgentConfig {
+pub struct GhostConfig {
     pub name: String,
     pub description: String,
     #[serde(default)]
@@ -151,6 +369,32 @@ pub struct AgentConfig {
     pub mounts: Vec<MountConfig>,
     #[serde(default = "default_strategy")]
     pub strategy: String,
+    /// Path to a soul file (markdown identity document)
+    pub soul_file: Option<String>,
+    /// Runtime-loaded soul content (not serialized)
+    #[serde(skip)]
+    pub soul: Option<String>,
+    /// Docker image override (uses global docker.image if None)
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PersonaConfig {
+    /// Path to Athena's soul file
+    pub soul_file: Option<String>,
+    /// Runtime-loaded soul content (not serialized)
+    #[serde(skip)]
+    pub soul: Option<String>,
+    /// Path to technical self-knowledge document
+    pub self_file: Option<String>,
+    /// Runtime-loaded self-knowledge content (not serialized)
+    #[serde(skip)]
+    pub self_knowledge: Option<String>,
+    /// Path to tool reference document (injected into ghost system prompts)
+    pub tools_file: Option<String>,
+    /// Runtime-loaded tools document content (not serialized)
+    #[serde(skip)]
+    pub tools_doc: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -181,6 +425,20 @@ fn default_sensitive_patterns() -> Vec<String> {
         r"sudo".into(),
         r"curl.*\|.*sh".into(),
         r"chmod.*777".into(),
+        r"unlink\s".into(),
+        r"shred\s".into(),
+        r"find\s.*-delete".into(),
+        r"dd\s.*of=".into(),
+        r"curl\s".into(),
+        r"wget\s".into(),
+        r"nc\s".into(),
+        r"apt\s".into(),
+        r"pip\s".into(),
+        r"kill\s".into(),
+        r"config\.toml".into(),
+        r"\.env".into(),
+        r"/etc/".into(),
+        r"~/\.ssh".into(),
     ]
 }
 
@@ -220,7 +478,25 @@ impl Default for ManagerConfig {
         Self {
             max_steps: default_max_steps(),
             sensitive_patterns: default_sensitive_patterns(),
+            dynamic_tools_path: None,
         }
+    }
+}
+
+impl ManagerConfig {
+    /// Resolve the dynamic tools directory, expanding ~ to home dir.
+    /// Falls back to ~/.athena/dynamic_tools/ if not configured.
+    pub fn resolve_dynamic_tools_path(&self) -> Option<std::path::PathBuf> {
+        let raw = self.dynamic_tools_path.clone()
+            .unwrap_or_else(|| "~/.athena/dynamic_tools".into());
+
+        let path = if raw.starts_with("~/") {
+            dirs::home_dir().map(|h| h.join(&raw[2..]))?
+        } else {
+            std::path::PathBuf::from(&raw)
+        };
+
+        Some(path)
     }
 }
 
@@ -234,15 +510,22 @@ impl Default for Config {
             docker: DockerConfig::default(),
             db: DbConfig::default(),
             manager: ManagerConfig::default(),
-            agents: default_agents(),
+            ghosts: default_ghosts(),
+            persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
+            embedding: EmbeddingConfig::default(),
+            memory: MemoryConfig::default(),
+            heartbeat: HeartbeatConfig::default(),
+            mood: MoodConfig::default(),
+            proactive: ProactiveConfig::default(),
+            initiative: InitiativeConfig::default(),
         }
     }
 }
 
-fn default_agents() -> Vec<AgentConfig> {
+fn default_ghosts() -> Vec<GhostConfig> {
     vec![
-        AgentConfig {
+        GhostConfig {
             name: "coder".into(),
             description: "Reads, writes, and modifies code files. Can run build/test commands.".into(),
             tools: vec!["file_read".into(), "file_write".into(), "shell".into()],
@@ -252,8 +535,11 @@ fn default_agents() -> Vec<AgentConfig> {
                 read_only: false,
             }],
             strategy: "react".into(),
+            soul_file: None,
+            soul: None,
+            image: None,
         },
-        AgentConfig {
+        GhostConfig {
             name: "scout".into(),
             description: "Explores files and runs read-only commands. Cannot modify anything.".into(),
             tools: vec!["file_read".into(), "shell".into()],
@@ -263,6 +549,9 @@ fn default_agents() -> Vec<AgentConfig> {
                 read_only: true,
             }],
             strategy: "react".into(),
+            soul_file: None,
+            soul: None,
+            image: None,
         },
     ]
 }
@@ -292,10 +581,70 @@ impl Config {
         let contents = std::fs::read_to_string(&config_path)
             .map_err(|e| AthenaError::Config(format!("Failed to read {}: {}", config_path.display(), e)))?;
 
-        let config: Config = toml::from_str(&contents)
+        let mut config: Config = toml::from_str(&contents)
             .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?;
 
+        config.validate();
+        config.load_souls();
         Ok(config)
+    }
+
+    /// Load soul file contents for persona and all ghosts
+    fn load_souls(&mut self) {
+        if let Some(ref path) = self.persona.soul_file {
+            match load_soul_file(path) {
+                Ok(content) => {
+                    tracing::info!("Loaded persona soul from {}", path);
+                    self.persona.soul = Some(content);
+                }
+                Err(e) => tracing::warn!("Failed to load persona soul {}: {}", path, e),
+            }
+        }
+        if let Some(ref path) = self.persona.self_file {
+            match load_soul_file(path) {
+                Ok(content) => {
+                    tracing::info!("Loaded self-knowledge from {}", path);
+                    self.persona.self_knowledge = Some(content);
+                }
+                Err(e) => tracing::warn!("Failed to load self-knowledge {}: {}", path, e),
+            }
+        }
+        if let Some(ref path) = self.persona.tools_file {
+            match load_soul_file(path) {
+                Ok(content) => {
+                    tracing::info!("Loaded tools reference from {}", path);
+                    self.persona.tools_doc = Some(content);
+                }
+                Err(e) => tracing::warn!("Failed to load tools reference {}: {}", path, e),
+            }
+        }
+        for ghost in &mut self.ghosts {
+            if let Some(ref path) = ghost.soul_file {
+                match load_soul_file(path) {
+                    Ok(content) => {
+                        tracing::info!("Loaded soul for ghost '{}' from {}", ghost.name, path);
+                        ghost.soul = Some(content);
+                    }
+                    Err(e) => tracing::warn!("Failed to load soul for ghost '{}' from {}: {}", ghost.name, path, e),
+                }
+            }
+        }
+    }
+
+    /// Warn about potentially insecure configuration
+    fn validate(&self) {
+        // M3: Warn on non-loopback HTTP URLs
+        let url = &self.ollama.url;
+        if url.starts_with("http://") {
+            if let Some(host) = url.strip_prefix("http://").and_then(|s| s.split(':').next()) {
+                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
+                    tracing::warn!(
+                        url = %url,
+                        "Ollama URL uses unencrypted HTTP to a non-loopback address — traffic may be intercepted"
+                    );
+                }
+            }
+        }
     }
 
     /// Build the configured LLM provider
@@ -319,6 +668,7 @@ impl Config {
                         model: cfg.model.clone(),
                         temperature: cfg.temperature,
                         max_tokens: cfg.max_tokens,
+                        context_window: cfg.context_window,
                     },
                     "OpenRouter",
                 )))
@@ -340,6 +690,7 @@ impl Config {
                         model: cfg.model.clone(),
                         temperature: cfg.temperature,
                         max_tokens: cfg.max_tokens,
+                        context_window: cfg.context_window,
                     },
                     "Opencode Zen",
                 )))
@@ -348,8 +699,8 @@ impl Config {
         }
     }
 
-    /// Build the classifier LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_classifier_provider(&self, fallback: &Arc<dyn LlmProvider>) -> Result<Arc<dyn LlmProvider>> {
+    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
+    pub fn build_orchestrator_provider(&self, fallback: &Arc<dyn LlmProvider>) -> Result<Arc<dyn LlmProvider>> {
         match self.llm.provider.as_str() {
             "ollama" => {
                 match &self.ollama.classifier_model {
@@ -375,8 +726,9 @@ impl Config {
                                 model: model.clone(),
                                 temperature: cfg.temperature,
                                 max_tokens: cfg.max_tokens,
+                                context_window: cfg.context_window,
                             },
-                            "OpenRouter/classifier",
+                            "OpenRouter/orchestrator",
                         )))
                     }
                     None => Ok(fallback.clone()),
@@ -396,8 +748,9 @@ impl Config {
                                 model: model.clone(),
                                 temperature: cfg.temperature,
                                 max_tokens: cfg.max_tokens,
+                                context_window: cfg.context_window,
                             },
-                            "Zen/classifier",
+                            "Zen/orchestrator",
                         )))
                     }
                     None => Ok(fallback.clone()),
@@ -419,6 +772,18 @@ impl Config {
         Ok(path)
     }
 
+    /// Resolve the embedding model directory, expanding ~ to home dir
+    pub fn resolve_model_dir(&self) -> Result<PathBuf> {
+        let path = if self.embedding.model_dir.starts_with("~/") {
+            let home = dirs::home_dir()
+                .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
+            home.join(&self.embedding.model_dir[2..])
+        } else {
+            PathBuf::from(&self.embedding.model_dir)
+        };
+        Ok(path)
+    }
+
     /// Resolve a mount host_path relative to cwd
     pub fn resolve_mount_path(host_path: &str) -> String {
         if host_path == "." {
@@ -433,4 +798,17 @@ impl Config {
             host_path.into()
         }
     }
+}
+
+/// Resolve a path (expanding ~) and read the file contents.
+pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
+    let resolved = if path.starts_with("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(&path[2..]))
+            .ok_or_else(|| "Cannot find home directory".to_string())?
+    } else {
+        PathBuf::from(path)
+    };
+    std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("{}: {}", resolved.display(), e))
 }
