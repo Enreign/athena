@@ -946,6 +946,92 @@ impl Tool for LintTool {
     }
 }
 
+// ── TestRunner tool ──────────────────────────────────────────────────
+
+struct TestRunnerTool;
+
+/// Detect test command from project structure
+fn detect_test_command(path: &str) -> String {
+    let escaped = path.replace('\'', "'\\''");
+
+    // Check for common project files to determine language/framework
+    // The path argument indicates the project root or specific test file
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    match ext {
+        "rs" => "test -f Cargo.toml && cargo test 2>&1 || echo 'No Cargo.toml found'".to_string(),
+        "py" => format!("python3 -m pytest '{}' -v 2>&1 || python3 -m unittest '{}' -v 2>&1", escaped, escaped),
+        "js" | "ts" | "jsx" | "tsx" => {
+            "if test -f package.json; then npm test 2>&1; else echo 'No package.json found'; fi".to_string()
+        }
+        "go" => "go test ./... -v 2>&1".to_string(),
+        // No extension — treat as project root, auto-detect
+        "" | _ => {
+            format!(
+                "if test -f Cargo.toml; then cargo test 2>&1; \
+                 elif test -f package.json; then npm test 2>&1; \
+                 elif test -f go.mod; then go test ./... -v 2>&1; \
+                 elif test -f setup.py || test -f pyproject.toml; then python3 -m pytest -v 2>&1; \
+                 else echo 'No test framework detected in {}'; fi",
+                escaped
+            )
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for TestRunnerTool {
+    fn name(&self) -> &str { "test_runner" }
+    fn description(&self) -> String {
+        "Run tests: {\"tool\": \"test_runner\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"test_runner\", \"params\": {\"command\": \"cargo test\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File or project root to test (auto-detects framework)" },
+                "command": { "type": "string", "description": "Explicit test command to run (overrides path)" }
+            }
+        })
+    }
+
+    async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        let path = params.get("path").and_then(|v| v.as_str());
+        let command = params.get("command").and_then(|v| v.as_str());
+
+        let cmd = match (command, path) {
+            (Some(c), _) => format!("{} 2>&1", c),
+            (None, Some(p)) => {
+                if let Err(reason) = validate_path(p) {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: reason.into(),
+                    });
+                }
+                detect_test_command(p)
+            }
+            (None, None) => detect_test_command("."),
+        };
+
+        let output = session.exec(&cmd).await?;
+
+        // Determine success based on output content
+        let tests_passed = !output.contains("FAILED")
+            && !output.contains("test result: FAILED")
+            && !output.contains("error[E");
+
+        Ok(ToolResult {
+            success: tests_passed,
+            output: truncate(&output, SEARCH_OUTPUT_LEN),
+        })
+    }
+}
+
 // ── Diff tool ───────────────────────────────────────────────────────
 
 struct DiffTool;
@@ -1592,6 +1678,7 @@ impl ToolRegistry {
             Box::new(WebSearchTool::new()),
             Box::new(CodebaseMapTool),
             Box::new(LintTool),
+            Box::new(TestRunnerTool),
             Box::new(DiffTool),
             Box::new(ClaudeCodeTool::new(&host_workspace, knobs.clone())),
             Box::new(CodexTool::new(&host_workspace, knobs.clone())),

@@ -7,6 +7,7 @@ use crate::confirm::{AutoConfirmer, Confirmer};
 use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::heartbeat;
+use crate::introspect::{self, SharedMetrics, SystemMetrics};
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
 use crate::llm::LlmProvider;
 use crate::manager::Manager;
@@ -108,6 +109,7 @@ pub struct CoreHandle {
     pub cron_engine: Option<Arc<CronEngine>>,
     pub delivered_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Pulse>>>,
     pub auto_tx: mpsc::Sender<AutonomousTask>,
+    pub metrics: SharedMetrics,
 }
 
 impl CoreHandle {
@@ -347,13 +349,42 @@ impl AthenaCore {
             Arc::new(ToolUsageStore::new(conn))
         };
 
+        // Spawn metrics collector
+        let metrics: SharedMetrics = Arc::new(std::sync::RwLock::new(SystemMetrics::default()));
+        {
+            let db_path = config.db_path().unwrap_or_default();
+            introspect::spawn_metrics_collector(
+                knobs.clone(),
+                observer.clone(),
+                metrics.clone(),
+                memory.clone(),
+                usage_store.clone(),
+                db_path,
+                auto_tx.clone(),
+            );
+        }
+
+        // Spawn code indexer and refactoring scanner (Phase 3)
+        proactive::spawn_code_indexer(
+            knobs.clone(),
+            observer.clone(),
+            auto_tx.clone(),
+        );
+        proactive::spawn_refactoring_scanner(
+            knobs.clone(),
+            observer.clone(),
+            llm.clone(),
+            memory.clone(),
+            auto_tx.clone(),
+        );
+
         let persona_soul = config.persona.soul.clone();
         let persona_soul_for_reentry = persona_soul.clone();
         let self_knowledge = config.persona.self_knowledge.clone();
         let tools_doc = config.persona.tools_doc.clone();
         let manager = Arc::new(Manager::new(
             &config, merged_ghosts, llm, orchestrator, memory.clone(), embedder, persona_soul,
-            self_knowledge, tools_doc, mood.clone(), knobs.clone(), usage_store,
+            self_knowledge, tools_doc, mood.clone(), knobs.clone(), usage_store, metrics.clone(),
         ));
         // Spawn hot-reload watcher for dynamic tools
         if let Some(dt_path) = manager.dynamic_tools_path() {
@@ -461,18 +492,23 @@ impl AthenaCore {
             let manager = manager_for_auto;
             let observer = observer.clone();
             let pulse_bus = pulse_bus.clone();
+            let memory_for_auto = memory.clone();
             tokio::spawn(async move {
                 let confirmer = AutoConfirmer;
                 while let Some(task) = auto_rx.recv().await {
                     let manager = manager.clone();
                     let observer = observer.clone();
                     let pulse_bus = pulse_bus.clone();
+                    let memory = memory_for_auto.clone();
                     let ghost_label = task.ghost.clone().unwrap_or_else(|| "auto".into());
+                    let goal_summary = truncate_obs(&task.goal, 120);
 
                     observer.log(
                         ObserverCategory::AutonomousTask,
                         format!("Dispatching: {} → {}", ghost_label, truncate_obs(&task.goal, 80)),
                     );
+
+                    introspect::inc_active_tasks();
 
                     // Spawn each task independently so they don't block the queue
                     tokio::spawn(async move {
@@ -485,6 +521,16 @@ impl AthenaCore {
                                     ObserverCategory::AutonomousTask,
                                     format!("Completed: {} ({} chars)", ghost_label, result.len()),
                                 );
+
+                                // Record successful outcome as memory
+                                let outcome = format!(
+                                    "Autonomous task succeeded [{}]: {}\nResult summary: {}",
+                                    ghost_label,
+                                    goal_summary,
+                                    truncate_obs(&result, 200),
+                                );
+                                let _ = memory.store("code_change", &outcome, None);
+
                                 let pulse = Pulse::new(
                                     crate::pulse::PulseSource::AutonomousTask,
                                     crate::pulse::Urgency::Medium,
@@ -500,8 +546,23 @@ impl AthenaCore {
                                     format!("Failed: {} — {}", ghost_label, e),
                                 );
                                 tracing::error!(ghost = %ghost_label, error = %e, "Autonomous task failed");
+
+                                // Record failure as memory so future scans can learn
+                                let outcome = format!(
+                                    "Autonomous task FAILED [{}]: {}\nError: {}",
+                                    ghost_label,
+                                    goal_summary,
+                                    e,
+                                );
+                                let category = if goal_summary.to_lowercase().contains("refactor") {
+                                    "refactoring_failed"
+                                } else {
+                                    "code_change_failed"
+                                };
+                                let _ = memory.store(category, &outcome, None);
                             }
                         }
+                        introspect::dec_active_tasks();
                     });
                 }
             });
@@ -520,6 +581,7 @@ impl AthenaCore {
             cron_engine: Some(cron_engine),
             delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
             auto_tx,
+            metrics,
         })
     }
 }

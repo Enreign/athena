@@ -468,6 +468,219 @@ fn parse_session_target(session_key: &str) -> PulseTarget {
     }
 }
 
+/// Spawn the code structure indexer loop.
+/// Periodically scans source files and stores structural information
+/// (public symbols, `use`/`mod` statements, dependency graph) as memories.
+pub fn spawn_code_indexer(
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    auto_tx: tokio::sync::mpsc::Sender<crate::core::AutonomousTask>,
+) {
+    tokio::spawn(async move {
+        // Initial delay to let the system settle
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+        loop {
+            let (interval, enabled, all) = {
+                let k = knobs.read().unwrap();
+                (
+                    k.code_indexer_interval_secs,
+                    k.code_indexer_enabled,
+                    k.all_proactive,
+                )
+            };
+
+            if !all || !enabled {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
+
+            let sleep_dur = randomness::jitter_interval(interval, 0.2);
+            tokio::time::sleep(sleep_dur).await;
+
+            // Re-check knobs after sleep
+            {
+                let k = knobs.read().unwrap();
+                if !k.all_proactive || !k.code_indexer_enabled {
+                    continue;
+                }
+            }
+
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Starting code structure indexing",
+            );
+
+            let task = crate::core::AutonomousTask {
+                goal: "Scan the codebase and extract a structural index. For each source file \
+                       in src/, extract: public functions, structs, enums, traits, impl blocks, \
+                       and `use`/`mod` statements. Output a summary of the dependency graph \
+                       between modules. Store each module's structure as a memory with \
+                       category 'code_structure'."
+                    .to_string(),
+                context: "This is a scheduled code indexing task. Focus on extracting structure, \
+                          not understanding logic. Be concise."
+                    .to_string(),
+                ghost: Some("scout".to_string()),
+                target: crate::pulse::PulseTarget::Broadcast,
+            };
+
+            if let Err(e) = auto_tx.send(task).await {
+                tracing::warn!("Code indexer: failed to dispatch task: {}", e);
+            }
+        }
+    });
+}
+
+/// Spawn the refactoring opportunity scanner loop.
+/// Periodically analyzes code structure memories, tool failure patterns,
+/// and system metrics to identify refactoring opportunities.
+pub fn spawn_refactoring_scanner(
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    llm: Arc<dyn LlmProvider>,
+    memory: Arc<MemoryStore>,
+    auto_tx: tokio::sync::mpsc::Sender<crate::core::AutonomousTask>,
+) {
+    tokio::spawn(async move {
+        // Initial delay
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+
+        loop {
+            let (interval, enabled, all, spontaneity) = {
+                let k = knobs.read().unwrap();
+                (
+                    k.refactoring_scan_interval_secs,
+                    k.refactoring_scan_enabled,
+                    k.all_proactive,
+                    k.spontaneity,
+                )
+            };
+
+            if !all || !enabled {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+
+            let sleep_dur = randomness::jitter_interval(interval, 0.2);
+            tokio::time::sleep(sleep_dur).await;
+
+            // Re-check
+            {
+                let k = knobs.read().unwrap();
+                if !k.all_proactive || !k.refactoring_scan_enabled {
+                    continue;
+                }
+            }
+
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Starting refactoring opportunity scan",
+            );
+
+            // Gather code_structure memories
+            let structure_memories = memory
+                .search_hybrid("code_structure module symbols", None, 20)
+                .unwrap_or_default();
+
+            if structure_memories.is_empty() {
+                observer.log(
+                    ObserverCategory::AutonomousTask,
+                    "Refactoring scan: no code_structure memories yet, skipping",
+                );
+                continue;
+            }
+
+            let structure_summary: Vec<String> = structure_memories
+                .iter()
+                .take(20)
+                .map(|m| format!("- {}", truncate(&m.content, 200)))
+                .collect();
+
+            let prompt = format!(
+                r#"Analyze this codebase structure and identify the single most impactful refactoring opportunity:
+
+CODE STRUCTURE:
+{}
+
+Consider:
+- Modules with too many public symbols (>20)
+- Circular or overly complex dependency chains
+- Duplicated patterns across modules
+- Large files that should be split
+
+If you find a clear, high-confidence refactoring opportunity, describe it in 2-3 sentences.
+If nothing stands out or confidence is low, respond with exactly: NO_REFACTORING"#,
+                structure_summary.join("\n")
+            );
+
+            let messages = vec![Message::user(&prompt)];
+            match llm.chat(&messages).await {
+                Ok(response) => {
+                    let trimmed = response.trim();
+                    if is_refusal(trimmed) || trimmed.to_uppercase().contains("NO_REFACTORING") {
+                        observer.log(
+                            ObserverCategory::AutonomousTask,
+                            "Refactoring scan: no opportunities found",
+                        );
+                        continue;
+                    }
+
+                    // Store as memory
+                    let _ = memory.store("refactoring_opportunity", trimmed, None);
+
+                    observer.log(
+                        ObserverCategory::AutonomousTask,
+                        format!("Refactoring opportunity: \"{}\"", truncate(trimmed, 80)),
+                    );
+
+                    // Check for past failures on similar refactorings before auto-dispatching
+                    let past_failures = memory
+                        .search_hybrid("refactoring_failed", None, 5)
+                        .unwrap_or_default();
+                    let lower_opportunity = trimmed.to_lowercase();
+                    let similar_failure = past_failures.iter().any(|m| {
+                        // Simple overlap check: if any significant word from the opportunity
+                        // appears in a past failure, consider it similar
+                        let failure_lower = m.content.to_lowercase();
+                        lower_opportunity
+                            .split_whitespace()
+                            .filter(|w| w.len() > 5) // only check significant words
+                            .any(|word| failure_lower.contains(word))
+                    });
+
+                    if similar_failure {
+                        observer.log(
+                            ObserverCategory::AutonomousTask,
+                            "Refactoring suppressed: similar past failure found",
+                        );
+                    } else if randomness::should_speak(0.3, spontaneity) {
+                        // Optionally dispatch as autonomous task if spontaneity is high enough
+                        let task = crate::core::AutonomousTask {
+                            goal: format!(
+                                "Implement this refactoring: {}\n\n\
+                                 Be careful, run tests after changes, and keep the refactoring minimal.",
+                                trimmed
+                            ),
+                            context: "This is a suggested refactoring from automated analysis. \
+                                      Proceed carefully and verify with tests."
+                                .to_string(),
+                            ghost: Some("coder".to_string()),
+                            target: crate::pulse::PulseTarget::Broadcast,
+                        };
+                        if let Err(e) = auto_tx.send(task).await {
+                            tracing::warn!("Refactoring scanner: failed to dispatch: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Refactoring scanner LLM call failed: {}", e);
+                }
+            }
+        }
+    });
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s

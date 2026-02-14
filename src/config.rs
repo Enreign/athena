@@ -42,6 +42,8 @@ pub struct Config {
     pub initiative: InitiativeConfig,
     #[serde(default)]
     pub github: GithubConfig,
+    #[serde(default)]
+    pub self_dev: SelfDevConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -352,6 +354,45 @@ fn default_tolerance() -> f32 {
     0.5
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct SelfDevConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_interval")]
+    pub metrics_interval_secs: u64,
+    #[serde(default)]
+    pub code_indexer_enabled: bool,
+    #[serde(default = "default_code_indexer_interval")]
+    pub code_indexer_interval_secs: u64,
+    #[serde(default)]
+    pub refactoring_scan_enabled: bool,
+    #[serde(default = "default_refactoring_scan_interval")]
+    pub refactoring_scan_interval_secs: u64,
+}
+
+impl Default for SelfDevConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            metrics_interval_secs: default_metrics_interval(),
+            code_indexer_enabled: false,
+            code_indexer_interval_secs: default_code_indexer_interval(),
+            refactoring_scan_enabled: false,
+            refactoring_scan_interval_secs: default_refactoring_scan_interval(),
+        }
+    }
+}
+
+fn default_metrics_interval() -> u64 {
+    30
+}
+fn default_code_indexer_interval() -> u64 {
+    14400
+} // 4 hours
+fn default_refactoring_scan_interval() -> u64 {
+    21600
+} // 6 hours
+
 #[derive(Deserialize, Clone)]
 pub struct GithubConfig {
     pub token: Option<String>,
@@ -607,6 +648,7 @@ impl Default for Config {
             proactive: ProactiveConfig::default(),
             initiative: InitiativeConfig::default(),
             github: GithubConfig::default(),
+            self_dev: SelfDevConfig::default(),
         }
     }
 }

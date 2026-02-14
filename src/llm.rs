@@ -405,14 +405,17 @@ impl LlmProvider for OllamaClient {
             .send()
             .await?;
         let latency = start.elapsed();
+        crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "Ollama", %status, "LLM error");
+            crate::introspect::record_error();
             return Err(AthenaError::Llm(format!("Ollama returned {}: {}", status, body)));
         }
 
+        crate::introspect::record_call();
         let chat_resp: OllamaChatResponse = resp.json().await?;
         tracing::info!(
             provider = "Ollama",
@@ -606,14 +609,17 @@ impl LlmProvider for OpenAiCompatibleClient {
             .send()
             .await?;
         let latency = start.elapsed();
+        crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = %self.name, %status, "LLM error");
+            crate::introspect::record_error();
             return Err(AthenaError::Llm(format!("{} returned {}: {}", self.name, status, body)));
         }
 
+        crate::introspect::record_call();
         let chat_resp: OpenAiChatResponse = resp.json().await?;
         let (prompt_tok, completion_tok) = chat_resp.usage
             .as_ref()
@@ -791,6 +797,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .send()
             .await?;
         let latency = start.elapsed();
+        crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -812,12 +819,14 @@ impl LlmProvider for OpenAiCompatibleClient {
             }
 
             tracing::error!(provider = %self.name, %status, "LLM error (tools)");
+            crate::introspect::record_error();
             return Err(AthenaError::Llm(format!(
                 "{} returned {}: {}",
                 self.name, status, body
             )));
         }
 
+        crate::introspect::record_call();
         let chat_resp: OpenAiChatResponseFull = resp.json().await?;
         let (prompt_tok, completion_tok) = chat_resp
             .usage

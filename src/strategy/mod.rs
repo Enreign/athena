@@ -27,6 +27,8 @@ pub struct TaskContract {
     pub tools_doc: Option<String>,
     /// Preferred CLI tool for code strategy (from runtime knob)
     pub cli_tool_preference: Option<String>,
+    /// Whether the VERIFY phase should generate tests for changes
+    pub test_generation: bool,
 }
 
 /// Pluggable execution loop strategy

@@ -35,6 +35,16 @@ pub struct RuntimeKnobs {
     pub timezone_offset: i32,
     pub cli_tool: String,
     pub cli_model: String,
+
+    // Self-development
+    pub self_dev_enabled: bool,
+    pub metrics_interval_secs: u64,
+
+    // Code indexer (Phase 3)
+    pub code_indexer_enabled: bool,
+    pub code_indexer_interval_secs: u64,
+    pub refactoring_scan_enabled: bool,
+    pub refactoring_scan_interval_secs: u64,
 }
 
 impl RuntimeKnobs {
@@ -71,6 +81,12 @@ impl RuntimeKnobs {
             timezone_offset: config.mood.timezone_offset,
             cli_tool: "claude_code".to_string(),
             cli_model: String::new(),
+            self_dev_enabled: config.self_dev.enabled,
+            metrics_interval_secs: config.self_dev.metrics_interval_secs,
+            code_indexer_enabled: config.self_dev.code_indexer_enabled,
+            code_indexer_interval_secs: config.self_dev.code_indexer_interval_secs,
+            refactoring_scan_enabled: config.self_dev.refactoring_scan_enabled,
+            refactoring_scan_interval_secs: config.self_dev.refactoring_scan_interval_secs,
         }
     }
 
@@ -100,6 +116,12 @@ impl RuntimeKnobs {
             timezone_offset: 0,
             cli_tool: "claude_code".to_string(),
             cli_model: String::new(),
+            self_dev_enabled: false,
+            metrics_interval_secs: 30,
+            code_indexer_enabled: false,
+            code_indexer_interval_secs: 14400,
+            refactoring_scan_enabled: false,
+            refactoring_scan_interval_secs: 21600,
         }
     }
 
@@ -239,6 +261,33 @@ impl RuntimeKnobs {
                     Ok(format!("CLI model: {}", self.cli_model))
                 }
             }
+            "self_dev" => {
+                self.self_dev_enabled = parse_bool(value)?;
+                Ok(format!("Self-dev: {}", on_off(self.self_dev_enabled)))
+            }
+            "metrics.interval" => {
+                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                self.metrics_interval_secs = v.max(10);
+                Ok(format!("Metrics interval: {}s", self.metrics_interval_secs))
+            }
+            "code_indexer" => {
+                self.code_indexer_enabled = parse_bool(value)?;
+                Ok(format!("Code indexer: {}", on_off(self.code_indexer_enabled)))
+            }
+            "code_indexer.interval" => {
+                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                self.code_indexer_interval_secs = v.max(600);
+                Ok(format!("Code indexer interval: {}s", self.code_indexer_interval_secs))
+            }
+            "refactoring_scan" => {
+                self.refactoring_scan_enabled = parse_bool(value)?;
+                Ok(format!("Refactoring scan: {}", on_off(self.refactoring_scan_enabled)))
+            }
+            "refactoring_scan.interval" => {
+                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                self.refactoring_scan_interval_secs = v.max(600);
+                Ok(format!("Refactoring scan interval: {}s", self.refactoring_scan_interval_secs))
+            }
             _ => Err(format!("Unknown knob: {}", key)),
         }
     }
@@ -276,6 +325,12 @@ impl RuntimeKnobs {
         let _ = writeln!(s, "  timezone_offset        {}h", self.timezone_offset);
         let _ = writeln!(s, "  cli_tool               {}", self.cli_tool);
         let _ = writeln!(s, "  cli_model              {}", if self.cli_model.is_empty() { "default" } else { &self.cli_model });
+        let _ = writeln!(s, "  self_dev               {}", on_off(self.self_dev_enabled));
+        let _ = writeln!(s, "  metrics.interval       {}s", self.metrics_interval_secs);
+        let _ = writeln!(s, "  code_indexer           {}", on_off(self.code_indexer_enabled));
+        let _ = writeln!(s, "  code_indexer.interval  {}s", self.code_indexer_interval_secs);
+        let _ = writeln!(s, "  refactoring_scan       {}", on_off(self.refactoring_scan_enabled));
+        let _ = writeln!(s, "  refactoring_scan.interval {}s", self.refactoring_scan_interval_secs);
         s
     }
 }

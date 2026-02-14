@@ -26,6 +26,7 @@ pub enum ObserverCategory {
     AutonomousTask,
     ToolUsage,
     ToolReload,
+    SelfMetrics,
 }
 
 impl ObserverCategory {
@@ -48,6 +49,7 @@ impl ObserverCategory {
             Self::AutonomousTask => "AUTO_TASK",
             Self::ToolUsage => "TOOL_USE",
             Self::ToolReload => "TOOL_RELOAD",
+            Self::SelfMetrics => "SELF_METRICS",
         }
     }
 
@@ -71,6 +73,7 @@ impl ObserverCategory {
             Self::AutonomousTask => "\x1b[1;33m",   // bright yellow
             Self::ToolUsage => "\x1b[36m",             // cyan
             Self::ToolReload => "\x1b[1;33m",          // bright yellow
+            Self::SelfMetrics => "\x1b[2;36m",         // dim cyan
         }
     }
 }

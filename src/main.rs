@@ -10,6 +10,7 @@ mod embeddings;
 mod error;
 mod executor;
 mod heartbeat;
+mod introspect;
 mod knobs;
 mod llm;
 mod manager;

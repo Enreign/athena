@@ -15,6 +15,11 @@ use super::{LoopStrategy, StatusSender, TaskContract};
 const EXPLORE_TOOLS: &[&str] = &["file_read", "grep", "glob", "codebase_map", "shell", "diff", "git", "gh"];
 /// Tools allowed in the VERIFY phase (read-only + lint)
 const VERIFY_TOOLS: &[&str] = &["file_read", "grep", "glob", "shell", "lint", "diff", "git", "gh"];
+/// Extended VERIFY tools when test generation is enabled (adds write + test_runner)
+const VERIFY_WITH_TESTS_TOOLS: &[&str] = &[
+    "file_read", "file_write", "file_edit", "grep", "glob", "shell",
+    "lint", "test_runner", "diff", "git", "gh",
+];
 /// Coding CLI tools for the EXECUTE phase
 const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 
@@ -77,6 +82,46 @@ impl LoopStrategy for CodeStrategy {
                 .instrument(tracing::info_span!("verify"))
                 .await?
         };
+
+        // Phase 3b: SELF-HEAL — if test failures detected, attempt one corrective cycle
+        if contract.test_generation {
+            if let Some(fix_contract) = crate::self_heal::attempt_test_fix(&summary, &contract.goal) {
+                tracing::warn!("CodeStrategy: test failures detected, attempting self-heal");
+                send_status(status_tx, "Test failures detected — attempting fix...").await;
+
+                // Re-run EXECUTE with the corrective contract
+                let fix_exploration = ExplorationResult {
+                    plan: fix_contract.goal.clone(),
+                    context: fix_contract.context.clone(),
+                    files: String::new(),
+                };
+
+                match self.execute_code(&fix_contract, tools, docker, llm, &fix_exploration)
+                    .instrument(tracing::info_span!("self_heal_execute"))
+                    .await
+                {
+                    Ok(fix_result) => {
+                        // Re-verify after fix
+                        send_status(status_tx, "Re-verifying after fix...").await;
+                        let fix_summary = if use_native {
+                            self.verify_native(contract, tools, docker, llm, &fix_result, executor, confirmer, status_tx)
+                                .instrument(tracing::info_span!("self_heal_verify"))
+                                .await?
+                        } else {
+                            self.verify_text_fallback(contract, tools, docker, llm, &fix_result, executor, confirmer, status_tx)
+                                .instrument(tracing::info_span!("self_heal_verify"))
+                                .await?
+                        };
+                        tracing::info!("CodeStrategy: self-heal cycle complete");
+                        return Ok(fix_summary);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
+                        // Fall through to return original summary
+                    }
+                }
+            }
+        }
 
         Ok(summary)
     }
@@ -310,7 +355,7 @@ impl CodeStrategy {
     }
 
     /// Phase 2: Call a coding CLI tool with the enriched plan from Phase 1.
-    /// Unchanged — calls CLI tool directly, no LLM tool loop.
+    /// Includes optional ripple effect analysis from code_structure memories.
     async fn execute_code(
         &self,
         contract: &TaskContract,
@@ -337,6 +382,39 @@ impl CodeStrategy {
 
         let tool = tools.get(coding_tool_name).unwrap();
 
+        // Ripple effect: analyze files from exploration to warn about dependents
+        let ripple_section = if !exploration.files.is_empty() {
+            // Extract file paths from the exploration summary
+            let file_names: Vec<&str> = exploration.files
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim().trim_start_matches("- ");
+                    if trimmed.ends_with(".rs") || trimmed.ends_with(".py")
+                        || trimmed.ends_with(".ts") || trimmed.ends_with(".go")
+                        || trimmed.contains("src/")
+                    {
+                        // Extract just the filename/path portion
+                        Some(trimmed.split_whitespace().next().unwrap_or(trimmed))
+                    } else {
+                        None
+                    }
+                })
+                .take(10)
+                .collect();
+
+            if file_names.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nRIPPLE WARNING: Changes to these files may affect other modules that import from them: {}. \
+                     Check for breaking changes to public APIs.",
+                    file_names.join(", ")
+                )
+            }
+        } else {
+            String::new()
+        };
+
         let mut prompt_parts = Vec::new();
 
         if !exploration.context.is_empty() {
@@ -355,6 +433,10 @@ impl CodeStrategy {
                     .collect::<Vec<_>>()
                     .join("\n")
             ));
+        }
+
+        if !ripple_section.is_empty() {
+            prompt_parts.push(ripple_section);
         }
 
         let full_prompt = prompt_parts.join("\n\n");
@@ -421,7 +503,12 @@ impl CodeStrategy {
         status_tx: Option<&StatusSender>,
     ) -> Result<String> {
         let system_prompt = build_verify_prompt_native(contract, exec_result);
-        let schemas = phase_schemas(tools, VERIFY_TOOLS);
+        let verify_tools = if contract.test_generation {
+            VERIFY_WITH_TESTS_TOOLS
+        } else {
+            VERIFY_TOOLS
+        };
+        let schemas = phase_schemas(tools, verify_tools);
 
         let mut history: Vec<ChatMessage> = vec![
             ChatMessage::System(system_prompt),
@@ -472,7 +559,7 @@ impl CodeStrategy {
 
                 // Split into allowed and disallowed tool calls
                 let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls.iter()
-                    .partition(|tc| VERIFY_TOOLS.contains(&tc.name.as_str()));
+                    .partition(|tc| verify_tools.contains(&tc.name.as_str()));
 
                 for tc in &disallowed {
                     history.push(ChatMessage::Tool {
@@ -480,7 +567,7 @@ impl CodeStrategy {
                         content: format!(
                             "Tool '{}' is not allowed in the verification phase. Use only: {}",
                             tc.name,
-                            VERIFY_TOOLS.join(", ")
+                            verify_tools.join(", ")
                         ),
                     });
                 }
@@ -746,6 +833,18 @@ fn build_verify_prompt_native(contract: &TaskContract, exec_result: &str) -> Str
         exec_result.to_string()
     };
 
+    let test_gen_section = if contract.test_generation {
+        r#"
+- IMPORTANT: You have write access in this verification phase.
+- After reading the diff of changes, write focused #[test] functions that cover the new/modified behavior.
+- Place tests in the appropriate test module (e.g., `#[cfg(test)] mod tests` block in the same file).
+- Limit test generation to at most 3 test files and 500 lines total.
+- Run the tests with `test_runner` to confirm they pass.
+- If tests fail, fix the IMPLEMENTATION (not the tests) and re-run."#
+    } else {
+        ""
+    };
+
     format!(
         r#"You are verifying the result of a coding task.
 
@@ -756,11 +855,12 @@ CODING TOOL OUTPUT:
 
 INSTRUCTIONS:
 - Use your tools to read modified files and confirm changes are correct.
-- Run compilation checks (e.g., cargo check) or tests if appropriate.
+- Run compilation checks (e.g., cargo check) or tests if appropriate.{test_gen}
 - When done verifying, respond with a plain-text summary of what was accomplished and any issues found.
 - Be concise. Focus on correctness, not style."#,
         goal = contract.goal,
         result = result_display,
+        test_gen = test_gen_section,
     )
 }
 
