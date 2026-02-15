@@ -40,11 +40,19 @@ Recommended isolation mode (default):
 
 - each task runs in a disposable git worktree
 - no direct edits to your current working tree
+- stale disposable worktrees are auto-cleaned on startup (default: older than 6 hours)
 
 Disable if needed:
 
 ```bash
 python3 scripts/eval_harness.py --no-use-worktree
+```
+
+Cleanup controls:
+
+```bash
+python3 scripts/eval_harness.py --no-cleanup-worktrees
+python3 scripts/eval_harness.py --stale-worktree-hours 24
 ```
 
 ## Output

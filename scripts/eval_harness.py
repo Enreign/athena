@@ -284,6 +284,48 @@ def remove_task_workspace(base_repo: Path, path: Path) -> None:
     run(["git", "worktree", "remove", "--force", str(path)], cwd=base_repo)
 
 
+def managed_worktree_paths(base_repo: Path) -> list[Path]:
+    root = (base_repo / "eval" / ".worktrees").resolve()
+    p = run(["git", "worktree", "list", "--porcelain"], cwd=base_repo)
+    if p.returncode != 0:
+        return []
+    paths: list[Path] = []
+    for line in p.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        candidate = Path(line.split(" ", 1)[1]).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        paths.append(candidate)
+    return paths
+
+
+def cleanup_stale_worktrees(base_repo: Path, stale_hours: float) -> tuple[int, int]:
+    if stale_hours <= 0:
+        return 0, 0
+    stale_secs = stale_hours * 3600.0
+    now = time.time()
+
+    run(["git", "worktree", "prune"], cwd=base_repo)
+    removed = 0
+    failed = 0
+    for wt in managed_worktree_paths(base_repo):
+        if not wt.exists():
+            continue
+        age_secs = now - wt.stat().st_mtime
+        if age_secs < stale_secs:
+            continue
+        p = run(["git", "worktree", "remove", "--force", str(wt)], cwd=base_repo)
+        if p.returncode == 0:
+            removed += 1
+        else:
+            failed += 1
+    run(["git", "worktree", "prune"], cwd=base_repo)
+    return removed, failed
+
+
 def run_task(
     repo: Path,
     athena_bin: Path,
@@ -482,6 +524,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worktree-ref", default="HEAD")
     parser.add_argument("--keep-worktrees", action="store_true")
     parser.add_argument(
+        "--cleanup-worktrees",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Remove stale disposable eval worktrees before running tasks.",
+    )
+    parser.add_argument(
+        "--stale-worktree-hours",
+        type=float,
+        default=6.0,
+        help="Age threshold for stale eval worktree cleanup.",
+    )
+    parser.add_argument(
         "--use-worktree",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -526,6 +580,13 @@ def main() -> int:
     tasks = list(suite.get("tasks", []))
     if args.max_tasks and args.max_tasks > 0:
         tasks = tasks[: args.max_tasks]
+
+    if args.use_worktree and args.cleanup_worktrees:
+        removed, failed = cleanup_stale_worktrees(repo, args.stale_worktree_hours)
+        print(
+            f"worktree_cleanup removed={removed} failed={failed} stale_hours={args.stale_worktree_hours:g}",
+            flush=True,
+        )
 
     results: list[TaskResult] = []
     for task in tasks:
