@@ -367,7 +367,6 @@ def run_task(
 
     before = git_status_paths(repo)
     env = os.environ.copy()
-    env.setdefault("CLAUDECODE", "1")
 
     cmd = [
         str(athena_bin),
