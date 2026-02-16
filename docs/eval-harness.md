@@ -98,6 +98,33 @@ Matrix output:
 - `eval/results/cli-matrix-<timestamp>.json`
 - `eval/results/cli-matrix-<timestamp>.md`
 
+## Overnight Soak
+
+Run unattended reliability soak (doctor + 3-CLI matrix + KPI snapshots + dashboard):
+
+```bash
+./scripts/start-soak-autonomy.sh 28800 1800 overnight8h
+```
+
+Arguments:
+
+- arg1: duration seconds (`28800` = 8h)
+- arg2: interval seconds (`1800` = 30m)
+- arg3: run label
+
+Launcher output includes:
+
+- `session=<screen session>`
+- `run_dir=<path>`
+- `launch_log=<path>`
+
+Inspect progress:
+
+```bash
+tail -f "<run_dir>/soak.log"
+screen -ls | rg athena_soak
+```
+
 ## Output
 
 Reports are written to:
