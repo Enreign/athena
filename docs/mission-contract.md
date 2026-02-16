@@ -32,6 +32,24 @@ Safety invariant:
 
 - `0` critical safety incidents (secret leaks, destructive ops, policy bypass).
 
+## Program Baseline (2026-02-16)
+
+Reality check against mission:
+
+- strong execution/eval plumbing exists, but optimizer loop is not implemented yet
+- full `athena-core-v1` benchmark remains below gate in recent runs
+- low-risk delivery KPI is currently below the phase-1 target
+
+Estimated maturity by layer:
+
+- agent execution: ~85%
+- evaluation: ~65%
+- failure logging/telemetry: ~70%
+- self-improvement optimizer loop: ~10%
+- end-to-end closed loop: ~45-55%
+
+See detailed roadmap: `docs/self-improvement-roadmap.md`.
+
 ## Initial Targets
 
 Phase 1 (stabilize):
@@ -54,6 +72,21 @@ Phase 3 (mission-ready):
 - verification pass rate `>= 92%`
 - rollback rate `<= 3%`
 - mean time to fix `<= 8h`
+
+## Near-Term Program Goals (Added)
+
+1. Truthful benchmark gate:
+   - keep smoke benchmarks for integration checks
+   - add/expand real benchmark gates for quality decisions
+2. Execution contract hardening:
+   - normalized CLI wrapper contract across claude_code/codex/opencode
+   - deterministic error taxonomy + retry/fallback policy
+3. Artifact completeness:
+   - every autonomous run must emit artifacts and learning memories
+4. Self-Build supervised pipeline:
+   - worktree patching + maintenance pack + critic + policy promotion
+5. Self-improvement optimizer loop:
+   - candidate generation, tournament evaluation, merge-best under policy
 
 ## Measurement Guardrails
 
@@ -79,6 +112,11 @@ Recommended cadence:
 
 - at least daily snapshots per active lane/repo;
 - always snapshot before and after major refactor/autonomy changes.
+
+Operational recommendation:
+
+- keep `self_improvement` capacity explicitly reserved (20% baseline)
+- do not raise autonomy thresholds until delivery lane reaches phase-1 KPI targets
 
 Tagged attribution source:
 

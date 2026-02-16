@@ -161,6 +161,11 @@ def main():
         help="print full metrics JSON",
     )
     parser.add_argument(
+        "--out",
+        default="",
+        help="optional path to write full metrics JSON (relative to repo root unless absolute)",
+    )
+    parser.add_argument(
         "--no-fail",
         action="store_true",
         help="never fail on regressions",
@@ -169,6 +174,14 @@ def main():
 
     root = Path(args.root).resolve()
     metrics = compute_metrics(root)
+
+    if args.out:
+        out_path = Path(args.out).expanduser()
+        if not out_path.is_absolute():
+            out_path = (root / out_path).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+        print(f"metrics_json={out_path}")
 
     if args.write_baseline:
         path = root / args.baseline

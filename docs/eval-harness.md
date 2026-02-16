@@ -13,6 +13,14 @@ It runs a stable task suite end-to-end and scores:
 - tests pass
 - diff quality
 
+## Current Limits (2026-02-16)
+
+- CI currently runs smoke via mock dispatch (`eval/benchmark-mini-ci.json`) to validate harness mechanics.
+- CLI smoke benchmark (`eval/benchmark-cli-smoke.json`) is integration-focused and lightweight.
+- Fast benchmark mode (`[benchmark_fast_cli]`) skips EXPLORE/VERIFY in strategy and is not a full-quality gate.
+
+Roadmap and target gate model: `docs/self-improvement-roadmap.md`.
+
 ## Suite
 
 Default suite file:
@@ -100,7 +108,7 @@ Matrix output:
 
 ## Overnight Soak
 
-Run unattended reliability soak (doctor + 3-CLI matrix + KPI snapshots + dashboard):
+Run unattended reliability soak (doctor + 3-CLI matrix + KPI snapshots + dashboard + maintainability snapshot + ranked improvement backlog):
 
 ```bash
 ./scripts/start-soak-autonomy.sh 28800 1800 overnight8h
@@ -124,6 +132,10 @@ Inspect progress:
 tail -f "<run_dir>/soak.log"
 screen -ls | rg athena_soak
 ```
+
+On completion, a summary is generated at:
+
+- `<run_dir>/summary.md`
 
 ## Output
 
@@ -169,3 +181,8 @@ Output:
 GitHub Actions workflow:
 
 - `.github/workflows/eval-harness.yml`
+
+Planned CI evolution:
+
+- keep smoke job as quick regression sentinel
+- add real benchmark gate job (non-mock runtime) for promotion decisions

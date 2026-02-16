@@ -17,6 +17,7 @@ fi
 LOG_PATH="$RUN_DIR/soak.log"
 PID_FILE="$RUN_DIR/soak.pid"
 STATE_FILE="$RUN_DIR/state.env"
+MAINT_CURRENT_PATH="$ROOT_DIR/eval/results/maintainability-current.json"
 
 mkdir -p "$RUN_DIR"
 
@@ -87,6 +88,21 @@ while (( $(date +%s) < end_epoch )); do
       --config "$ROOT_DIR/config.toml" \
       --repo athena || true
 
+  run_step maintainability_current \
+    python3 "$ROOT_DIR/scripts/maintainability_check.py" \
+      --root "$ROOT_DIR" \
+      --json \
+      --no-fail \
+      --out "$MAINT_CURRENT_PATH" || true
+
+  run_step improvement_backlog \
+    python3 "$ROOT_DIR/scripts/generate_improvement_backlog.py" \
+      --config "$ROOT_DIR/config.toml" \
+      --maint-baseline "$MAINT_CURRENT_PATH" \
+      --history-file "$ROOT_DIR/eval/results/history.jsonl" \
+      --out-dir "$ROOT_DIR/eval/results" \
+      --top 20 || true
+
   now_epoch="$(date +%s)"
   if (( now_epoch >= end_epoch )); then
     break
@@ -101,6 +117,12 @@ while (( $(date +%s) < end_epoch )); do
 done
 
 done_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+run_step soak_summary \
+  python3 "$ROOT_DIR/scripts/generate_soak_summary.py" \
+    --run-dir "$RUN_DIR" \
+    --results-dir "$ROOT_DIR/eval/results" \
+    --out "$RUN_DIR/summary.md" || true
+
 echo "" | tee -a "$LOG_PATH"
 echo "Soak completed at $done_ts" | tee -a "$LOG_PATH"
 echo "summary pass_steps=$pass_count fail_steps=$fail_count iterations=$iter" | tee -a "$LOG_PATH"
