@@ -203,6 +203,7 @@ If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. 
                                         lane: "self_improvement".to_string(),
                                         risk_tier: "medium".to_string(),
                                         repo: crate::kpi::default_repo_name(),
+                                        task_id: None,
                                     };
                                     if let Err(e) = auto_tx.send(task).await {
                                         tracing::warn!("Memory scanner: failed to dispatch improvement task: {}", e);
@@ -409,6 +410,7 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
                                         lane: "self_improvement".to_string(),
                                         risk_tier: "medium".to_string(),
                                         repo: crate::kpi::default_repo_name(),
+                                        task_id: None,
                                     };
                                     if let Err(e) = auto_tx.send(task).await {
                                         tracing::warn!(
@@ -820,6 +822,7 @@ pub fn spawn_code_indexer(
                 lane: "self_improvement".to_string(),
                 risk_tier: "medium".to_string(),
                 repo: crate::kpi::default_repo_name(),
+                task_id: None,
             };
 
             if let Err(e) = auto_tx.send(task).await {
@@ -1011,6 +1014,7 @@ If nothing stands out or confidence is low, respond with exactly: NO_REFACTORING
                             lane: "self_improvement".to_string(),
                             risk_tier: "high".to_string(),
                             repo: crate::kpi::default_repo_name(),
+                            task_id: None,
                         };
                         if let Err(e) = auto_tx.send(task).await {
                             tracing::warn!("Refactoring scanner: failed to dispatch: {}", e);

@@ -610,6 +610,7 @@ async fn command_dispatch(
         lane: "delivery".to_string(),
         risk_tier: "medium".to_string(),
         repo: crate::kpi::default_repo_name(),
+        task_id: None,
     };
 
     if let Err(e) = state.handle.dispatch_task(task).await {

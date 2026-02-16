@@ -328,6 +328,7 @@ pub fn spawn_metrics_collector(
                         lane: "self_improvement".to_string(),
                         risk_tier: "high".to_string(),
                         repo: crate::kpi::default_repo_name(),
+                        task_id: None,
                     };
                     let _ = auto_tx.send(task).await;
 
