@@ -40,6 +40,20 @@ Optional:
 python3 scripts/eval_harness.py --fail-fast
 ```
 
+Pin a specific coding CLI backend for this run:
+
+```bash
+python3 scripts/eval_harness.py --cli-tool codex
+python3 scripts/eval_harness.py --cli-tool claude_code
+python3 scripts/eval_harness.py --cli-tool opencode
+```
+
+Optional model override (applies to selected CLI tool):
+
+```bash
+python3 scripts/eval_harness.py --cli-tool codex --cli-model gpt-5-codex
+```
+
 Recommended isolation mode (default):
 
 - each task runs in a disposable git worktree
@@ -57,6 +71,14 @@ Cleanup controls:
 ```bash
 python3 scripts/eval_harness.py --no-cleanup-worktrees
 python3 scripts/eval_harness.py --stale-worktree-hours 24
+```
+
+Quick per-CLI comparison loop:
+
+```bash
+for tool in codex claude_code opencode; do
+  python3 scripts/eval_harness.py --cli-tool "$tool" || true
+done
 ```
 
 ## Output

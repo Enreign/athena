@@ -36,6 +36,8 @@ class TaskResult:
     lane: str
     risk: str
     ghost: str
+    cli_tool: str | None
+    cli_model: str | None
     dispatch_task_id: str | None
     status: str
     error: str | None
@@ -350,6 +352,8 @@ def run_task(
     conn: sqlite3.Connection,
     defaults: dict[str, Any],
     task: dict[str, Any],
+    cli_tool: str | None,
+    cli_model: str | None,
 ) -> TaskResult:
     merged = dict(defaults)
     merged.update(task)
@@ -386,6 +390,10 @@ def run_task(
         "--repo",
         repo_name,
     ]
+    if cli_tool:
+        cmd.extend(["--cli-tool", cli_tool])
+    if cli_model:
+        cmd.extend(["--cli-model", cli_model])
     p = run(cmd, cwd=repo, env=env, timeout_secs=timeout_secs)
     dispatch_task_id = parse_dispatch_task_id(p.stderr)
     outcome = query_outcome(conn, dispatch_task_id)
@@ -417,6 +425,10 @@ def run_task(
     )
 
     notes = [f"test_command={test_note}"]
+    if cli_tool:
+        notes.append(f"cli_tool={cli_tool}")
+    if cli_model:
+        notes.append(f"cli_model={cli_model}")
     notes.extend(diff_notes)
     if p.returncode != 0:
         notes.append(f"dispatch_exit={p.returncode}")
@@ -428,6 +440,8 @@ def run_task(
         lane=lane,
         risk=risk,
         ghost=ghost,
+        cli_tool=cli_tool,
+        cli_model=cli_model,
         dispatch_task_id=dispatch_task_id,
         status=status,
         error=error,
@@ -443,7 +457,15 @@ def run_task(
     )
 
 
-def write_reports(output_dir: Path, suite: dict[str, Any], results: list[TaskResult], gate_ok: bool, threshold: float) -> tuple[Path, Path, float, str]:
+def write_reports(
+    output_dir: Path,
+    suite: dict[str, Any],
+    results: list[TaskResult],
+    gate_ok: bool,
+    threshold: float,
+    cli_tool: str | None,
+    cli_model: str | None,
+) -> tuple[Path, Path, float, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     out_json = output_dir / f"eval-{ts}.json"
@@ -456,6 +478,8 @@ def write_reports(output_dir: Path, suite: dict[str, Any], results: list[TaskRes
         "threshold": threshold,
         "gate_ok": gate_ok,
         "overall_score": overall,
+        "cli_tool": cli_tool,
+        "cli_model": cli_model,
         "results": [r.__dict__ for r in results],
     }
     out_json.write_text(json.dumps(payload, indent=2))
@@ -467,6 +491,8 @@ def write_reports(output_dir: Path, suite: dict[str, Any], results: list[TaskRes
         f"- threshold: {threshold:.2f}",
         f"- overall_score: {overall:.2f}",
         f"- gate: {'PASS' if gate_ok else 'FAIL'}",
+        f"- cli_tool: {cli_tool or 'default'}",
+        f"- cli_model: {cli_model or 'default'}",
         "",
         "| task | lane | risk | status | overall | exec | tests | diff | plan |",
         "|---|---|---|---|---:|---:|---:|---:|---:|",
@@ -497,6 +523,8 @@ def append_history(
     report_json: Path,
     report_md: Path,
     results: list[TaskResult],
+    cli_tool: str | None,
+    cli_model: str | None,
 ) -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -509,6 +537,8 @@ def append_history(
         "exec_success_rate": (
             sum(r.exec_success for r in results) / max(len(results), 1)
         ),
+        "cli_tool": cli_tool,
+        "cli_model": cli_model,
         "report_json": str(report_json),
         "report_md": str(report_md),
         "tasks": [
@@ -535,6 +565,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--athena-bin", default="target/debug/athena")
     parser.add_argument("--output-dir", default="eval/results")
     parser.add_argument("--history-file", default="eval/results/history.jsonl")
+    parser.add_argument(
+        "--cli-tool",
+        choices=["claude_code", "codex", "opencode"],
+        default=None,
+        help="Override Athena runtime cli_tool for each dispatch in this harness run.",
+    )
+    parser.add_argument(
+        "--cli-model",
+        default=None,
+        help="Optional model name to pass as runtime cli_model override for each dispatch.",
+    )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--max-tasks", type=int, default=0, help="Run only first N tasks (0 = all).")
     parser.add_argument("--worktree-ref", default="HEAD")
@@ -596,6 +637,11 @@ def main() -> int:
     tasks = list(suite.get("tasks", []))
     if args.max_tasks and args.max_tasks > 0:
         tasks = tasks[: args.max_tasks]
+    print(
+        f"run_config suite={suite.get('name')} tasks={len(tasks)} "
+        f"cli_tool={args.cli_tool or 'default'} cli_model={args.cli_model or 'default'}",
+        flush=True,
+    )
 
     if args.use_worktree and args.cleanup_worktrees:
         removed, failed = cleanup_stale_worktrees(repo, args.stale_worktree_hours)
@@ -614,7 +660,16 @@ def main() -> int:
             workspace = create_task_workspace(repo, task_id, args.worktree_ref)
 
         try:
-            result = run_task(workspace, athena_bin, config_path, conn, defaults, task)
+            result = run_task(
+                workspace,
+                athena_bin,
+                config_path,
+                conn,
+                defaults,
+                task,
+                args.cli_tool,
+                args.cli_model,
+            )
         finally:
             if args.use_worktree and not args.keep_worktrees:
                 remove_task_workspace(repo, workspace)
@@ -634,7 +689,15 @@ def main() -> int:
 
     overall = sum(r.overall for r in results) / max(len(results), 1)
     gate_ok = overall >= threshold and all(r.exec_success >= 1.0 for r in results)
-    report_json, report_md, overall, ts = write_reports(output_dir, suite, results, gate_ok, threshold)
+    report_json, report_md, overall, ts = write_reports(
+        output_dir,
+        suite,
+        results,
+        gate_ok,
+        threshold,
+        args.cli_tool,
+        args.cli_model,
+    )
     append_history(
         history_path=history_path,
         suite_name=str(suite.get("name", "unknown")),
@@ -645,6 +708,8 @@ def main() -> int:
         report_json=report_json,
         report_md=report_md,
         results=results,
+        cli_tool=args.cli_tool,
+        cli_model=args.cli_model,
     )
     print(f"gate={'PASS' if gate_ok else 'FAIL'} overall={overall:.2f}")
     return 0 if gate_ok else 1

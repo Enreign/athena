@@ -95,6 +95,12 @@ enum Commands {
         /// Optional memory auto-store category (adds [auto_store:<category>] context tag)
         #[arg(long)]
         auto_store: Option<String>,
+        /// Optional CLI tool override for this dispatch run
+        #[arg(long, value_parser = ["claude_code", "codex", "opencode"])]
+        cli_tool: Option<String>,
+        /// Optional coding model override for this dispatch run
+        #[arg(long)]
+        cli_model: Option<String>,
         /// How long to wait for an autonomous pulse result
         #[arg(long, default_value_t = 120)]
         wait_secs: u64,
@@ -331,13 +337,16 @@ async fn main() -> anyhow::Result<()> {
             context,
             ghost,
             auto_store,
+            cli_tool,
+            cli_model,
             wait_secs,
             lane,
             risk,
             repo,
         }) => {
             run_dispatch(
-                config, memory, goal, context, ghost, auto_store, wait_secs, lane, risk, repo,
+                config, memory, goal, context, ghost, auto_store, cli_tool, cli_model, wait_secs,
+                lane, risk, repo,
             )
             .await?
         }
@@ -526,6 +535,8 @@ async fn run_dispatch(
     context: Option<String>,
     ghost: Option<String>,
     auto_store: Option<String>,
+    cli_tool: Option<String>,
+    cli_model: Option<String>,
     wait_secs: u64,
     lane: String,
     risk: String,
@@ -536,6 +547,20 @@ async fn run_dispatch(
     let repo = repo.unwrap_or_else(kpi::default_repo_name);
     let config_for_finalize = config.clone();
     let handle = AthenaCore::start(config, memory).await?;
+    if cli_tool.is_some() || cli_model.is_some() {
+        let mut knobs = handle
+            .knobs
+            .write()
+            .map_err(|_| anyhow::anyhow!("Failed to lock runtime knobs"))?;
+        if let Some(tool) = cli_tool.as_deref() {
+            knobs.set("cli_tool", tool).map_err(anyhow::Error::msg)?;
+            eprintln!("Dispatch override: cli_tool={}", tool);
+        }
+        if let Some(model) = cli_model.as_deref() {
+            knobs.set("cli_model", model).map_err(anyhow::Error::msg)?;
+            eprintln!("Dispatch override: cli_model={}", model);
+        }
+    }
     let context = dispatch_context(context, auto_store);
 
     // CLI dispatch waits on the delivered broadcast receiver, so target
