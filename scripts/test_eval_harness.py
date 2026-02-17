@@ -108,6 +108,74 @@ class EvalHarnessRegressionTests(unittest.TestCase):
         self.assertEqual(final.get("status"), "failed")
         self.assertEqual(final.get("error"), eval_harness.OUTCOME_REASON_WAIT_TIMEOUT)
 
+    def test_evaluate_gate_strict_delivery_rules_fail_on_low_tests(self) -> None:
+        results = [
+            eval_harness.TaskResult(
+                task_id="t1",
+                lane="delivery",
+                risk="low",
+                ghost="coder",
+                cli_tool=None,
+                cli_model=None,
+                dispatch_task_id="id-1",
+                status="succeeded",
+                error=None,
+                exec_success=1.0,
+                plan_quality=0.7,
+                tests_pass=0.0,
+                diff_quality=1.0,
+                overall=0.8,
+                changed_files=[],
+                stdout="",
+                stderr="",
+                notes=[],
+            )
+        ]
+        suite = {
+            "gate_requirements": {
+                "min_overall": 0.7,
+                "require_exec_success": True,
+                "lane_rules": {"delivery": {"min_tests_pass": 1.0, "min_diff_quality": 0.8}},
+            }
+        }
+        ok, reasons = eval_harness.evaluate_gate(results, threshold=0.7, suite=suite, overall=0.8)
+        self.assertFalse(ok)
+        self.assertTrue(any("tests_pass<1.00" in r for r in reasons))
+
+    def test_evaluate_gate_strict_delivery_rules_pass_when_thresholds_met(self) -> None:
+        results = [
+            eval_harness.TaskResult(
+                task_id="t1",
+                lane="delivery",
+                risk="low",
+                ghost="coder",
+                cli_tool=None,
+                cli_model=None,
+                dispatch_task_id="id-1",
+                status="succeeded",
+                error=None,
+                exec_success=1.0,
+                plan_quality=0.7,
+                tests_pass=1.0,
+                diff_quality=0.9,
+                overall=0.85,
+                changed_files=[],
+                stdout="",
+                stderr="",
+                notes=[],
+            )
+        ]
+        suite = {
+            "gate_requirements": {
+                "min_overall": 0.7,
+                "require_exec_success": True,
+                "lane_rules": {"delivery": {"min_tests_pass": 1.0, "min_diff_quality": 0.8}},
+            }
+        }
+        ok, reasons = eval_harness.evaluate_gate(results, threshold=0.7, suite=suite, overall=0.85)
+        self.assertTrue(ok)
+        self.assertEqual(reasons, [])
+
 
 if __name__ == "__main__":
     unittest.main()

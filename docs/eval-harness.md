@@ -148,6 +148,7 @@ python3 scripts/eval_harness.py --suite eval/benchmark-real-gate.json
 ```
 
 Use smoke for integration uptime and real suite for promotion decisions.
+Real gate enforces strict per-task `delivery` minima (`tests_pass=1.0`, `diff_quality>=0.8`) in addition to suite overall threshold.
 
 ## Output
 

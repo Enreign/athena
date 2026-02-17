@@ -2,6 +2,16 @@
   "name": "athena-core-v2-real",
   "description": "Real-task benchmark suite for delivery quality gates (non-smoke).",
   "pass_threshold": 0.7,
+  "gate_requirements": {
+    "min_overall": 0.7,
+    "require_exec_success": true,
+    "lane_rules": {
+      "delivery": {
+        "min_tests_pass": 1.0,
+        "min_diff_quality": 0.8
+      }
+    }
+  },
   "defaults": {
     "ghost": "coder",
     "lane": "delivery",
