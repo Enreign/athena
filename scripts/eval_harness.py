@@ -30,6 +30,14 @@ except ModuleNotFoundError:  # pragma: no cover
 TERMINAL_STATUSES = {"succeeded", "failed", "rolled_back"}
 
 
+def _to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 @dataclass
 class TaskResult:
     task_id: str
@@ -72,8 +80,8 @@ def run(
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout=e.stdout or "",
-            stderr=(e.stderr or "") + f"\nTimeout after {timeout_secs}s",
+            stdout=_to_text(e.stdout),
+            stderr=_to_text(e.stderr) + f"\nTimeout after {timeout_secs}s",
         )
 
 
@@ -98,8 +106,8 @@ def run_shell(
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout=e.stdout or "",
-            stderr=(e.stderr or "") + f"\nTimeout after {timeout_secs}s",
+            stdout=_to_text(e.stdout),
+            stderr=_to_text(e.stderr) + f"\nTimeout after {timeout_secs}s",
         )
 
 
@@ -189,6 +197,22 @@ def wait_for_terminal_outcome(
         time.sleep(poll_secs)
     latest = query_outcome(conn, dispatch_task_id)
     return latest, latest.get("status") in TERMINAL_STATUSES
+
+
+def fail_outcome_if_started(conn: sqlite3.Connection, dispatch_task_id: str, error: str) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE autonomous_task_outcomes
+           SET status = 'failed',
+               finished_at = datetime('now'),
+               error = COALESCE(error, ?2)
+         WHERE task_id = ?1
+           AND status = 'started'
+        """,
+        (dispatch_task_id, error),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def score_plan_quality(response: str) -> float:
@@ -409,6 +433,11 @@ def run_task(
         outcome, outcome_terminal = wait_for_terminal_outcome(
             conn, dispatch_task_id, max_wait_secs=outcome_wait_secs
         )
+        if not outcome_terminal:
+            timeout_error = f"eval_outcome_wait_timeout_after={outcome_wait_secs}s"
+            if fail_outcome_if_started(conn, dispatch_task_id, timeout_error):
+                outcome = query_outcome(conn, dispatch_task_id)
+                outcome_terminal = outcome.get("status") in TERMINAL_STATUSES
 
     status = outcome.get("status", "unknown")
     error = outcome.get("error")
