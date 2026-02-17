@@ -271,6 +271,9 @@ enum FeatureAction {
         /// Global wait timeout per task (seconds) when task-level wait_secs is unset
         #[arg(long, default_value_t = 180)]
         wait_secs: u64,
+        /// Extra grace window (seconds) to poll DB terminal outcome after pulse wait timeout
+        #[arg(long, default_value_t = 180)]
+        outcome_grace_secs: u64,
         /// Continue dispatching independent tasks after failures
         #[arg(long)]
         continue_on_failure: bool,
@@ -719,6 +722,7 @@ async fn handle_feature(
         FeatureAction::Dispatch {
             file,
             wait_secs,
+            outcome_grace_secs,
             continue_on_failure,
             dry_run,
             cli_tool,
@@ -831,48 +835,13 @@ async fn handle_feature(
                     let wait =
                         wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, task_wait)
                             .await;
-                    let run_status = match wait {
-                        WaitForAutonomousOutcome::Received => {
-                            match wait_for_terminal_outcome_status(&config, &task_dispatch_id, 10)
-                                .await?
-                            {
-                                Some(status) if status == "succeeded" => {
-                                    FeatureRunStatus::Succeeded
-                                }
-                                Some(status) => {
-                                    FeatureRunStatus::Failed(format!("terminal_status={}", status))
-                                }
-                                None => {
-                                    mark_dispatch_task_failed_if_started(
-                                        &config,
-                                        &task_dispatch_id,
-                                        OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT,
-                                    );
-                                    FeatureRunStatus::Failed(
-                                        OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT.to_string(),
-                                    )
-                                }
-                            }
-                        }
-                        WaitForAutonomousOutcome::TimedOut => {
-                            mark_dispatch_task_failed_if_started(
-                                &config,
-                                &task_dispatch_id,
-                                OUTCOME_REASON_DISPATCH_TIMEOUT,
-                            );
-                            FeatureRunStatus::Failed(OUTCOME_REASON_DISPATCH_TIMEOUT.to_string())
-                        }
-                        WaitForAutonomousOutcome::ChannelClosed => {
-                            mark_dispatch_task_failed_if_started(
-                                &config,
-                                &task_dispatch_id,
-                                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED,
-                            );
-                            FeatureRunStatus::Failed(
-                                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED.to_string(),
-                            )
-                        }
-                    };
+                    let run_status = resolve_feature_run_status_after_wait(
+                        &config,
+                        &task_dispatch_id,
+                        wait,
+                        outcome_grace_secs,
+                    )
+                    .await?;
                     match &run_status {
                         FeatureRunStatus::Succeeded => {
                             println!("task={} result=succeeded", task.id)
@@ -1929,6 +1898,62 @@ fn mark_dispatch_task_failed_if_started(config: &Config, task_id: &str, reason: 
             "Failed to finalize timed-out task_id={} in outcomes table: {}",
             task_id, e
         ),
+    }
+}
+
+fn feature_status_from_terminal(status: &str) -> FeatureRunStatus {
+    if status == "succeeded" {
+        FeatureRunStatus::Succeeded
+    } else {
+        FeatureRunStatus::Failed(format!("terminal_status={}", status))
+    }
+}
+
+async fn resolve_feature_run_status_after_wait(
+    config: &Config,
+    task_id: &str,
+    wait_outcome: WaitForAutonomousOutcome,
+    outcome_grace_secs: u64,
+) -> anyhow::Result<FeatureRunStatus> {
+    match wait_outcome {
+        WaitForAutonomousOutcome::Received => {
+            match wait_for_terminal_outcome_status(config, task_id, 10).await? {
+                Some(status) => Ok(feature_status_from_terminal(&status)),
+                None => {
+                    mark_dispatch_task_failed_if_started(
+                        config,
+                        task_id,
+                        OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT,
+                    );
+                    Ok(FeatureRunStatus::Failed(
+                        OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT.to_string(),
+                    ))
+                }
+            }
+        }
+        WaitForAutonomousOutcome::TimedOut => {
+            // Grace period: even if pulse timed out, the task may still finalize in DB.
+            if let Some(status) =
+                wait_for_terminal_outcome_status(config, task_id, outcome_grace_secs).await?
+            {
+                return Ok(feature_status_from_terminal(&status));
+            }
+            mark_dispatch_task_failed_if_started(config, task_id, OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT);
+            Ok(FeatureRunStatus::Failed(
+                OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT.to_string(),
+            ))
+        }
+        WaitForAutonomousOutcome::ChannelClosed => {
+            if let Some(status) =
+                wait_for_terminal_outcome_status(config, task_id, outcome_grace_secs).await?
+            {
+                return Ok(feature_status_from_terminal(&status));
+            }
+            mark_dispatch_task_failed_if_started(config, task_id, OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED);
+            Ok(FeatureRunStatus::Failed(
+                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED.to_string(),
+            ))
+        }
     }
 }
 

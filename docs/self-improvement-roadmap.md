@@ -93,6 +93,7 @@ Current implementation status:
   - `eval/results/feature-verify-*.{json,md}`
 - feature promotion decisions emit supervised policy artifacts:
   - `eval/results/feature-promote-*.{json,md}`
+- feature dispatch timeout handling now includes DB terminal-outcome grace reconciliation (`--outcome-grace-secs`) to reduce false timeout failures
 - reference workflow: `docs/feature-contract-workflow.md`
 
 Exit criteria:
