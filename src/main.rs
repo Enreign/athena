@@ -4792,7 +4792,7 @@ mod tests {
         build_feature_promotion_decision, build_feature_run_ledger,
         build_self_build_review_checklist, classify_chat_command,
         compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
-        latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
+        latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths, parse_pr_url,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
         wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
         WaitForAutonomousOutcome,
@@ -5152,6 +5152,11 @@ mod tests {
             parse_dispatch_task_id(s).as_deref(),
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
+    }
+
+    #[test]
+    fn parse_pr_url_returns_none_when_missing() {
+        assert_eq!(parse_pr_url("no pull request link here"), None);
     }
 
     #[test]
