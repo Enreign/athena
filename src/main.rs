@@ -10,10 +10,11 @@ mod dynamic_tools;
 mod embeddings;
 mod error;
 mod executor;
+mod feature_contract;
 mod heartbeat;
 mod introspect;
-mod kpi;
 mod knobs;
+mod kpi;
 mod langfuse;
 mod llm;
 mod manager;
@@ -47,6 +48,7 @@ use scheduler::Schedule;
 
 const OUTCOME_REASON_DISPATCH_TIMEOUT: &str = "dispatch_timeout";
 const OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED: &str = "dispatch_channel_closed";
+const OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT: &str = "outcome_wait_timeout";
 
 #[derive(Parser)]
 #[command(name = "athena", about = "Secure autonomous multi-agent system")]
@@ -134,6 +136,11 @@ enum Commands {
         #[command(subcommand)]
         action: KpiAction,
     },
+    /// Execute multi-task feature contracts with DAG dependency ordering
+    Feature {
+        #[command(subcommand)]
+        action: FeatureAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -220,6 +227,52 @@ enum KpiAction {
         /// Max rows
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum FeatureAction {
+    /// Validate a feature contract file (YAML or JSON)
+    Validate {
+        /// Path to feature contract file
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Print execution batches and topological order from a feature contract
+    Plan {
+        /// Path to feature contract file
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Dispatch feature tasks using DAG order and wait for terminal outcomes
+    Dispatch {
+        /// Path to feature contract file
+        #[arg(long)]
+        file: PathBuf,
+        /// Global wait timeout per task (seconds) when task-level wait_secs is unset
+        #[arg(long, default_value_t = 180)]
+        wait_secs: u64,
+        /// Continue dispatching independent tasks after failures
+        #[arg(long)]
+        continue_on_failure: bool,
+        /// Resolve DAG and print execution plan without dispatching tasks
+        #[arg(long)]
+        dry_run: bool,
+        /// Optional CLI tool override for this run
+        #[arg(long, value_parser = ["claude_code", "codex", "opencode"])]
+        cli_tool: Option<String>,
+        /// Optional coding model override for this run
+        #[arg(long)]
+        cli_model: Option<String>,
+        /// Override lane for all tasks
+        #[arg(long)]
+        lane: Option<String>,
+        /// Override risk tier for all tasks
+        #[arg(long)]
+        risk: Option<String>,
+        /// Override repo/product label for all tasks
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -368,6 +421,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
+        Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
@@ -421,6 +475,319 @@ async fn handle_kpi(action: KpiAction, config: &Config) -> anyhow::Result<()> {
         KpiAction::History { lane, repo, limit } => {
             let rows = kpi::list_history(&conn, lane.as_deref(), repo.as_deref(), limit)?;
             kpi::print_history(&rows);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+enum FeatureRunStatus {
+    Succeeded,
+    Failed(String),
+    Skipped(String),
+}
+
+async fn handle_feature(
+    action: FeatureAction,
+    config: Config,
+    memory: Arc<MemoryStore>,
+) -> anyhow::Result<()> {
+    match action {
+        FeatureAction::Validate { file } => {
+            let contract = feature_contract::load_feature_contract(&file)?;
+            let batches = contract.execution_batches()?;
+            let enabled = contract.tasks.iter().filter(|t| t.enabled).count();
+            println!(
+                "feature_id={} valid=true tasks_enabled={} batches={}",
+                contract.feature_id,
+                enabled,
+                batches.len()
+            );
+        }
+        FeatureAction::Plan { file } => {
+            let contract = feature_contract::load_feature_contract(&file)?;
+            print_feature_plan(&contract)?;
+        }
+        FeatureAction::Dispatch {
+            file,
+            wait_secs,
+            continue_on_failure,
+            dry_run,
+            cli_tool,
+            cli_model,
+            lane,
+            risk,
+            repo,
+        } => {
+            let contract = feature_contract::load_feature_contract(&file)?;
+            let batches = contract.execution_batches()?;
+            if batches.is_empty() {
+                println!("feature_id={} nothing_to_run=true", contract.feature_id);
+                return Ok(());
+            }
+            if dry_run {
+                print_feature_plan(&contract)?;
+                println!("feature_id={} dry_run=true", contract.feature_id);
+                return Ok(());
+            }
+
+            if let Some(l) = lane.as_deref() {
+                validate_lane(l)?;
+            }
+            if let Some(r) = risk.as_deref() {
+                validate_risk(r)?;
+            }
+
+            let handle = AthenaCore::start(config.clone(), memory).await?;
+            if cli_tool.is_some() || cli_model.is_some() {
+                let mut knobs = handle
+                    .knobs
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("Failed to lock runtime knobs"))?;
+                if let Some(tool) = cli_tool.as_deref() {
+                    knobs.set("cli_tool", tool).map_err(anyhow::Error::msg)?;
+                    eprintln!("Feature override: cli_tool={}", tool);
+                }
+                if let Some(model) = cli_model.as_deref() {
+                    knobs.set("cli_model", model).map_err(anyhow::Error::msg)?;
+                    eprintln!("Feature override: cli_model={}", model);
+                }
+            }
+
+            println!(
+                "feature_id={} mode=dispatch batches={} continue_on_failure={}",
+                contract.feature_id,
+                batches.len(),
+                continue_on_failure
+            );
+            let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
+                std::collections::HashMap::new();
+            let default_lane = lane
+                .or_else(|| contract.lane.clone())
+                .unwrap_or_else(|| "delivery".to_string());
+            let default_risk = risk
+                .or_else(|| contract.risk.clone())
+                .unwrap_or_else(|| "medium".to_string());
+            let default_repo = repo
+                .or_else(|| contract.repo.clone())
+                .unwrap_or_else(kpi::default_repo_name);
+            validate_lane(&default_lane)?;
+            validate_risk(&default_risk)?;
+
+            for (idx, batch) in batches.iter().enumerate() {
+                println!("batch={} tasks={}", idx + 1, batch.join(","));
+                for task_id in batch {
+                    let task = contract.task_by_id(task_id).ok_or_else(|| {
+                        anyhow::anyhow!("Task '{}' missing from contract", task_id)
+                    })?;
+                    if let Some(reason) = blocked_dependency_reason(task, &statuses) {
+                        println!(
+                            "task={} result=skipped reason={}",
+                            task.id,
+                            reason.replace('\n', " ")
+                        );
+                        statuses.insert(task.id.clone(), FeatureRunStatus::Skipped(reason));
+                        continue;
+                    }
+
+                    let lane = task.lane.clone().unwrap_or_else(|| default_lane.clone());
+                    let risk = task.risk.clone().unwrap_or_else(|| default_risk.clone());
+                    let repo = task.repo.clone().unwrap_or_else(|| default_repo.clone());
+                    validate_lane(&lane)?;
+                    validate_risk(&risk)?;
+
+                    let task_wait = task.wait_secs.unwrap_or(wait_secs);
+                    let task_context = build_feature_task_context(&contract, task);
+                    let mut pulse_rx = handle.pulse_bus.subscribe();
+                    let task_dispatch_id = handle
+                        .dispatch_task(core::AutonomousTask {
+                            goal: task.goal.clone(),
+                            context: task_context,
+                            ghost: task.ghost.clone(),
+                            target: crate::pulse::PulseTarget::Broadcast,
+                            lane,
+                            risk_tier: risk,
+                            repo,
+                            task_id: None,
+                        })
+                        .await?;
+
+                    println!(
+                        "task={} dispatched_task_id={} wait_secs={}",
+                        task.id, task_dispatch_id, task_wait
+                    );
+                    let wait =
+                        wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, task_wait)
+                            .await;
+                    let run_status = match wait {
+                        WaitForAutonomousOutcome::Received => {
+                            match wait_for_terminal_outcome_status(&config, &task_dispatch_id, 10)
+                                .await?
+                            {
+                                Some(status) if status == "succeeded" => {
+                                    FeatureRunStatus::Succeeded
+                                }
+                                Some(status) => {
+                                    FeatureRunStatus::Failed(format!("terminal_status={}", status))
+                                }
+                                None => {
+                                    mark_dispatch_task_failed_if_started(
+                                        &config,
+                                        &task_dispatch_id,
+                                        OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT,
+                                    );
+                                    FeatureRunStatus::Failed(
+                                        OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT.to_string(),
+                                    )
+                                }
+                            }
+                        }
+                        WaitForAutonomousOutcome::TimedOut => {
+                            mark_dispatch_task_failed_if_started(
+                                &config,
+                                &task_dispatch_id,
+                                OUTCOME_REASON_DISPATCH_TIMEOUT,
+                            );
+                            FeatureRunStatus::Failed(OUTCOME_REASON_DISPATCH_TIMEOUT.to_string())
+                        }
+                        WaitForAutonomousOutcome::ChannelClosed => {
+                            mark_dispatch_task_failed_if_started(
+                                &config,
+                                &task_dispatch_id,
+                                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED,
+                            );
+                            FeatureRunStatus::Failed(
+                                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED.to_string(),
+                            )
+                        }
+                    };
+                    match &run_status {
+                        FeatureRunStatus::Succeeded => {
+                            println!("task={} result=succeeded", task.id)
+                        }
+                        FeatureRunStatus::Failed(reason) => println!(
+                            "task={} result=failed reason={}",
+                            task.id,
+                            reason.replace('\n', " ")
+                        ),
+                        FeatureRunStatus::Skipped(reason) => println!(
+                            "task={} result=skipped reason={}",
+                            task.id,
+                            reason.replace('\n', " ")
+                        ),
+                    }
+                    statuses.insert(task.id.clone(), run_status.clone());
+                    if matches!(run_status, FeatureRunStatus::Failed(_)) && !continue_on_failure {
+                        anyhow::bail!(
+                            "Feature dispatch stopped at task '{}' due to failure (use --continue-on-failure to continue).",
+                            task.id
+                        );
+                    }
+                }
+            }
+
+            let mut succeeded = 0usize;
+            let mut failed = 0usize;
+            let mut skipped = 0usize;
+            for status in statuses.values() {
+                match status {
+                    FeatureRunStatus::Succeeded => succeeded += 1,
+                    FeatureRunStatus::Failed(_) => failed += 1,
+                    FeatureRunStatus::Skipped(_) => skipped += 1,
+                }
+            }
+            println!(
+                "feature_id={} summary succeeded={} failed={} skipped={}",
+                contract.feature_id, succeeded, failed, skipped
+            );
+            if failed > 0 {
+                anyhow::bail!("Feature dispatch completed with {} failed task(s).", failed);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn blocked_dependency_reason(
+    task: &feature_contract::FeatureTask,
+    statuses: &std::collections::HashMap<String, FeatureRunStatus>,
+) -> Option<String> {
+    let mut blockers = Vec::new();
+    for dep in &task.depends_on {
+        match statuses.get(dep) {
+            Some(FeatureRunStatus::Succeeded) => {}
+            Some(FeatureRunStatus::Failed(reason)) => {
+                blockers.push(format!("dependency '{}' failed ({})", dep, reason));
+            }
+            Some(FeatureRunStatus::Skipped(reason)) => {
+                blockers.push(format!("dependency '{}' skipped ({})", dep, reason));
+            }
+            None => blockers.push(format!("dependency '{}' has no result", dep)),
+        }
+    }
+    if blockers.is_empty() {
+        None
+    } else {
+        Some(blockers.join("; "))
+    }
+}
+
+fn build_feature_task_context(
+    contract: &feature_contract::FeatureContract,
+    task: &feature_contract::FeatureTask,
+) -> String {
+    let mut context = task.context.clone().unwrap_or_default();
+    if !context.is_empty() {
+        context.push('\n');
+    }
+    context.push_str(&format!(
+        "[feature_id:{}]\n[feature_task_id:{}]",
+        contract.feature_id, task.id
+    ));
+    if !task.depends_on.is_empty() {
+        context.push_str(&format!(
+            "\n[feature_depends_on:{}]",
+            task.depends_on.join(",")
+        ));
+    }
+    if let Some(category) = task.auto_store.as_deref() {
+        context.push_str(&format!("\n[auto_store:{}]", category));
+    }
+    if let Some(tool) = task.cli_tool.as_deref() {
+        context.push_str(&format!("\n[cli_tool:{}]", tool));
+    }
+    if let Some(model) = task.cli_model.as_deref() {
+        context.push_str(&format!("\n[cli_model:{}]", model));
+    }
+    context
+}
+
+fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::Result<()> {
+    let batches = contract.execution_batches()?;
+    println!(
+        "feature_id={} tasks_total={} tasks_enabled={} batches={}",
+        contract.feature_id,
+        contract.tasks.len(),
+        contract.tasks.iter().filter(|t| t.enabled).count(),
+        batches.len()
+    );
+    for (idx, batch) in batches.iter().enumerate() {
+        println!("batch={} tasks={}", idx + 1, batch.join(","));
+        for task_id in batch {
+            let task = contract
+                .task_by_id(task_id)
+                .ok_or_else(|| anyhow::anyhow!("task '{}' missing from contract", task_id))?;
+            println!(
+                "  - task={} ghost={} depends_on={} goal={}",
+                task.id,
+                task.ghost.as_deref().unwrap_or("auto"),
+                if task.depends_on.is_empty() {
+                    "-".to_string()
+                } else {
+                    task.depends_on.join(",")
+                },
+                task.goal.replace('\n', " ")
+            );
         }
     }
     Ok(())
@@ -695,6 +1062,37 @@ fn mark_dispatch_task_failed_if_started(config: &Config, task_id: &str, reason: 
             task_id, e
         ),
     }
+}
+
+async fn wait_for_terminal_outcome_status(
+    config: &Config,
+    task_id: &str,
+    wait_secs: u64,
+) -> anyhow::Result<Option<String>> {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(wait_secs);
+    loop {
+        match read_task_outcome_status(config, task_id)? {
+            Some(status) if status != "started" => return Ok(Some(status)),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+}
+
+fn read_task_outcome_status(config: &Config, task_id: &str) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let conn = kpi::open_connection(config)?;
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM autonomous_task_outcomes WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(status)
 }
 
 fn pulse_matches_task_id(pulse: &crate::pulse::Pulse, task_id: &str) -> bool {
@@ -1119,7 +1517,8 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_chat_command, pulse_matches_task_id, wait_for_autonomous_pulse, ChatCommand, WaitForAutonomousOutcome,
+        classify_chat_command, pulse_matches_task_id, wait_for_autonomous_pulse, ChatCommand,
+        WaitForAutonomousOutcome,
     };
     use crate::pulse::{Pulse, PulseSource, Urgency};
 
@@ -1144,7 +1543,10 @@ mod tests {
     #[test]
     fn classify_set_and_default_chat() {
         assert_eq!(classify_chat_command("/set"), ChatCommand::Set);
-        assert_eq!(classify_chat_command("/set temperature 0.2"), ChatCommand::Set);
+        assert_eq!(
+            classify_chat_command("/set temperature 0.2"),
+            ChatCommand::Set
+        );
         assert_eq!(
             classify_chat_command("please summarize this"),
             ChatCommand::Chat

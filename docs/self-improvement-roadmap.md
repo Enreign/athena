@@ -76,6 +76,14 @@ Deliverables:
 - acceptance traceability map (`feature criterion -> task -> evidence`)
 - integration gate after each merged task and at feature completion
 
+Current implementation status:
+
+- initial contract ingestion and DAG-ordered dispatch scaffolding is available via:
+  - `athena feature validate --file <contract>`
+  - `athena feature plan --file <contract>`
+  - `athena feature dispatch --file <contract>`
+- reference workflow: `docs/feature-contract-workflow.md`
+
 Exit criteria:
 
 - at least 5 features delivered through contract-driven DAG flow
