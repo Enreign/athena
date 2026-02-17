@@ -1314,6 +1314,12 @@ fn maintenance_command_specs(profile: &str) -> Vec<MaintenanceCommandSpec> {
     match profile {
         "rust" => vec![
             MaintenanceCommandSpec {
+                name: "cargo_fmt_apply",
+                program: "cargo",
+                args: args(&["fmt", "--all"]),
+                timeout_secs: 600,
+            },
+            MaintenanceCommandSpec {
                 name: "cargo_fmt_check",
                 program: "cargo",
                 args: args(&["fmt", "--all", "--check"]),
