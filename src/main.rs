@@ -34,7 +34,7 @@ mod tool_usage;
 mod tools;
 
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -250,6 +250,18 @@ enum FeatureAction {
         /// Path to feature contract file
         #[arg(long)]
         file: PathBuf,
+    },
+    /// Produce supervised promotion decision from latest dispatch/verify ledgers
+    Promote {
+        /// Path to feature contract file
+        #[arg(long)]
+        file: PathBuf,
+        /// Optional dispatch ledger JSON path (auto-detected when omitted)
+        #[arg(long)]
+        dispatch_ledger: Option<PathBuf>,
+        /// Optional verify ledger JSON path (auto-detected when omitted)
+        #[arg(long)]
+        verify_ledger: Option<PathBuf>,
     },
     /// Dispatch feature tasks using DAG order and wait for terminal outcomes
     Dispatch {
@@ -511,7 +523,7 @@ impl FeatureRunStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureTaskLedgerRow {
     task_id: String,
     dispatch_task_id: Option<String>,
@@ -520,7 +532,7 @@ struct FeatureTaskLedgerRow {
     mapped_acceptance: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureAcceptanceLedgerRow {
     acceptance_id: String,
     covered_by_tasks: Vec<String>,
@@ -529,7 +541,7 @@ struct FeatureAcceptanceLedgerRow {
     satisfied: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureRunLedger {
     timestamp_utc: String,
     feature_id: String,
@@ -539,7 +551,7 @@ struct FeatureRunLedger {
     summary: FeatureRunSummary,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureRunSummary {
     succeeded: usize,
     failed: usize,
@@ -550,7 +562,7 @@ struct FeatureRunSummary {
     promotion_reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureVerifyCheckRow {
     check_id: String,
     command: String,
@@ -562,7 +574,7 @@ struct FeatureVerifyCheckRow {
     stderr_tail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureVerifyAcceptanceRow {
     acceptance_id: String,
     checks: Vec<String>,
@@ -570,7 +582,7 @@ struct FeatureVerifyAcceptanceRow {
     satisfied: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureVerifyLedger {
     timestamp_utc: String,
     feature_id: String,
@@ -580,7 +592,7 @@ struct FeatureVerifyLedger {
     summary: FeatureVerifySummary,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureVerifySummary {
     checks_total: usize,
     checks_passed: usize,
@@ -589,6 +601,19 @@ struct FeatureVerifySummary {
     acceptance_satisfied: bool,
     promotable: bool,
     promotion_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeaturePromotionDecision {
+    timestamp_utc: String,
+    feature_id: String,
+    risk_tier: String,
+    contract_path: String,
+    dispatch_ledger_json: String,
+    verify_ledger_json: String,
+    auto_promotable: bool,
+    approval_required: bool,
+    reasons: Vec<String>,
 }
 
 async fn handle_feature(
@@ -639,6 +664,56 @@ async fn handle_feature(
                     );
                 }
                 anyhow::bail!("Feature verify failed promotion gate.");
+            }
+        }
+        FeatureAction::Promote {
+            file,
+            dispatch_ledger,
+            verify_ledger,
+        } => {
+            let contract = feature_contract::load_feature_contract(&file)?;
+            let dispatch_path =
+                resolve_dispatch_ledger_path(&contract.feature_id, dispatch_ledger.as_deref())?;
+            let verify_path =
+                resolve_verify_ledger_path(&contract.feature_id, verify_ledger.as_deref())?;
+            let dispatch_ledger = read_dispatch_ledger(&dispatch_path)?;
+            let verify_ledger = read_verify_ledger(&verify_path)?;
+            if dispatch_ledger.feature_id != contract.feature_id {
+                anyhow::bail!(
+                    "Dispatch ledger feature_id mismatch: expected '{}' got '{}'",
+                    contract.feature_id,
+                    dispatch_ledger.feature_id
+                );
+            }
+            if verify_ledger.feature_id != contract.feature_id {
+                anyhow::bail!(
+                    "Verify ledger feature_id mismatch: expected '{}' got '{}'",
+                    contract.feature_id,
+                    verify_ledger.feature_id
+                );
+            }
+            let risk = contract.risk.clone().unwrap_or_else(|| "medium".to_string());
+            let decision = build_feature_promotion_decision(
+                &contract,
+                &risk,
+                &file,
+                &dispatch_path,
+                &dispatch_ledger,
+                &verify_path,
+                &verify_ledger,
+            );
+            let (json_path, md_path) = write_feature_promotion_artifacts(&decision)?;
+            println!("feature_promote_json={}", json_path.display());
+            println!("feature_promote_md={}", md_path.display());
+            println!(
+                "feature_id={} promote auto_promotable={} approval_required={} risk={}",
+                decision.feature_id,
+                decision.auto_promotable,
+                decision.approval_required,
+                decision.risk_tier
+            );
+            if !decision.reasons.is_empty() {
+                println!("feature_promote_reasons={}", decision.reasons.join(" | "));
             }
         }
         FeatureAction::Dispatch {
@@ -1397,6 +1472,195 @@ fn tail_text(input: &str, max_chars: usize) -> String {
     chars.into_iter().collect::<String>().trim().to_string()
 }
 
+fn build_feature_promotion_decision(
+    contract: &feature_contract::FeatureContract,
+    risk_tier: &str,
+    contract_path: &std::path::Path,
+    dispatch_path: &std::path::Path,
+    dispatch_ledger: &FeatureRunLedger,
+    verify_path: &std::path::Path,
+    verify_ledger: &FeatureVerifyLedger,
+) -> FeaturePromotionDecision {
+    let mut reasons = Vec::new();
+    if !dispatch_ledger.summary.promotable {
+        reasons.push(format!(
+            "dispatch ledger not promotable: {}",
+            if dispatch_ledger.summary.promotion_reasons.is_empty() {
+                "no details".to_string()
+            } else {
+                dispatch_ledger.summary.promotion_reasons.join(" | ")
+            }
+        ));
+    }
+    if !verify_ledger.summary.promotable {
+        reasons.push(format!(
+            "verify ledger not promotable: {}",
+            if verify_ledger.summary.promotion_reasons.is_empty() {
+                "no details".to_string()
+            } else {
+                verify_ledger.summary.promotion_reasons.join(" | ")
+            }
+        ));
+    }
+
+    let mut auto_promotable = dispatch_ledger.summary.promotable && verify_ledger.summary.promotable;
+    let approval_required = !matches!(risk_tier, "low");
+    if approval_required {
+        reasons.push(format!(
+            "risk tier '{}' requires human approval (PR-only)",
+            risk_tier
+        ));
+        auto_promotable = false;
+    }
+
+    FeaturePromotionDecision {
+        timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        feature_id: contract.feature_id.clone(),
+        risk_tier: risk_tier.to_string(),
+        contract_path: contract_path.display().to_string(),
+        dispatch_ledger_json: dispatch_path.display().to_string(),
+        verify_ledger_json: verify_path.display().to_string(),
+        auto_promotable,
+        approval_required,
+        reasons,
+    }
+}
+
+fn write_feature_promotion_artifacts(
+    decision: &FeaturePromotionDecision,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let out_dir = std::path::PathBuf::from("eval/results");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_feature_id = decision
+        .feature_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let base = format!("feature-promote-{}-{}", safe_feature_id, decision.timestamp_utc);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    std::fs::write(&json_path, serde_json::to_string_pretty(decision)?)?;
+    std::fs::write(&md_path, render_feature_promotion_markdown(decision))?;
+    Ok((json_path, md_path))
+}
+
+fn render_feature_promotion_markdown(decision: &FeaturePromotionDecision) -> String {
+    let mut out = String::new();
+    out.push_str("# Feature Promotion Decision\n\n");
+    out.push_str(&format!("- feature_id: `{}`\n", decision.feature_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", decision.timestamp_utc));
+    out.push_str(&format!("- risk_tier: `{}`\n", decision.risk_tier));
+    out.push_str(&format!("- auto_promotable: `{}`\n", decision.auto_promotable));
+    out.push_str(&format!(
+        "- approval_required: `{}`\n",
+        decision.approval_required
+    ));
+    out.push_str(&format!(
+        "- dispatch_ledger_json: `{}`\n",
+        decision.dispatch_ledger_json
+    ));
+    out.push_str(&format!(
+        "- verify_ledger_json: `{}`\n",
+        decision.verify_ledger_json
+    ));
+    if !decision.reasons.is_empty() {
+        out.push_str("- reasons:\n");
+        for reason in &decision.reasons {
+            out.push_str(&format!("  - {}\n", reason));
+        }
+    }
+    out
+}
+
+fn read_dispatch_ledger(path: &std::path::Path) -> anyhow::Result<FeatureRunLedger> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read dispatch ledger '{}': {}", path.display(), e))?;
+    serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse dispatch ledger JSON '{}': {}",
+            path.display(),
+            e
+        )
+    })
+}
+
+fn read_verify_ledger(path: &std::path::Path) -> anyhow::Result<FeatureVerifyLedger> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read verify ledger '{}': {}", path.display(), e))?;
+    serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse verify ledger JSON '{}': {}",
+            path.display(),
+            e
+        )
+    })
+}
+
+fn resolve_dispatch_ledger_path(
+    feature_id: &str,
+    override_path: Option<&std::path::Path>,
+) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.to_path_buf());
+    }
+    let safe = sanitize_feature_id(feature_id);
+    let prefix = format!("feature-{}-", safe);
+    find_latest_result_json(&prefix, false)
+}
+
+fn resolve_verify_ledger_path(
+    feature_id: &str,
+    override_path: Option<&std::path::Path>,
+) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.to_path_buf());
+    }
+    let safe = sanitize_feature_id(feature_id);
+    let prefix = format!("feature-verify-{}-", safe);
+    find_latest_result_json(&prefix, true)
+}
+
+fn find_latest_result_json(prefix: &str, allow_verify_prefix: bool) -> anyhow::Result<std::path::PathBuf> {
+    let dir = std::path::Path::new("eval/results");
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", dir.display(), e))?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        if !allow_verify_prefix && name.starts_with("feature-verify-") {
+            continue;
+        }
+        candidates.push(path);
+    }
+    candidates.sort();
+    candidates.pop().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No ledger JSON found in eval/results for prefix '{}'. Run dispatch/verify first.",
+            prefix
+        )
+    })
+}
+
+fn sanitize_feature_id(feature_id: &str) -> String {
+    feature_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+}
+
 fn handle_memory(
     action: MemoryAction,
     memory: &MemoryStore,
@@ -2121,8 +2385,9 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_run_ledger, classify_chat_command, pulse_matches_task_id, run_feature_verify,
-        wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, WaitForAutonomousOutcome,
+        build_feature_promotion_decision, build_feature_run_ledger, classify_chat_command,
+        pulse_matches_task_id, run_feature_verify, wait_for_autonomous_pulse, ChatCommand,
+        FeatureRunStatus, WaitForAutonomousOutcome,
     };
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
@@ -2343,5 +2608,39 @@ mod tests {
             .promotion_reasons
             .iter()
             .any(|r| r.contains("acceptance criteria are not satisfied")));
+    }
+
+    #[test]
+    fn promotion_decision_requires_approval_for_medium_risk() {
+        let contract = sample_contract();
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert("T2".to_string(), FeatureRunStatus::Succeeded);
+        let dispatch = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            2,
+            0,
+            0,
+        );
+        let verify =
+            run_feature_verify(&contract, Path::new("eval/feature-contract-example.yaml")).unwrap();
+        let decision = build_feature_promotion_decision(
+            &contract,
+            "medium",
+            Path::new("eval/feature-contract-example.yaml"),
+            Path::new("eval/results/feature-test-dispatch.json"),
+            &dispatch,
+            Path::new("eval/results/feature-test-verify.json"),
+            &verify,
+        );
+        assert!(!decision.auto_promotable);
+        assert!(decision.approval_required);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|r| r.contains("requires human approval")));
     }
 }

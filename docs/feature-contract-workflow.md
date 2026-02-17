@@ -89,6 +89,31 @@ Verify behavior:
   - `eval/results/feature-verify-<feature_id>-<timestamp>.md`
 - fails non-zero if promotion gate fails
 
+## Promote (Supervised Decision)
+
+```bash
+athena feature promote --file eval/feature-contract-example.yaml
+```
+
+Optional explicit ledgers:
+
+```bash
+athena feature promote \
+  --file eval/feature-contract-example.yaml \
+  --dispatch-ledger eval/results/feature-<feature_id>-<timestamp>.json \
+  --verify-ledger eval/results/feature-verify-<feature_id>-<timestamp>.json
+```
+
+Promote behavior:
+
+- loads dispatch + verify ledgers (latest for feature by default)
+- applies risk-tier policy:
+  - `low`: auto-promote allowed only when both ledgers are promotable
+  - `medium/high`: always approval-required (PR-only)
+- emits decision artifacts:
+  - `eval/results/feature-promote-<feature_id>-<timestamp>.json`
+  - `eval/results/feature-promote-<feature_id>-<timestamp>.md`
+
 Validation guarantees:
 
 - every enabled task maps at least one acceptance criterion

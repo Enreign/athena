@@ -76,6 +76,10 @@ Runtime shape for `athena feature verify`:
 - `low risk`: auto-merge allowed only when gates are green and confidence is high
 - `medium/high risk`: PR-only, human approval required
 
+Runtime decision command:
+
+- `athena feature promote --file <contract>`
+
 ## Evidence Ledger
 
 Record evidence per acceptance criterion.
