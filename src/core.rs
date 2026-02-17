@@ -8,8 +8,8 @@ use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::heartbeat;
 use crate::introspect::{self, SharedMetrics, SystemMetrics};
-use crate::kpi::TaskOutcomeStore;
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
+use crate::kpi::TaskOutcomeStore;
 use crate::langfuse::SharedLangfuse;
 use crate::llm::LlmProvider;
 use crate::manager::Manager;
@@ -895,7 +895,11 @@ fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) 
     if !has_verify {
         return (0, 0);
     }
-    if success { (1, 1) } else { (1, 0) }
+    if success {
+        (1, 1)
+    } else {
+        (1, 0)
+    }
 }
 
 fn infer_rollback_flag(goal: &str, result: Option<&str>) -> bool {

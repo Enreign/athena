@@ -145,7 +145,8 @@ impl PulseGate {
             None => return false,
         };
         let now = Utc::now();
-        let local_hour = ((now.timestamp() / 3600 + self.timezone_offset as i64) % 24 + 24) as u32 % 24;
+        let local_hour =
+            ((now.timestamp() / 3600 + self.timezone_offset as i64) % 24 + 24) as u32 % 24;
 
         if start <= end {
             // e.g., 8-18 (quiet during daytime)
@@ -185,7 +186,11 @@ pub fn spawn_pulse_consumer(
 
             observer.log(
                 ObserverCategory::PulseEmitted,
-                format!("{} pulse: \"{}\"", pulse.source.label(), truncate(&pulse.content, 60)),
+                format!(
+                    "{} pulse: \"{}\"",
+                    pulse.source.label(),
+                    truncate(&pulse.content, 60)
+                ),
             );
 
             let gate = {
@@ -215,7 +220,10 @@ pub fn spawn_pulse_consumer(
             // Rate limit: drop old timestamps and check window
             let now = std::time::Instant::now();
             let one_hour = std::time::Duration::from_secs(3600);
-            while delivery_times.front().map_or(false, |t| now.duration_since(*t) > one_hour) {
+            while delivery_times
+                .front()
+                .map_or(false, |t| now.duration_since(*t) > one_hour)
+            {
                 delivery_times.pop_front();
             }
 
@@ -223,7 +231,11 @@ pub fn spawn_pulse_consumer(
             if pulse.urgency != Urgency::High && delivery_times.len() >= MAX_DELIVERIES_PER_HOUR {
                 observer.log(
                     ObserverCategory::PulseSuppressed,
-                    format!("Suppressed: {} (rate limit: {}/hr)", pulse.source.label(), MAX_DELIVERIES_PER_HOUR),
+                    format!(
+                        "Suppressed: {} (rate limit: {}/hr)",
+                        pulse.source.label(),
+                        MAX_DELIVERIES_PER_HOUR
+                    ),
                 );
                 continue;
             }

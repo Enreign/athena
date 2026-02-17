@@ -250,11 +250,15 @@ fn mean_time_to_fix_from_outcomes(
          ORDER BY finished_at ASC",
     )?;
     let failures: Vec<DateTime<Utc>> = fail_stmt
-        .query_map(params![lane, repo, risk_tier], |row| row.get::<_, String>(0))?
+        .query_map(params![lane, repo, risk_tier], |row| {
+            row.get::<_, String>(0)
+        })?
         .filter_map(|r| r.ok().and_then(|ts| parse_sqlite_datetime(&ts)))
         .collect();
     let successes: Vec<DateTime<Utc>> = ok_stmt
-        .query_map(params![lane, repo, risk_tier], |row| row.get::<_, String>(0))?
+        .query_map(params![lane, repo, risk_tier], |row| {
+            row.get::<_, String>(0)
+        })?
         .filter_map(|r| r.ok().and_then(|ts| parse_sqlite_datetime(&ts)))
         .collect();
     if failures.is_empty() || successes.is_empty() {
@@ -299,7 +303,12 @@ pub fn open_connection(config: &Config) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn compute_snapshot(conn: &Connection, lane: &str, repo: &str, risk_tier: &str) -> Result<KpiSnapshot> {
+pub fn compute_snapshot(
+    conn: &Connection,
+    lane: &str,
+    repo: &str,
+    risk_tier: &str,
+) -> Result<KpiSnapshot> {
     if let Some(tagged) = compute_snapshot_from_tagged_outcomes(conn, lane, repo, risk_tier)? {
         return Ok(tagged);
     }
@@ -307,7 +316,11 @@ pub fn compute_snapshot(conn: &Connection, lane: &str, repo: &str, risk_tier: &s
     let tasks_succeeded = count_memories(conn, &["code_change"])?;
     let tasks_failed = count_memories(
         conn,
-        &["code_change_failed", "refactoring_failed", "improvement_idea_failed"],
+        &[
+            "code_change_failed",
+            "refactoring_failed",
+            "improvement_idea_failed",
+        ],
     )?;
     let tasks_started = tasks_succeeded + tasks_failed;
 
@@ -729,16 +742,12 @@ mod tests {
             .record_finish("t2", "succeeded", 0, 0, false, None)
             .unwrap();
 
-        assert!(
-            store
-                .fail_task_if_started("t1", "dispatch wait timeout")
-                .unwrap()
-        );
-        assert!(
-            !store
-                .fail_task_if_started("t2", "dispatch wait timeout")
-                .unwrap()
-        );
+        assert!(store
+            .fail_task_if_started("t1", "dispatch wait timeout")
+            .unwrap());
+        assert!(!store
+            .fail_task_if_started("t2", "dispatch wait timeout")
+            .unwrap());
 
         let conn = store.conn.lock().unwrap();
         let t1: (String, Option<String>) = conn

@@ -58,7 +58,10 @@ impl LangfuseClient {
     }
 
     /// Ingest events synchronously. Useful for short-lived CLI commands.
-    pub async fn ingest_sync(&self, events: Vec<serde_json::Value>) -> std::result::Result<(), String> {
+    pub async fn ingest_sync(
+        &self,
+        events: Vec<serde_json::Value>,
+    ) -> std::result::Result<(), String> {
         if events.is_empty() {
             return Ok(());
         }
@@ -101,7 +104,8 @@ impl LangfuseClient {
             },
             "output": payload,
         });
-        self.ingest_sync(vec![ingestion_event("trace-create", body)]).await
+        self.ingest_sync(vec![ingestion_event("trace-create", body)])
+            .await
     }
 }
 

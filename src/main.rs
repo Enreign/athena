@@ -912,7 +912,10 @@ fn build_self_build_review_checklist(
     );
 
     let evidence = vec![
-        format!("dispatch_terminal_status={}", critic.reasons.is_empty() || critic.passed),
+        format!(
+            "dispatch_terminal_status={}",
+            critic.reasons.is_empty() || critic.passed
+        ),
         format!(
             "maintenance_all_passed={}",
             maintenance.iter().all(|m| m.status == "passed")
@@ -967,7 +970,10 @@ fn render_self_build_review_markdown(checklist: &SelfBuildReviewChecklist) -> St
     out.push_str(&format!("- timestamp_utc: `{}`\n", checklist.timestamp_utc));
     out.push_str(&format!("- risk_tier: `{}`\n", checklist.risk_tier));
     out.push_str(&format!("- merge_ready: `{}`\n", checklist.merge_ready));
-    out.push_str(&format!("- blast_radius: `{}`\n", checklist.blast_radius_summary));
+    out.push_str(&format!(
+        "- blast_radius: `{}`\n",
+        checklist.blast_radius_summary
+    ));
     out.push_str(&format!("- ticket: {}\n\n", checklist.ticket));
 
     out.push_str("## Evidence\n\n");
@@ -1415,7 +1421,10 @@ fn evaluate_self_build_guardrails(
 
     details.sort_by(|a, b| a.code.cmp(&b.code).then(a.message.cmp(&b.message)));
     details.dedup_by(|a, b| a.code == b.code && a.message == b.message);
-    let violations = details.iter().map(|v| v.message.clone()).collect::<Vec<_>>();
+    let violations = details
+        .iter()
+        .map(|v| v.message.clone())
+        .collect::<Vec<_>>();
     let hard_block_codes = details
         .iter()
         .filter(|v| v.hard_block)
@@ -1552,7 +1561,8 @@ async fn execute_self_build_promotion(
     let branch = self_build_promotion_branch(run_id);
     execution.branch = Some(branch.clone());
 
-    let checkout = run_command_capture(worktree, "git", &args(&["checkout", "-b", &branch]), 60).await;
+    let checkout =
+        run_command_capture(worktree, "git", &args(&["checkout", "-b", &branch]), 60).await;
     execution
         .commands
         .push(build_promotion_command("checkout_branch", checkout.clone()));
@@ -1583,7 +1593,7 @@ async fn execute_self_build_promotion(
     let commit_run = run_command_capture(
         worktree,
         "git",
-        &[ "commit".to_string(), "-m".to_string(), commit_msg ],
+        &["commit".to_string(), "-m".to_string(), commit_msg],
         120,
     )
     .await;
@@ -1676,10 +1686,7 @@ async fn execute_self_build_promotion(
         return execution;
     }
 
-    let pr_target = execution
-        .pr_url
-        .clone()
-        .unwrap_or_else(|| branch.clone());
+    let pr_target = execution.pr_url.clone().unwrap_or_else(|| branch.clone());
     let merge_run = run_command_capture(
         worktree,
         "gh",
@@ -1895,7 +1902,9 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
     out.push_str("## Promotion Execution\n\n");
     out.push_str(&format!(
         "- mode: `{}` status: `{}` merged: `{}`\n",
-        ledger.promotion_execution.mode, ledger.promotion_execution.status, ledger.promotion_execution.merged
+        ledger.promotion_execution.mode,
+        ledger.promotion_execution.status,
+        ledger.promotion_execution.merged
     ));
     if let Some(branch) = &ledger.promotion_execution.branch {
         out.push_str(&format!("- branch: `{}`\n", branch));
@@ -2170,7 +2179,8 @@ async fn run_self_build(
     let (review_json_path, review_md_path) =
         write_self_build_review_artifacts(&base_repo, &review_checklist)?;
     let promotion = decide_self_build_promotion(&risk, allow_auto_promote, &critic);
-    let policy_reason_codes = self_build_policy_reason_codes(&guardrails, &critic, &review_checklist);
+    let policy_reason_codes =
+        self_build_policy_reason_codes(&guardrails, &critic, &review_checklist);
     let policy_promotion_allowed = !guardrails.hard_blocked
         && critic.passed
         && (promote_mode == SelfBuildPromoteMode::None
@@ -4773,9 +4783,9 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_promotion_decision, build_feature_run_ledger, classify_chat_command,
-        build_self_build_review_checklist, compute_feature_outcome_grace_secs,
-        evaluate_self_build_guardrails,
+        build_feature_promotion_decision, build_feature_run_ledger,
+        build_self_build_review_checklist, classify_chat_command,
+        compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
         wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
@@ -5232,10 +5242,7 @@ index 1111111..2222222 100644
             true,
         );
         assert_eq!(plan.status, "blocked");
-        assert!(plan
-            .reasons
-            .iter()
-            .any(|r| r.contains("policy.guardrail.")));
+        assert!(plan.reasons.iter().any(|r| r.contains("policy.guardrail.")));
     }
 
     #[test]

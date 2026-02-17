@@ -55,7 +55,6 @@ pub fn sample_indices(count: usize, total: usize) -> Vec<usize> {
     indices
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +114,4 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), 5);
     }
-
 }

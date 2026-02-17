@@ -186,7 +186,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             // Use execute() for DML (INSERT/UPDATE/DELETE) since execute_batch
             // fails on statements that return results.
             let upper = stmt.to_uppercase();
-            if upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE") {
+            if upper.starts_with("INSERT")
+                || upper.starts_with("UPDATE")
+                || upper.starts_with("DELETE")
+            {
                 conn.execute(stmt, [])?;
             } else {
                 conn.execute_batch(&format!("{};", stmt))?;

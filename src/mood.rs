@@ -99,7 +99,10 @@ impl MoodState {
         if modifier != old_modifier {
             observer.log(
                 ObserverCategory::MoodChange,
-                format!("Mood shift: {} -> {} (energy: {:.2}, valence: {:.2})", old_modifier, modifier, energy, valence),
+                format!(
+                    "Mood shift: {} -> {} (energy: {:.2}, valence: {:.2})",
+                    old_modifier, modifier, energy, valence
+                ),
             );
         } else {
             tracing::debug!(energy = %energy, valence = %valence, modifier = %modifier, "Mood drift (no shift)");
@@ -159,20 +162,21 @@ impl MoodState {
     /// Peak: 9-11am, Dip: 2-3pm, Wind-down: evening.
     fn time_of_day_energy(&self) -> f32 {
         let now = chrono::Utc::now();
-        let local_hour = ((now.timestamp() / 3600 + self.timezone_offset as i64) % 24 + 24) as f32 % 24.0;
+        let local_hour =
+            ((now.timestamp() / 3600 + self.timezone_offset as i64) % 24 + 24) as f32 % 24.0;
         let local_minute = ((now.timestamp() / 60) % 60) as f32;
         let t = local_hour + local_minute / 60.0;
 
         // Piecewise energy curve
         match t {
-            t if t < 6.0 => 0.2,             // sleeping/very low
-            t if t < 9.0 => 0.2 + (t - 6.0) * 0.2,  // waking up: 0.2 -> 0.8
-            t if t < 11.0 => 0.8 + (t - 9.0) * 0.05, // peak: 0.8 -> 0.9
-            t if t < 14.0 => 0.9 - (t - 11.0) * 0.1, // gentle decline: 0.9 -> 0.6
-            t if t < 15.0 => 0.6 - (t - 14.0) * 0.1, // afternoon dip: 0.6 -> 0.5
-            t if t < 17.0 => 0.5 + (t - 15.0) * 0.1, // recovery: 0.5 -> 0.7
+            t if t < 6.0 => 0.2,                       // sleeping/very low
+            t if t < 9.0 => 0.2 + (t - 6.0) * 0.2,     // waking up: 0.2 -> 0.8
+            t if t < 11.0 => 0.8 + (t - 9.0) * 0.05,   // peak: 0.8 -> 0.9
+            t if t < 14.0 => 0.9 - (t - 11.0) * 0.1,   // gentle decline: 0.9 -> 0.6
+            t if t < 15.0 => 0.6 - (t - 14.0) * 0.1,   // afternoon dip: 0.6 -> 0.5
+            t if t < 17.0 => 0.5 + (t - 15.0) * 0.1,   // recovery: 0.5 -> 0.7
             t if t < 21.0 => 0.7 - (t - 17.0) * 0.075, // evening decline: 0.7 -> 0.4
-            _ => 0.4 - (t - 21.0) * 0.067,    // wind-down: 0.4 -> ~0.2
+            _ => 0.4 - (t - 21.0) * 0.067,             // wind-down: 0.4 -> ~0.2
         }
         .clamp(0.1, 1.0)
     }

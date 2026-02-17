@@ -1,6 +1,6 @@
-# One ticket per line. Keep scope small and bounded.
-# These are starter tickets for supervised Phase 3 runs.
+# One ticket per line. Keep scope small, explicit, and testable.
+# Use concrete file paths and observable acceptance criteria.
 
-Tighten self-build guardrail policy output formatting and add unit tests for reason-code stability.
-Improve self-build markdown artifact readability by grouping checklist and promotion sections.
-Add regression tests for self-build review checklist merge readiness logic.
+In src/main.rs add a unit test named parse_pr_url_returns_none_when_missing that asserts parse_pr_url("no pull request link here") == None, then run cargo test parse_pr_url_returns_none_when_missing.
+In docs/self-build-supervised-batch.md add a section titled "Preflight Checklist" with exactly three bullets: "verify git working tree is clean", "verify athena binary is built", and "verify gh auth status is valid"; do not change other docs.
+In docs/self-improvement-roadmap.md under Phase 3 deliverables add one bullet: "supervised batch must report at least one pr_opened before considering auto mode trials", then ensure markdown formatting remains clean.

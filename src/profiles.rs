@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::config::{GhostConfig, Config, MountConfig};
+use crate::config::{Config, GhostConfig, MountConfig};
 use crate::error::{AthenaError, Result};
 
 /// A profile file loaded from ~/.athena/ghosts/*.toml
@@ -44,7 +44,11 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let entries = match std::fs::read_dir(&profile_dir) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!("Cannot read profile directory {}: {}", profile_dir.display(), e);
+            tracing::warn!(
+                "Cannot read profile directory {}: {}",
+                profile_dir.display(),
+                e
+            );
             return Ok(ghosts);
         }
     };
@@ -57,20 +61,33 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
 
         match load_profile(&path) {
             Ok(profile) => {
-                tracing::info!("Loaded ghost profile: {} ({})", profile.name, path.display());
+                tracing::info!(
+                    "Loaded ghost profile: {} ({})",
+                    profile.name,
+                    path.display()
+                );
 
-                let soul = profile.soul_file.as_ref().and_then(|path| {
-                    match crate::config::load_soul_file(path) {
-                        Ok(content) => {
-                            tracing::info!("Loaded soul for profile ghost '{}' from {}", profile.name, path);
-                            Some(content)
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to load soul for profile ghost '{}': {}", profile.name, e);
-                            None
-                        }
-                    }
-                });
+                let soul =
+                    profile.soul_file.as_ref().and_then(
+                        |path| match crate::config::load_soul_file(path) {
+                            Ok(content) => {
+                                tracing::info!(
+                                    "Loaded soul for profile ghost '{}' from {}",
+                                    profile.name,
+                                    path
+                                );
+                                Some(content)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load soul for profile ghost '{}': {}",
+                                    profile.name,
+                                    e
+                                );
+                                None
+                            }
+                        },
+                    );
 
                 let ghost = GhostConfig {
                     name: profile.name.clone(),

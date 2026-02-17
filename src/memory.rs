@@ -41,9 +41,9 @@ impl MemoryStore {
 
     /// Safely acquire the database connection lock
     fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|e| {
-            AthenaError::Internal(format!("Database lock poisoned: {}", e))
-        })
+        self.conn
+            .lock()
+            .map_err(|e| AthenaError::Internal(format!("Database lock poisoned: {}", e)))
     }
 
     /// Load all active embeddings into the in-memory cache.
@@ -51,7 +51,7 @@ impl MemoryStore {
         let pairs = {
             let conn = self.conn()?;
             let mut stmt = conn.prepare(
-                "SELECT id, embedding FROM memories WHERE active = 1 AND embedding IS NOT NULL"
+                "SELECT id, embedding FROM memories WHERE active = 1 AND embedding IS NOT NULL",
             )?;
             let rows = stmt.query_map([], |row| {
                 let id: String = row.get(0)?;
@@ -65,9 +65,10 @@ impl MemoryStore {
             pairs
         };
 
-        let mut cache = self.embedding_cache.write().map_err(|e| {
-            AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e))
-        })?;
+        let mut cache = self
+            .embedding_cache
+            .write()
+            .map_err(|e| AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e)))?;
         for (id, blob) in pairs {
             if let Some(emb) = blob_to_embedding(&blob) {
                 cache.insert(id, emb);
@@ -98,13 +99,19 @@ impl MemoryStore {
 
     /// Store a new memory, optionally with a precomputed embedding vector.
     /// If a near-duplicate exists (above dedup_threshold), updates it instead.
-    pub fn store(&self, category: &str, content: &str, embedding: Option<&[f32]>) -> Result<String> {
+    pub fn store(
+        &self,
+        category: &str,
+        content: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<String> {
         // Check for dedup
         if let Some(emb) = embedding {
             if let Some((dup_id, sim)) = self.find_duplicate(emb) {
                 tracing::info!(
                     "Deduplicated memory: {} (similarity: {:.3})",
-                    &dup_id[..8.min(dup_id.len())], sim
+                    &dup_id[..8.min(dup_id.len())],
+                    sim
                 );
                 let conn = self.conn()?;
                 let rowid: i64 = conn.query_row(
@@ -168,7 +175,7 @@ impl MemoryStore {
         let mut stmt = conn.prepare(
             "SELECT id, category, content, active, created_at FROM memories
              WHERE active = 1 AND (content LIKE ?1 ESCAPE '\\' OR category LIKE ?1 ESCAPE '\\')
-             ORDER BY created_at DESC LIMIT 10"
+             ORDER BY created_at DESC LIMIT 10",
         )?;
         let rows = stmt.query_map(rusqlite::params![pattern], |row| {
             Ok(Memory {
@@ -206,7 +213,7 @@ impl MemoryStore {
              JOIN memories m ON m.rowid = fts.rowid
              WHERE memories_fts MATCH ?1 AND m.active = 1
              ORDER BY fts.rank
-             LIMIT 20"
+             LIMIT 20",
         )?;
         let rows = stmt.query_map(rusqlite::params![fts_query], |row| {
             Ok((
@@ -232,7 +239,11 @@ impl MemoryStore {
     }
 
     /// Semantic search: cosine similarity via in-memory embedding cache.
-    pub fn search_semantic(&self, query_embedding: &[f32], limit: usize) -> Result<Vec<(Memory, f32)>> {
+    pub fn search_semantic(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>> {
         // Phase 1: compute similarities in memory (only hold cache read lock)
         let id_scores = {
             let cache = self.embedding_cache.read().map_err(|e| {
@@ -336,9 +347,8 @@ impl MemoryStore {
     /// Return IDs and content of active memories that have no embedding yet.
     pub fn memories_without_embeddings(&self) -> Result<Vec<(String, String)>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, content FROM memories WHERE active = 1 AND embedding IS NULL"
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id, content FROM memories WHERE active = 1 AND embedding IS NULL")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -354,7 +364,7 @@ impl MemoryStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, category, content, active, created_at FROM memories
-             WHERE active = 1 ORDER BY created_at DESC"
+             WHERE active = 1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Memory {
@@ -423,7 +433,7 @@ impl MemoryStore {
             "SELECT role, content FROM conversations
              WHERE session_key = ?1
              ORDER BY created_at DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![session_key, limit as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -449,9 +459,7 @@ impl MemoryStore {
     /// Get all profile key-value pairs for a user.
     pub fn get_user_profile(&self, user_id: &str) -> Result<HashMap<String, String>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT key, value FROM user_profiles WHERE user_id = ?1"
-        )?;
+        let mut stmt = conn.prepare("SELECT key, value FROM user_profiles WHERE user_id = ?1")?;
         let rows = stmt.query_map(rusqlite::params![user_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -490,7 +498,8 @@ impl MemoryStore {
                     row.get::<_, String>(2)?,
                 ))
             },
-        ).map_err(|e| AthenaError::Db(e))
+        )
+        .map_err(|e| AthenaError::Db(e))
     }
 
     /// Persist mood state.
@@ -506,8 +515,14 @@ impl MemoryStore {
     // --- Scheduled jobs ---
 
     pub fn create_scheduled_job(
-        &self, id: &str, name: &str, schedule_type: &str, schedule_data: &str,
-        ghost: Option<&str>, prompt: &str, next_run: Option<&str>,
+        &self,
+        id: &str,
+        name: &str,
+        schedule_type: &str,
+        schedule_data: &str,
+        ghost: Option<&str>,
+        prompt: &str,
+        next_run: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -543,10 +558,19 @@ impl MemoryStore {
         for row in rows {
             let r = row?;
             let schedule = crate::scheduler::Schedule::from_db(&r.schedule_type, &r.schedule_data)
-                .unwrap_or(crate::scheduler::Schedule::Interval { every_secs: 3600, jitter: 0.1 });
-            let next_run = r.next_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .unwrap_or(crate::scheduler::Schedule::Interval {
+                    every_secs: 3600,
+                    jitter: 0.1,
+                });
+            let next_run = r
+                .next_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
-            let last_run = r.last_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            let last_run = r
+                .last_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
             jobs.push(crate::scheduler::Job {
                 id: r.id,
@@ -589,10 +613,19 @@ impl MemoryStore {
         for row in rows {
             let r = row?;
             let schedule = crate::scheduler::Schedule::from_db(&r.schedule_type, &r.schedule_data)
-                .unwrap_or(crate::scheduler::Schedule::Interval { every_secs: 3600, jitter: 0.1 });
-            let next_run = r.next_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .unwrap_or(crate::scheduler::Schedule::Interval {
+                    every_secs: 3600,
+                    jitter: 0.1,
+                });
+            let next_run = r
+                .next_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
-            let last_run = r.last_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            let last_run = r
+                .last_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
             jobs.push(crate::scheduler::Job {
                 id: r.id,
@@ -609,7 +642,13 @@ impl MemoryStore {
         Ok(jobs)
     }
 
-    pub fn update_job_run(&self, id: &str, next_run: Option<&str>, last_run: &str, disable: bool) -> Result<()> {
+    pub fn update_job_run(
+        &self,
+        id: &str,
+        next_run: Option<&str>,
+        last_run: &str,
+        disable: bool,
+    ) -> Result<()> {
         let conn = self.conn()?;
         if disable {
             conn.execute(
@@ -627,7 +666,10 @@ impl MemoryStore {
 
     pub fn delete_scheduled_job(&self, id: &str) -> Result<bool> {
         let conn = self.conn()?;
-        let deleted = conn.execute("DELETE FROM scheduled_jobs WHERE id = ?1", rusqlite::params![id])?;
+        let deleted = conn.execute(
+            "DELETE FROM scheduled_jobs WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
         Ok(deleted > 0)
     }
 
@@ -718,16 +760,14 @@ fn time_decay_factor(created_at: &str, half_life_days: f32) -> f32 {
 /// Lowercases, filters stopwords and very short words (< 2 chars).
 fn extract_keywords(query: &str) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
-        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "need", "must",
-        "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-        "they", "them", "his", "her", "its", "this", "that", "these", "those",
-        "what", "which", "who", "whom", "where", "when", "how", "why",
-        "and", "or", "but", "if", "then", "so", "than", "too", "very",
-        "of", "in", "on", "at", "to", "for", "with", "from", "by", "about",
-        "into", "like", "not", "no", "all", "any", "some", "every",
-        "tell", "know", "use", "get", "got", "also",
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "need", "must", "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they",
+        "them", "his", "her", "its", "this", "that", "these", "those", "what", "which", "who",
+        "whom", "where", "when", "how", "why", "and", "or", "but", "if", "then", "so", "than",
+        "too", "very", "of", "in", "on", "at", "to", "for", "with", "from", "by", "about", "into",
+        "like", "not", "no", "all", "any", "some", "every", "tell", "know", "use", "get", "got",
+        "also",
     ];
 
     query
@@ -829,13 +869,17 @@ mod tests {
         let store = setup_test_db();
 
         // Store three memories with different embeddings
-        let emb1 = fake_embedding(0.9);  // similar to query
-        let emb2 = fake_embedding(0.1);  // different from query
+        let emb1 = fake_embedding(0.9); // similar to query
+        let emb2 = fake_embedding(0.1); // different from query
         let emb3 = fake_embedding(0.85); // somewhat similar
 
         store.store("fact", "I prefer Python", Some(&emb1)).unwrap();
-        store.store("fact", "The weather is nice", Some(&emb2)).unwrap();
-        store.store("fact", "I also like Rust", Some(&emb3)).unwrap();
+        store
+            .store("fact", "The weather is nice", Some(&emb2))
+            .unwrap();
+        store
+            .store("fact", "I also like Rust", Some(&emb3))
+            .unwrap();
 
         // Query with embedding close to emb1
         let query = fake_embedding(0.9);
@@ -844,7 +888,10 @@ mod tests {
         assert_eq!(results.len(), 3);
         // First result should be the most similar (emb1 = exact match)
         assert_eq!(results[0].0.content, "I prefer Python");
-        assert!((results[0].1 - 1.0).abs() < 1e-5, "Expected ~1.0 similarity for identical vector");
+        assert!(
+            (results[0].1 - 1.0).abs() < 1e-5,
+            "Expected ~1.0 similarity for identical vector"
+        );
         // Scores should be descending
         assert!(results[0].1 >= results[1].1);
         assert!(results[1].1 >= results[2].1);
@@ -854,7 +901,9 @@ mod tests {
     fn test_semantic_search_skips_memories_without_embeddings() {
         let store = setup_test_db();
 
-        store.store("fact", "Has embedding", Some(&fake_embedding(0.5))).unwrap();
+        store
+            .store("fact", "Has embedding", Some(&fake_embedding(0.5)))
+            .unwrap();
         store.store("fact", "No embedding", None).unwrap();
 
         let query = fake_embedding(0.5);
@@ -870,7 +919,9 @@ mod tests {
 
         for i in 0..5 {
             let emb = fake_embedding(i as f32 * 0.2);
-            store.store("fact", &format!("Memory {}", i), Some(&emb)).unwrap();
+            store
+                .store("fact", &format!("Memory {}", i), Some(&emb))
+                .unwrap();
         }
 
         let query = fake_embedding(0.5);
@@ -926,18 +977,30 @@ mod tests {
 
         // Memory 1: has embedding, contains "config.toml"
         let emb1 = fake_embedding(0.3);
-        store.store("fact", "Edit config.toml for settings", Some(&emb1)).unwrap();
+        store
+            .store("fact", "Edit config.toml for settings", Some(&emb1))
+            .unwrap();
 
         // Memory 2: has embedding, semantically close to query but no keyword match
         let emb2 = fake_embedding(0.9);
-        store.store("fact", "Application preferences are in the settings file", Some(&emb2)).unwrap();
+        store
+            .store(
+                "fact",
+                "Application preferences are in the settings file",
+                Some(&emb2),
+            )
+            .unwrap();
 
         // Memory 3: no embedding, but contains keyword
-        store.store("fact", "config.toml uses TOML format", None).unwrap();
+        store
+            .store("fact", "config.toml uses TOML format", None)
+            .unwrap();
 
         // Query: "config.toml" with embedding close to emb2
         let query_emb = fake_embedding(0.9);
-        let results = store.search_hybrid("config.toml", Some(&query_emb), 10).unwrap();
+        let results = store
+            .search_hybrid("config.toml", Some(&query_emb), 10)
+            .unwrap();
 
         // Should find all three: keyword matches (1 & 3) + semantic match (2)
         assert_eq!(results.len(), 3);
@@ -955,7 +1018,9 @@ mod tests {
 
         // Memory that matches both keyword and semantic
         let emb = fake_embedding(0.5);
-        store.store("fact", "Rust is a systems language", Some(&emb)).unwrap();
+        store
+            .store("fact", "Rust is a systems language", Some(&emb))
+            .unwrap();
 
         let query_emb = fake_embedding(0.5);
         let results = store.search_hybrid("Rust", Some(&query_emb), 10).unwrap();
@@ -971,16 +1036,22 @@ mod tests {
 
         // Memory with embedding very different from query
         let emb = fake_embedding(0.01);
-        store.store("fact", "Completely unrelated", Some(&emb)).unwrap();
+        store
+            .store("fact", "Completely unrelated", Some(&emb))
+            .unwrap();
 
         // Query embedding far from stored
         let query_emb = fake_embedding(0.99);
-        let results = store.search_hybrid("nonexistent", Some(&query_emb), 10).unwrap();
+        let results = store
+            .search_hybrid("nonexistent", Some(&query_emb), 10)
+            .unwrap();
 
         // Keyword won't match, semantic similarity should be below threshold
         for m in &results {
-            assert_ne!(m.content, "Completely unrelated",
-                "low-similarity result should be filtered");
+            assert_ne!(
+                m.content, "Completely unrelated",
+                "low-similarity result should be filtered"
+            );
         }
     }
 
@@ -999,7 +1070,9 @@ mod tests {
     #[test]
     fn test_keyword_search_still_works() {
         let store = setup_test_db();
-        store.store("fact", "Rust is a systems programming language", None).unwrap();
+        store
+            .store("fact", "Rust is a systems programming language", None)
+            .unwrap();
         store.store("fact", "Python is interpreted", None).unwrap();
 
         let results = store.search("Rust").unwrap();
@@ -1015,7 +1088,9 @@ mod tests {
 
         // Very similar embedding should deduplicate
         let emb2 = fake_embedding(0.51);
-        let id2 = store.store("fact", "I like Python a lot", Some(&emb2)).unwrap();
+        let id2 = store
+            .store("fact", "I like Python a lot", Some(&emb2))
+            .unwrap();
         assert_eq!(id1, id2);
 
         let memories = store.list().unwrap();
@@ -1042,8 +1117,12 @@ mod tests {
     fn test_conversation_turns() {
         let store = setup_test_db();
         store.save_turn("cli:local:local", "user", "Hello").unwrap();
-        store.save_turn("cli:local:local", "assistant", "Hi there!").unwrap();
-        store.save_turn("cli:local:local", "user", "How are you?").unwrap();
+        store
+            .save_turn("cli:local:local", "assistant", "Hi there!")
+            .unwrap();
+        store
+            .save_turn("cli:local:local", "user", "How are you?")
+            .unwrap();
 
         let turns = store.recent_turns("cli:local:local", 10).unwrap();
         assert_eq!(turns.len(), 3);
@@ -1071,8 +1150,12 @@ mod tests {
     #[test]
     fn test_conversation_session_isolation() {
         let store = setup_test_db();
-        store.save_turn("cli:user1:chat1", "user", "Hello from user1").unwrap();
-        store.save_turn("cli:user2:chat2", "user", "Hello from user2").unwrap();
+        store
+            .save_turn("cli:user1:chat1", "user", "Hello from user1")
+            .unwrap();
+        store
+            .save_turn("cli:user2:chat2", "user", "Hello from user2")
+            .unwrap();
 
         let turns1 = store.recent_turns("cli:user1:chat1", 10).unwrap();
         assert_eq!(turns1.len(), 1);
@@ -1086,9 +1169,16 @@ mod tests {
     #[test]
     fn test_time_decay_factor_recent() {
         // A memory created now should have decay factor ~1.0
-        let now = Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
         let factor = time_decay_factor(&now, 30.0);
-        assert!((factor - 1.0).abs() < 0.01, "Recent memory should have factor ~1.0, got {}", factor);
+        assert!(
+            (factor - 1.0).abs() < 0.01,
+            "Recent memory should have factor ~1.0, got {}",
+            factor
+        );
     }
 
     #[test]
@@ -1098,7 +1188,11 @@ mod tests {
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         let factor = time_decay_factor(&old, 30.0);
-        assert!((factor - 0.5).abs() < 0.01, "30-day-old memory should have factor ~0.5, got {}", factor);
+        assert!(
+            (factor - 0.5).abs() < 0.01,
+            "30-day-old memory should have factor ~0.5, got {}",
+            factor
+        );
     }
 
     #[test]

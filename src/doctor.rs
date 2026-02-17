@@ -498,7 +498,8 @@ fn refactor_artifacts_check(snap: &DoctorSnapshot) -> CheckItem {
             snap.counts.refactoring_failed
         ),
         fix: (refactor_artifacts == 0).then(|| {
-            "Wait for the refactoring scanner cycle or trigger related autonomous tasks.".to_string()
+            "Wait for the refactoring scanner cycle or trigger related autonomous tasks."
+                .to_string()
         }),
     }
 }
