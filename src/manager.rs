@@ -25,6 +25,48 @@ struct DirectStep {
     params: serde_json::Value,
 }
 
+const TOOL_JSON_LEAK_CONTEXT: &str =
+    "The orchestrator attempted to use tools directly. Delegate this task properly.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolJsonLeakReason {
+    SimpleAnswer,
+    RawResponse,
+}
+
+impl ToolJsonLeakReason {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::SimpleAnswer => "simple_answer",
+            Self::RawResponse => "raw_response",
+        }
+    }
+}
+
+fn contains_tool_json_leak_signature(text: &str) -> bool {
+    text.contains("\"tool\"") && text.contains("\"params\"")
+}
+
+fn classify_tool_json_leak(
+    candidate: &str,
+    user_input: &str,
+    reason: ToolJsonLeakReason,
+) -> Option<Classification> {
+    if !contains_tool_json_leak_signature(candidate) {
+        return None;
+    }
+
+    tracing::warn!(
+        reason = reason.tag(),
+        "Orchestrator response contains tool JSON, re-classifying as complex"
+    );
+    Some(Classification::Complex {
+        ghost_name: "coder".to_string(),
+        goal: user_input.to_string(),
+        context: TOOL_JSON_LEAK_CONTEXT.to_string(),
+    })
+}
+
 fn compact_context_line(input: &str, max_chars: usize) -> String {
     let first_line = input.lines().next().unwrap_or("").trim();
     if first_line.chars().count() <= max_chars {
@@ -816,33 +858,21 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             }
             if let Some(answer) = json["answer"].as_str() {
                 // Safety net: if the "simple" answer contains tool-call JSON,
-                // the orchestrator is confused — re-classify as complex
-                if answer.contains("\"tool\"") && answer.contains("\"params\"") {
-                    tracing::warn!(
-                        "Orchestrator leaked tool JSON in simple answer, re-classifying as complex"
-                    );
-                    return Ok(Classification::Complex {
-                        ghost_name: "coder".to_string(),
-                        goal: user_input.to_string(),
-                        context: "The orchestrator attempted to use tools directly. Delegate this task properly.".to_string(),
-                    });
+                // the orchestrator is confused — re-classify as complex.
+                if let Some(classification) =
+                    classify_tool_json_leak(answer, user_input, ToolJsonLeakReason::SimpleAnswer)
+                {
+                    return Ok(classification);
                 }
                 return Ok(Classification::Simple(answer.to_string()));
             }
         }
 
         // Fallback: if raw response contains tool-call JSON, classify as complex
-        if response.contains("\"tool\"") && response.contains("\"params\"") {
-            tracing::warn!(
-                "Orchestrator raw response contains tool JSON, re-classifying as complex"
-            );
-            return Ok(Classification::Complex {
-                ghost_name: "coder".to_string(),
-                goal: user_input.to_string(),
-                context:
-                    "The orchestrator attempted to use tools directly. Delegate this task properly."
-                        .to_string(),
-            });
+        if let Some(classification) =
+            classify_tool_json_leak(&response, user_input, ToolJsonLeakReason::RawResponse)
+        {
+            return Ok(classification);
         }
 
         // Fallback: treat the raw response as a simple answer
@@ -1078,4 +1108,52 @@ enum Classification {
         goal: String,
         context: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_json_leak_reason_tags_are_stable() {
+        assert_eq!(ToolJsonLeakReason::SimpleAnswer.tag(), "simple_answer");
+        assert_eq!(ToolJsonLeakReason::RawResponse.tag(), "raw_response");
+    }
+
+    #[test]
+    fn classify_tool_json_leak_returns_complex_for_signature() {
+        let leaked = r#"{"tool":"file_edit","params":{"path":"src/main.rs"}}"#;
+        let classification =
+            classify_tool_json_leak(leaked, "implement feature", ToolJsonLeakReason::RawResponse)
+                .expect("expected leak classification");
+
+        match classification {
+            Classification::Complex {
+                ghost_name,
+                goal,
+                context,
+            } => {
+                assert_eq!(ghost_name, "coder");
+                assert_eq!(goal, "implement feature");
+                assert_eq!(context, TOOL_JSON_LEAK_CONTEXT);
+            }
+            _ => panic!("expected complex classification"),
+        }
+    }
+
+    #[test]
+    fn classify_tool_json_leak_ignores_non_signature_text() {
+        assert!(classify_tool_json_leak(
+            "simple plain answer",
+            "implement feature",
+            ToolJsonLeakReason::SimpleAnswer
+        )
+        .is_none());
+        assert!(classify_tool_json_leak(
+            r#"{"tool":"file_edit"}"#,
+            "implement feature",
+            ToolJsonLeakReason::SimpleAnswer
+        )
+        .is_none());
+    }
 }
