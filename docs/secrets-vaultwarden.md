@@ -55,6 +55,41 @@ Or default to launching Athena directly:
 - Keep provider/token fields unset and rely on env vars.
 - Rotate any key that was previously committed, logged, or shared.
 
+## 5) Fully automated restart (no manual `bw unlock`)
+
+Store Bitwarden auth secrets in macOS Keychain so `scripts/restart-telegram.sh` can unlock non-interactively.
+
+Default Keychain service: `athena-vaultwarden`
+
+```bash
+security add-generic-password -U -k "$HOME/Library/Keychains/login.keychain-db" -s athena-vaultwarden -a BW_CLIENTID -w "<bitwarden_client_id>"
+security add-generic-password -U -k "$HOME/Library/Keychains/login.keychain-db" -s athena-vaultwarden -a BW_CLIENTSECRET -w "<bitwarden_client_secret>"
+security add-generic-password -U -k "$HOME/Library/Keychains/login.keychain-db" -s athena-vaultwarden -a BW_MASTER_PASSWORD -w "<vault_master_password>"
+```
+
+Then restart bot normally:
+
+```bash
+./scripts/restart-telegram.sh
+```
+
+Alternative: env file (faster, less secure than Keychain).
+
+```bash
+cp .env.vaultwarden.example .env.vaultwarden.local
+# edit .env.vaultwarden.local and set BW_CLIENTID/BW_CLIENTSECRET/BW_MASTER_PASSWORD
+./scripts/restart-telegram.sh
+```
+
+If you use different Keychain names, set:
+
+- `ATHENA_BW_KEYCHAIN_SERVICE`
+- `ATHENA_BW_KEYCHAIN_CLIENT_ID_ACCOUNT`
+- `ATHENA_BW_KEYCHAIN_CLIENT_SECRET_ACCOUNT`
+- `ATHENA_BW_KEYCHAIN_MASTER_PASSWORD_ACCOUNT`
+- `ATHENA_BW_KEYCHAIN_PATH`
+- `ATHENA_BW_ENV_FILE` (defaults to `./.env.vaultwarden.local`)
+
 ## Optional item name overrides
 
 Set any of these when your Vaultwarden item names differ:
@@ -64,5 +99,6 @@ Set any of these when your Vaultwarden item names differ:
 - `ATHENA_BW_ITEM_GITHUB`
 - `ATHENA_BW_ITEM_LANGFUSE_PUBLIC`
 - `ATHENA_BW_ITEM_LANGFUSE_SECRET`
+- `ATHENA_BW_ITEM_LANGFUSE_COMBINED` (single login item fallback: username=public key, password=secret key)
 - `ATHENA_BW_ITEM_TELEGRAM`
 - `ATHENA_BW_ITEM_STT`

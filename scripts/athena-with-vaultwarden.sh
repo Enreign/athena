@@ -29,6 +29,11 @@ read_secret() {
   bw get password "$item" 2>/dev/null || true
 }
 
+read_username() {
+  local item="$1"
+  bw get username "$item" 2>/dev/null || true
+}
+
 set_from_vault_or_env() {
   local env_name="$1"
   local item_name="$2"
@@ -46,14 +51,48 @@ set_from_vault_or_env() {
   fi
 }
 
+set_langfuse_keys() {
+  local public_item="${ATHENA_BW_ITEM_LANGFUSE_PUBLIC:-athena/langfuse_public_key}"
+  local secret_item="${ATHENA_BW_ITEM_LANGFUSE_SECRET:-athena/langfuse_secret_key}"
+  local combined_item="${ATHENA_BW_ITEM_LANGFUSE_COMBINED:-athena/langfuse}"
+  local v=""
+
+  # Preferred: separate password entries.
+  v="$(read_secret "$public_item")"
+  if [[ -n "$v" ]]; then
+    export LANGFUSE_PUBLIC_KEY="$v"
+  fi
+  v="$(read_secret "$secret_item")"
+  if [[ -n "$v" ]]; then
+    export LANGFUSE_SECRET_KEY="$v"
+  fi
+
+  # Fallback: one login item where username=public, password=secret.
+  if [[ -z "${LANGFUSE_PUBLIC_KEY:-}" ]]; then
+    v="$(read_username "$combined_item")"
+    if [[ -n "$v" ]]; then
+      export LANGFUSE_PUBLIC_KEY="$v"
+    fi
+  fi
+  if [[ -z "${LANGFUSE_SECRET_KEY:-}" ]]; then
+    v="$(read_secret "$combined_item")"
+    if [[ -n "$v" ]]; then
+      export LANGFUSE_SECRET_KEY="$v"
+    fi
+  fi
+}
+
 # Override these item names with env vars if your Vaultwarden naming differs.
 set_from_vault_or_env OPENROUTER_API_KEY "${ATHENA_BW_ITEM_OPENROUTER:-athena/openrouter_api_key}"
 set_from_vault_or_env OPENCODE_API_KEY "${ATHENA_BW_ITEM_ZEN:-athena/opencode_api_key}"
 set_from_vault_or_env GH_TOKEN "${ATHENA_BW_ITEM_GITHUB:-athena/github_token}"
-set_from_vault_or_env LANGFUSE_PUBLIC_KEY "${ATHENA_BW_ITEM_LANGFUSE_PUBLIC:-athena/langfuse_public_key}"
-set_from_vault_or_env LANGFUSE_SECRET_KEY "${ATHENA_BW_ITEM_LANGFUSE_SECRET:-athena/langfuse_secret_key}"
+set_langfuse_keys
 set_from_vault_or_env ATHENA_TELEGRAM_TOKEN "${ATHENA_BW_ITEM_TELEGRAM:-athena/telegram_token}"
 set_from_vault_or_env ATHENA_STT_API_KEY "${ATHENA_BW_ITEM_STT:-athena/stt_api_key}"
+
+if [[ -z "${LANGFUSE_PUBLIC_KEY:-}" || -z "${LANGFUSE_SECRET_KEY:-}" ]]; then
+  echo "Langfuse keys not resolved from Vaultwarden/env (check item names or BW_SESSION)." >&2
+fi
 
 if [[ $# -eq 0 ]]; then
   exec "$DEFAULT_BIN"
