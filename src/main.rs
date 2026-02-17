@@ -36,7 +36,7 @@ mod tools;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use config::Config;
@@ -141,6 +141,11 @@ enum Commands {
     Feature {
         #[command(subcommand)]
         action: FeatureAction,
+    },
+    /// Run supervised self-build pipeline in an isolated worktree
+    SelfBuild {
+        #[command(subcommand)]
+        action: SelfBuildAction,
     },
 }
 
@@ -335,6 +340,40 @@ enum FeatureAction {
     },
 }
 
+#[derive(Subcommand)]
+enum SelfBuildAction {
+    /// Execute one supervised self-build run from a ticket description
+    Run {
+        /// Ticket/problem statement Athena should fix
+        #[arg(long)]
+        ticket: String,
+        /// Optional extra context (scope hints, constraints, links)
+        #[arg(long)]
+        context: Option<String>,
+        /// Risk tier for promotion policy
+        #[arg(long, default_value = "low")]
+        risk: String,
+        /// Autonomous dispatch wait timeout (seconds)
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
+        /// Optional CLI tool override for coding execution
+        #[arg(long, value_parser = ["claude_code", "codex", "opencode"])]
+        cli_tool: Option<String>,
+        /// Optional CLI model override for coding execution
+        #[arg(long)]
+        cli_model: Option<String>,
+        /// Maintenance pack profile
+        #[arg(long, default_value = "rust", value_parser = ["rust", "generic"])]
+        maintenance_profile: String,
+        /// Keep the isolated worktree after run
+        #[arg(long)]
+        keep_worktree: bool,
+        /// Allow auto-promotion recommendation for eligible low-risk runs
+        #[arg(long)]
+        allow_auto_promote: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -481,6 +520,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
+        Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
@@ -536,6 +576,914 @@ async fn handle_kpi(action: KpiAction, config: &Config) -> anyhow::Result<()> {
             kpi::print_history(&rows);
         }
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct CommandRunResult {
+    command: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    duration_ms: u64,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildOutcomeRecord {
+    status: Option<String>,
+    error: Option<String>,
+    verification_total: Option<u64>,
+    verification_passed: Option<u64>,
+    rolled_back: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildDispatchSummary {
+    command: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    duration_ms: u64,
+    status: String,
+    task_id: Option<String>,
+    outcome: Option<SelfBuildOutcomeRecord>,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildMaintenanceStep {
+    name: String,
+    command: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    duration_ms: u64,
+    status: String,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildGuardrailReport {
+    passed: bool,
+    violations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildCriticReport {
+    score: f64,
+    passed: bool,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildPromotionDecision {
+    auto_promote_recommended: bool,
+    approval_required: bool,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildLedger {
+    timestamp_utc: String,
+    run_id: String,
+    ticket: String,
+    context: Option<String>,
+    risk_tier: String,
+    wait_secs: u64,
+    cli_tool: Option<String>,
+    cli_model: Option<String>,
+    maintenance_profile: String,
+    allow_auto_promote: bool,
+    worktree_path: String,
+    kept_worktree: bool,
+    cleanup_error: Option<String>,
+    changed_files: Vec<String>,
+    diff_numstat: Vec<String>,
+    dispatch: SelfBuildDispatchSummary,
+    maintenance: Vec<SelfBuildMaintenanceStep>,
+    guardrails: SelfBuildGuardrailReport,
+    critic: SelfBuildCriticReport,
+    promotion: SelfBuildPromotionDecision,
+}
+
+#[derive(Debug, Clone)]
+struct MaintenanceCommandSpec {
+    name: &'static str,
+    program: &'static str,
+    args: Vec<String>,
+    timeout_secs: u64,
+}
+
+fn args(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+fn command_succeeded(run: &CommandRunResult) -> bool {
+    !run.timed_out && run.exit_code == Some(0)
+}
+
+fn command_combined_output(run: &CommandRunResult) -> String {
+    if run.stderr.trim().is_empty() {
+        run.stdout.clone()
+    } else if run.stdout.trim().is_empty() {
+        run.stderr.clone()
+    } else {
+        format!("{}\n{}", run.stdout, run.stderr)
+    }
+}
+
+async fn run_command_capture(
+    workdir: &Path,
+    program: &str,
+    args: &[String],
+    timeout_secs: u64,
+) -> CommandRunResult {
+    use tokio::process::Command;
+
+    let command_line = if args.is_empty() {
+        program.to_string()
+    } else {
+        format!("{} {}", program, args.join(" "))
+    };
+    let start = std::time::Instant::now();
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        Command::new(program)
+            .args(args)
+            .current_dir(workdir)
+            .env("TERM", "dumb")
+            .output(),
+    )
+    .await;
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    match timed {
+        Ok(Ok(output)) => CommandRunResult {
+            command: command_line,
+            exit_code: output.status.code(),
+            timed_out: false,
+            duration_ms,
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        },
+        Ok(Err(e)) => CommandRunResult {
+            command: command_line,
+            exit_code: None,
+            timed_out: false,
+            duration_ms,
+            stdout: String::new(),
+            stderr: e.to_string(),
+        },
+        Err(_) => CommandRunResult {
+            command: command_line,
+            exit_code: None,
+            timed_out: true,
+            duration_ms,
+            stdout: String::new(),
+            stderr: format!("timed out after {}s", timeout_secs),
+        },
+    }
+}
+
+async fn resolve_repo_root() -> anyhow::Result<PathBuf> {
+    let out = run_command_capture(
+        Path::new("."),
+        "git",
+        &args(&["rev-parse", "--show-toplevel"]),
+        30,
+    )
+    .await;
+    if !command_succeeded(&out) {
+        anyhow::bail!(
+            "Failed to resolve git repo root: {}",
+            tail_text(&command_combined_output(&out), 400)
+        );
+    }
+    let root = out.stdout.trim();
+    if root.is_empty() {
+        anyhow::bail!("Git reported empty repo root");
+    }
+    Ok(PathBuf::from(root))
+}
+
+fn parse_dispatch_task_id(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"task_id=([0-9a-fA-F-]{36})").ok()?;
+    re.captures(text)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+}
+
+fn parse_git_status_paths(status_out: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in status_out.lines() {
+        if line.trim().is_empty() || line.len() < 4 {
+            continue;
+        }
+        let mut path = line[3..].trim().to_string();
+        if let Some((_, right)) = path.split_once(" -> ") {
+            path = right.trim().to_string();
+        }
+        if !path.is_empty() {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn read_task_outcome_record(
+    config: &Config,
+    task_id: &str,
+) -> anyhow::Result<Option<SelfBuildOutcomeRecord>> {
+    use rusqlite::OptionalExtension;
+    let conn = kpi::open_connection(config)?;
+    let row = conn
+        .query_row(
+            "SELECT status, error, verification_total, verification_passed, rolled_back
+             FROM autonomous_task_outcomes
+             WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |r| {
+                let status: String = r.get(0)?;
+                let error: Option<String> = r.get(1)?;
+                let vt: i64 = r.get(2)?;
+                let vp: i64 = r.get(3)?;
+                let rb: i64 = r.get(4)?;
+                Ok(SelfBuildOutcomeRecord {
+                    status: Some(status),
+                    error,
+                    verification_total: Some(vt.max(0) as u64),
+                    verification_passed: Some(vp.max(0) as u64),
+                    rolled_back: Some(rb != 0),
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+async fn create_self_build_worktree(base_repo: &Path, run_id: &str) -> anyhow::Result<PathBuf> {
+    let worktree_root = base_repo.join("eval").join(".selfbuild-worktrees");
+    std::fs::create_dir_all(&worktree_root)?;
+    let path = worktree_root.join(run_id);
+    let path_s = path.to_string_lossy().to_string();
+    let run = run_command_capture(
+        base_repo,
+        "git",
+        &args(&["worktree", "add", "--detach", &path_s, "HEAD"]),
+        120,
+    )
+    .await;
+    if !command_succeeded(&run) {
+        anyhow::bail!(
+            "git worktree add failed: {}",
+            tail_text(&command_combined_output(&run), 600)
+        );
+    }
+    Ok(path)
+}
+
+fn resolve_child_dispatch_config_path(base_repo: &Path) -> Option<PathBuf> {
+    let local = base_repo.join("config.toml");
+    if local.exists() {
+        return Some(local);
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".athena").join("config.toml"))
+        .filter(|p| p.exists())
+}
+
+async fn remove_self_build_worktree(base_repo: &Path, worktree_path: &Path) -> Option<String> {
+    let path_s = worktree_path.to_string_lossy().to_string();
+    let remove = run_command_capture(
+        base_repo,
+        "git",
+        &args(&["worktree", "remove", "--force", &path_s]),
+        120,
+    )
+    .await;
+    if !command_succeeded(&remove) {
+        return Some(format!(
+            "git worktree remove failed: {}",
+            tail_text(&command_combined_output(&remove), 400)
+        ));
+    }
+    let _ = run_command_capture(base_repo, "git", &args(&["worktree", "prune"]), 60).await;
+    None
+}
+
+fn maintenance_command_specs(profile: &str) -> Vec<MaintenanceCommandSpec> {
+    match profile {
+        "rust" => vec![
+            MaintenanceCommandSpec {
+                name: "cargo_fmt_check",
+                program: "cargo",
+                args: args(&["fmt", "--all", "--check"]),
+                timeout_secs: 600,
+            },
+            MaintenanceCommandSpec {
+                name: "cargo_check",
+                program: "cargo",
+                args: args(&["check"]),
+                timeout_secs: 900,
+            },
+            MaintenanceCommandSpec {
+                name: "cargo_test_workspace",
+                program: "cargo",
+                args: args(&["test", "--workspace", "--quiet"]),
+                timeout_secs: 1800,
+            },
+        ],
+        _ => vec![
+            MaintenanceCommandSpec {
+                name: "git_diff_check",
+                program: "git",
+                args: args(&["diff", "--check"]),
+                timeout_secs: 120,
+            },
+            MaintenanceCommandSpec {
+                name: "git_status_short",
+                program: "git",
+                args: args(&["status", "--short"]),
+                timeout_secs: 120,
+            },
+        ],
+    }
+}
+
+fn evaluate_self_build_guardrails(
+    changed_files: &[String],
+    diff_text: &str,
+    dispatch_output: &str,
+    worktree_branch: &str,
+) -> SelfBuildGuardrailReport {
+    let mut violations = Vec::new();
+    if !worktree_branch.trim().is_empty() {
+        violations.push(format!(
+            "worktree attached to branch '{}' (expected detached HEAD)",
+            worktree_branch.trim()
+        ));
+    }
+
+    let destructive_patterns = [
+        "git reset --hard",
+        "git checkout --",
+        "git clean -fd",
+        "rm -rf /",
+        "rm -rf *",
+    ];
+    let lowered_output = dispatch_output.to_lowercase();
+    for pattern in destructive_patterns {
+        if lowered_output.contains(pattern) {
+            violations.push(format!(
+                "detected destructive command pattern '{}'",
+                pattern
+            ));
+        }
+    }
+
+    for path in changed_files {
+        let lower = path.to_lowercase();
+        if lower.ends_with(".env")
+            || lower.contains("secret")
+            || lower.contains("credentials")
+            || lower.contains("token")
+        {
+            violations.push(format!(
+                "sensitive-looking file changed in self-build run: {}",
+                path
+            ));
+        }
+    }
+
+    let added_lines: String = diff_text
+        .lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let secret_assignment = regex::Regex::new(
+        r#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"'\n]{8,}["']"#,
+    )
+    .unwrap();
+    let token_like =
+        regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#).unwrap();
+    if secret_assignment.is_match(&added_lines) || token_like.is_match(&added_lines) {
+        violations.push("detected secret-like material in added diff lines".to_string());
+    }
+
+    violations.sort();
+    violations.dedup();
+    SelfBuildGuardrailReport {
+        passed: violations.is_empty(),
+        violations,
+    }
+}
+
+fn evaluate_self_build_critic(
+    dispatch_status: &str,
+    dispatch_exit_code: Option<i32>,
+    changed_files: &[String],
+    maintenance: &[SelfBuildMaintenanceStep],
+    guardrails: &SelfBuildGuardrailReport,
+) -> SelfBuildCriticReport {
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+    let dispatch_ok = dispatch_status == "succeeded" && dispatch_exit_code == Some(0);
+    if dispatch_ok {
+        score += 0.35;
+    } else {
+        reasons.push(format!("dispatch status is '{}'", dispatch_status));
+    }
+
+    if !changed_files.is_empty() {
+        score += 0.10;
+    } else {
+        reasons.push("no repo changes detected from self-build dispatch".to_string());
+    }
+
+    let maintenance_ok = maintenance.iter().all(|m| m.status == "passed");
+    if maintenance_ok {
+        score += 0.35;
+    } else {
+        reasons.push("maintenance pack reported one or more failures".to_string());
+    }
+
+    if guardrails.passed {
+        score += 0.20;
+    } else {
+        reasons.push("guardrail violations detected".to_string());
+    }
+
+    if score > 1.0 {
+        score = 1.0;
+    }
+    let passed = dispatch_ok && maintenance_ok && guardrails.passed && !changed_files.is_empty();
+    SelfBuildCriticReport {
+        score,
+        passed,
+        reasons,
+    }
+}
+
+fn decide_self_build_promotion(
+    risk_tier: &str,
+    allow_auto_promote: bool,
+    critic: &SelfBuildCriticReport,
+) -> SelfBuildPromotionDecision {
+    let approval_required = risk_tier != "low";
+    let mut reasons = Vec::new();
+    let mut auto = false;
+
+    if approval_required {
+        reasons.push(format!("risk tier '{}' requires human approval", risk_tier));
+    }
+    if !allow_auto_promote {
+        reasons.push("auto-promote disabled by CLI flag".to_string());
+    }
+    if !critic.passed {
+        reasons.push("critic did not pass run quality checks".to_string());
+    }
+    if critic.score < 0.85 {
+        reasons.push(format!(
+            "critic score {:.2} is below auto-promote threshold 0.85",
+            critic.score
+        ));
+    }
+
+    if !approval_required && allow_auto_promote && critic.passed && critic.score >= 0.85 {
+        auto = true;
+    }
+
+    SelfBuildPromotionDecision {
+        auto_promote_recommended: auto,
+        approval_required,
+        reasons,
+    }
+}
+
+fn write_self_build_artifacts(
+    base_repo: &Path,
+    ledger: &SelfBuildLedger,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let out_dir = base_repo.join("eval").join("results");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_run_id = ledger
+        .run_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let base = format!("self-build-{}", safe_run_id);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    let latest_json = out_dir.join("self-build-latest.json");
+    let latest_md = out_dir.join("self-build-latest.md");
+    std::fs::write(&json_path, serde_json::to_string_pretty(ledger)?)?;
+    std::fs::write(&md_path, render_self_build_markdown(ledger))?;
+    let _ = std::fs::copy(&json_path, &latest_json);
+    let _ = std::fs::copy(&md_path, &latest_md);
+    Ok((json_path, md_path))
+}
+
+fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
+    let mut out = String::new();
+    out.push_str("# Self-Build Run Ledger\n\n");
+    out.push_str(&format!("- run_id: `{}`\n", ledger.run_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
+    out.push_str(&format!("- risk_tier: `{}`\n", ledger.risk_tier));
+    out.push_str(&format!(
+        "- worktree_path: `{}` (kept: `{}`)\n",
+        ledger.worktree_path, ledger.kept_worktree
+    ));
+    out.push_str(&format!(
+        "- maintenance_profile: `{}`\n",
+        ledger.maintenance_profile
+    ));
+    out.push_str(&format!(
+        "- allow_auto_promote: `{}`\n",
+        ledger.allow_auto_promote
+    ));
+    out.push_str(&format!("- ticket: {}\n", ledger.ticket));
+    if let Some(ctx) = &ledger.context {
+        out.push_str(&format!("- context: {}\n", ctx));
+    }
+    if let Some(err) = &ledger.cleanup_error {
+        out.push_str(&format!("- cleanup_error: {}\n", err));
+    }
+    out.push('\n');
+
+    out.push_str("## Dispatch\n\n");
+    out.push_str(&format!("- status: `{}`\n", ledger.dispatch.status));
+    out.push_str(&format!("- command: `{}`\n", ledger.dispatch.command));
+    out.push_str(&format!(
+        "- exit_code: `{}` timed_out: `{}` duration_ms: `{}`\n",
+        ledger
+            .dispatch
+            .exit_code
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        ledger.dispatch.timed_out,
+        ledger.dispatch.duration_ms
+    ));
+    out.push_str(&format!(
+        "- task_id: `{}`\n",
+        ledger.dispatch.task_id.as_deref().unwrap_or("-")
+    ));
+    if let Some(outcome) = &ledger.dispatch.outcome {
+        out.push_str(&format!(
+            "- outcome_status: `{}` error: `{}` verify: `{}/{}` rolled_back: `{}`\n",
+            outcome.status.as_deref().unwrap_or("-"),
+            outcome.error.as_deref().unwrap_or("-"),
+            outcome.verification_passed.unwrap_or(0),
+            outcome.verification_total.unwrap_or(0),
+            outcome.rolled_back.unwrap_or(false)
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("## Maintenance\n\n");
+    out.push_str("| step | status | exit_code | timed_out | duration_ms |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for m in &ledger.maintenance {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            m.name,
+            m.status,
+            m.exit_code
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            m.timed_out,
+            m.duration_ms
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("## Guardrails\n\n");
+    out.push_str(&format!("- passed: `{}`\n", ledger.guardrails.passed));
+    if !ledger.guardrails.violations.is_empty() {
+        out.push_str("- violations:\n");
+        for v in &ledger.guardrails.violations {
+            out.push_str(&format!("  - {}\n", v));
+        }
+    }
+    out.push('\n');
+
+    out.push_str("## Critic\n\n");
+    out.push_str(&format!("- score: `{:.2}`\n", ledger.critic.score));
+    out.push_str(&format!("- passed: `{}`\n", ledger.critic.passed));
+    if !ledger.critic.reasons.is_empty() {
+        out.push_str("- reasons:\n");
+        for r in &ledger.critic.reasons {
+            out.push_str(&format!("  - {}\n", r));
+        }
+    }
+    out.push('\n');
+
+    out.push_str("## Promotion Decision\n\n");
+    out.push_str(&format!(
+        "- auto_promote_recommended: `{}`\n",
+        ledger.promotion.auto_promote_recommended
+    ));
+    out.push_str(&format!(
+        "- approval_required: `{}`\n",
+        ledger.promotion.approval_required
+    ));
+    if !ledger.promotion.reasons.is_empty() {
+        out.push_str("- reasons:\n");
+        for r in &ledger.promotion.reasons {
+            out.push_str(&format!("  - {}\n", r));
+        }
+    }
+    out.push('\n');
+
+    out.push_str("## Diff Summary\n\n");
+    out.push_str(&format!(
+        "- changed_files: `{}`\n",
+        ledger.changed_files.len()
+    ));
+    if !ledger.changed_files.is_empty() {
+        for p in &ledger.changed_files {
+            out.push_str(&format!("  - `{}`\n", p));
+        }
+    }
+    if !ledger.diff_numstat.is_empty() {
+        out.push_str("- numstat:\n");
+        for line in &ledger.diff_numstat {
+            out.push_str(&format!("  - `{}`\n", line));
+        }
+    }
+    out
+}
+
+async fn handle_self_build(
+    action: SelfBuildAction,
+    config: Config,
+    memory: Arc<MemoryStore>,
+) -> anyhow::Result<()> {
+    match action {
+        SelfBuildAction::Run {
+            ticket,
+            context,
+            risk,
+            wait_secs,
+            cli_tool,
+            cli_model,
+            maintenance_profile,
+            keep_worktree,
+            allow_auto_promote,
+        } => {
+            run_self_build(
+                config,
+                memory,
+                ticket,
+                context,
+                risk,
+                wait_secs,
+                cli_tool,
+                cli_model,
+                maintenance_profile,
+                keep_worktree,
+                allow_auto_promote,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_self_build(
+    config: Config,
+    memory: Arc<MemoryStore>,
+    ticket: String,
+    context: Option<String>,
+    risk: String,
+    wait_secs: u64,
+    cli_tool: Option<String>,
+    cli_model: Option<String>,
+    maintenance_profile: String,
+    keep_worktree: bool,
+    allow_auto_promote: bool,
+) -> anyhow::Result<()> {
+    validate_risk(&risk)?;
+    let timestamp_utc = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let run_id = format!(
+        "{}-{}",
+        timestamp_utc,
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let base_repo = resolve_repo_root().await?;
+    let worktree = create_self_build_worktree(&base_repo, &run_id).await?;
+    let worktree_s = worktree.to_string_lossy().to_string();
+
+    let repo_label = base_repo
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let exe = std::env::current_exe()?;
+    let exe_s = exe.to_string_lossy().to_string();
+    let mut dispatch_context = format!(
+        "[self_build_run:{}]\nTicket: {}\nConstraints:\n- Follow repository guardrails.\n- Avoid destructive git operations.\n- Do not print or hardcode secrets.\n",
+        run_id, ticket
+    );
+    if let Some(ctx) = context.as_deref() {
+        dispatch_context.push_str("\nAdditional context:\n");
+        dispatch_context.push_str(ctx);
+    }
+    let mut dispatch_args = vec![
+        "dispatch".to_string(),
+        "--goal".to_string(),
+        ticket.clone(),
+        "--context".to_string(),
+        dispatch_context,
+        "--ghost".to_string(),
+        "coder".to_string(),
+        "--auto-store".to_string(),
+        "self_build_run".to_string(),
+        "--wait-secs".to_string(),
+        wait_secs.to_string(),
+        "--lane".to_string(),
+        "self_improvement".to_string(),
+        "--risk".to_string(),
+        risk.clone(),
+        "--repo".to_string(),
+        repo_label,
+    ];
+    if let Some(config_path) = resolve_child_dispatch_config_path(&base_repo) {
+        dispatch_args.insert(0, config_path.to_string_lossy().to_string());
+        dispatch_args.insert(0, "--config".to_string());
+    }
+    if let Some(tool) = cli_tool.as_deref() {
+        dispatch_args.push("--cli-tool".to_string());
+        dispatch_args.push(tool.to_string());
+    }
+    if let Some(model) = cli_model.as_deref() {
+        dispatch_args.push("--cli-model".to_string());
+        dispatch_args.push(model.to_string());
+    }
+    let dispatch_timeout = wait_secs.saturating_add(180).max(240);
+    let dispatch_run =
+        run_command_capture(&worktree, &exe_s, &dispatch_args, dispatch_timeout).await;
+    let dispatch_output = command_combined_output(&dispatch_run);
+    let dispatch_task_id = parse_dispatch_task_id(&dispatch_output);
+    if let Some(task_id) = dispatch_task_id.as_deref() {
+        let _ = wait_for_terminal_outcome_status(&config, task_id, 30).await?;
+    }
+    let dispatch_outcome = if let Some(task_id) = dispatch_task_id.as_deref() {
+        read_task_outcome_record(&config, task_id)?
+    } else {
+        None
+    };
+    let dispatch_status = if dispatch_run.timed_out {
+        "timeout".to_string()
+    } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
+        status
+    } else if dispatch_run.exit_code == Some(0) {
+        "contract_error".to_string()
+    } else {
+        "failed".to_string()
+    };
+    let dispatch_summary = SelfBuildDispatchSummary {
+        command: dispatch_run.command.clone(),
+        exit_code: dispatch_run.exit_code,
+        timed_out: dispatch_run.timed_out,
+        duration_ms: dispatch_run.duration_ms,
+        status: dispatch_status.clone(),
+        task_id: dispatch_task_id.clone(),
+        outcome: dispatch_outcome.clone(),
+        stdout_tail: tail_text(&dispatch_run.stdout, 1200),
+        stderr_tail: tail_text(&dispatch_run.stderr, 1200),
+    };
+
+    let status_run =
+        run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
+    let changed_files = if command_succeeded(&status_run) {
+        parse_git_status_paths(&status_run.stdout)
+    } else {
+        Vec::new()
+    };
+
+    let diff_run = run_command_capture(&worktree, "git", &args(&["diff", "--no-color"]), 120).await;
+    let diff_text = command_combined_output(&diff_run);
+    let numstat_run =
+        run_command_capture(&worktree, "git", &args(&["diff", "--numstat"]), 60).await;
+    let diff_numstat = if command_succeeded(&numstat_run) {
+        numstat_run
+            .stdout
+            .lines()
+            .take(100)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let branch_run =
+        run_command_capture(&worktree, "git", &args(&["branch", "--show-current"]), 30).await;
+    let branch_name = if command_succeeded(&branch_run) {
+        branch_run.stdout.trim().to_string()
+    } else {
+        String::new()
+    };
+
+    let specs = maintenance_command_specs(&maintenance_profile);
+    let mut maintenance_rows = Vec::new();
+    for spec in specs {
+        let run = run_command_capture(&worktree, spec.program, &spec.args, spec.timeout_secs).await;
+        let status = if run.timed_out {
+            "timeout"
+        } else if run.exit_code == Some(0) {
+            "passed"
+        } else {
+            "failed"
+        };
+        maintenance_rows.push(SelfBuildMaintenanceStep {
+            name: spec.name.to_string(),
+            command: run.command,
+            exit_code: run.exit_code,
+            timed_out: run.timed_out,
+            duration_ms: run.duration_ms,
+            status: status.to_string(),
+            stdout_tail: tail_text(&run.stdout, 900),
+            stderr_tail: tail_text(&run.stderr, 900),
+        });
+    }
+
+    let guardrails =
+        evaluate_self_build_guardrails(&changed_files, &diff_text, &dispatch_output, &branch_name);
+    let critic = evaluate_self_build_critic(
+        &dispatch_status,
+        dispatch_summary.exit_code,
+        &changed_files,
+        &maintenance_rows,
+        &guardrails,
+    );
+    let promotion = decide_self_build_promotion(&risk, allow_auto_promote, &critic);
+
+    let mut cleanup_error = None;
+    if !keep_worktree {
+        cleanup_error = remove_self_build_worktree(&base_repo, &worktree).await;
+    }
+
+    let ledger = SelfBuildLedger {
+        timestamp_utc,
+        run_id: run_id.clone(),
+        ticket: ticket.clone(),
+        context,
+        risk_tier: risk,
+        wait_secs,
+        cli_tool,
+        cli_model,
+        maintenance_profile,
+        allow_auto_promote,
+        worktree_path: worktree_s,
+        kept_worktree: keep_worktree,
+        cleanup_error: cleanup_error.clone(),
+        changed_files,
+        diff_numstat,
+        dispatch: dispatch_summary,
+        maintenance: maintenance_rows,
+        guardrails,
+        critic,
+        promotion,
+    };
+
+    let (json_path, md_path) = write_self_build_artifacts(&base_repo, &ledger)?;
+    println!("self_build_json={}", json_path.display());
+    println!("self_build_md={}", md_path.display());
+    println!("self_build_run_id={}", ledger.run_id);
+    println!(
+        "self_build_auto_promote_recommended={}",
+        ledger.promotion.auto_promote_recommended
+    );
+    println!("self_build_guardrails_passed={}", ledger.guardrails.passed);
+    println!("self_build_critic_score={:.2}", ledger.critic.score);
+
+    let memory_category = if ledger.critic.passed {
+        "self_build_run"
+    } else {
+        "self_build_failed"
+    };
+    let memory_summary = format!(
+        "run_id={} dispatch_status={} guardrails_passed={} critic_passed={} score={:.2} auto_promote_recommended={} artifacts={} {}",
+        ledger.run_id,
+        ledger.dispatch.status,
+        ledger.guardrails.passed,
+        ledger.critic.passed,
+        ledger.critic.score,
+        ledger.promotion.auto_promote_recommended,
+        json_path.display(),
+        md_path.display()
+    );
+    let _ = memory.store(memory_category, &memory_summary, None);
+
+    if !ledger.critic.passed {
+        anyhow::bail!(
+            "self-build run did not pass critic checks (see {})",
+            md_path.display()
+        );
+    }
+
     Ok(())
 }
 
@@ -798,7 +1746,10 @@ async fn handle_feature(
                     verify_ledger.feature_id
                 );
             }
-            let risk = contract.risk.clone().unwrap_or_else(|| "medium".to_string());
+            let risk = contract
+                .risk
+                .clone()
+                .unwrap_or_else(|| "medium".to_string());
             let real_gate = latest_real_gate_status()?;
             let decision = build_feature_promotion_decision(
                 &contract,
@@ -1255,8 +2206,8 @@ async fn run_feature_dispatch_flow(
 
         let mut stop_spawning = false;
         while let Some(joined) = set.join_next().await {
-            let outcome = joined
-                .map_err(|e| anyhow::anyhow!("feature task worker join failed: {}", e))??;
+            let outcome =
+                joined.map_err(|e| anyhow::anyhow!("feature task worker join failed: {}", e))??;
             match &outcome.status {
                 FeatureRunStatus::Succeeded => {
                     println!("task={} result=succeeded", outcome.task_id)
@@ -1855,7 +2806,9 @@ fn render_feature_verify_markdown(ledger: &FeatureVerifyLedger) -> String {
     out.push('\n');
 
     out.push_str("## Checks\n\n");
-    out.push_str("| check_id | profile | status | required | exit_code | mapped_acceptance | command |\n");
+    out.push_str(
+        "| check_id | profile | status | required | exit_code | mapped_acceptance | command |\n",
+    );
     out.push_str("|---|---|---|---|---|---|---|\n");
     for row in &ledger.checks {
         out.push_str(&format!(
@@ -1941,7 +2894,8 @@ fn build_feature_promotion_decision(
         ));
     }
 
-    let mut auto_promotable = dispatch_ledger.summary.promotable && verify_ledger.summary.promotable;
+    let mut auto_promotable =
+        dispatch_ledger.summary.promotable && verify_ledger.summary.promotable;
     let (real_gate_suite, real_gate_timestamp_utc, real_gate_ok, real_gate_report_json) =
         if let Some(gate) = real_gate {
             if !gate.gate_ok {
@@ -2000,7 +2954,10 @@ fn write_feature_promotion_artifacts(
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>();
-    let base = format!("feature-promote-{}-{}", safe_feature_id, decision.timestamp_utc);
+    let base = format!(
+        "feature-promote-{}-{}",
+        safe_feature_id, decision.timestamp_utc
+    );
     let json_path = out_dir.join(format!("{}.json", base));
     let md_path = out_dir.join(format!("{}.md", base));
     std::fs::write(&json_path, serde_json::to_string_pretty(decision)?)?;
@@ -2014,7 +2971,10 @@ fn render_feature_promotion_markdown(decision: &FeaturePromotionDecision) -> Str
     out.push_str(&format!("- feature_id: `{}`\n", decision.feature_id));
     out.push_str(&format!("- timestamp_utc: `{}`\n", decision.timestamp_utc));
     out.push_str(&format!("- risk_tier: `{}`\n", decision.risk_tier));
-    out.push_str(&format!("- auto_promotable: `{}`\n", decision.auto_promotable));
+    out.push_str(&format!(
+        "- auto_promotable: `{}`\n",
+        decision.auto_promotable
+    ));
     out.push_str(&format!(
         "- approval_required: `{}`\n",
         decision.approval_required
@@ -2130,8 +3090,9 @@ fn render_feature_gate_markdown(ledger: &FeatureGateLedger) -> String {
 }
 
 fn read_dispatch_ledger(path: &std::path::Path) -> anyhow::Result<FeatureRunLedger> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read dispatch ledger '{}': {}", path.display(), e))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!("Failed to read dispatch ledger '{}': {}", path.display(), e)
+    })?;
     serde_json::from_str(&raw).map_err(|e| {
         anyhow::anyhow!(
             "Failed to parse dispatch ledger JSON '{}': {}",
@@ -2177,7 +3138,10 @@ fn resolve_verify_ledger_path(
     find_latest_result_json(&prefix, true)
 }
 
-fn find_latest_result_json(prefix: &str, allow_verify_prefix: bool) -> anyhow::Result<std::path::PathBuf> {
+fn find_latest_result_json(
+    prefix: &str,
+    allow_verify_prefix: bool,
+) -> anyhow::Result<std::path::PathBuf> {
     let dir = std::path::Path::new("eval/results");
     let entries = std::fs::read_dir(dir)
         .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", dir.display(), e))?;
@@ -2526,7 +3490,11 @@ async fn resolve_feature_run_status_after_wait(
             {
                 return Ok(feature_status_from_terminal(&status));
             }
-            mark_dispatch_task_failed_if_started(config, task_id, OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT);
+            mark_dispatch_task_failed_if_started(
+                config,
+                task_id,
+                OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT,
+            );
             Ok(FeatureRunStatus::Failed(
                 OUTCOME_REASON_OUTCOME_WAIT_TIMEOUT.to_string(),
             ))
@@ -2537,7 +3505,11 @@ async fn resolve_feature_run_status_after_wait(
             {
                 return Ok(feature_status_from_terminal(&status));
             }
-            mark_dispatch_task_failed_if_started(config, task_id, OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED);
+            mark_dispatch_task_failed_if_started(
+                config,
+                task_id,
+                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED,
+            );
             Ok(FeatureRunStatus::Failed(
                 OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED.to_string(),
             ))
@@ -2999,7 +3971,8 @@ async fn run_chat(
 mod tests {
     use super::{
         build_feature_promotion_decision, build_feature_run_ledger, classify_chat_command,
-        compute_feature_outcome_grace_secs, latest_eval_gate_status,
+        compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
+        latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         pulse_matches_task_id, run_feature_verify, wait_for_autonomous_pulse, ChatCommand,
         FeatureRunStatus, WaitForAutonomousOutcome,
     };
@@ -3328,10 +4301,8 @@ mod tests {
 
     #[test]
     fn latest_eval_gate_status_picks_latest_matching_suite() {
-        let history = std::env::temp_dir().join(format!(
-            "athena-history-{}.jsonl",
-            uuid::Uuid::new_v4()
-        ));
+        let history =
+            std::env::temp_dir().join(format!("athena-history-{}.jsonl", uuid::Uuid::new_v4()));
         std::fs::write(
             &history,
             r#"{"timestamp_utc":"20260217T100000Z","suite":"athena-core-v2-real","gate_ok":false}
@@ -3352,6 +4323,41 @@ mod tests {
         let _ = std::fs::remove_file(&history);
     }
 
+    #[test]
+    fn parse_dispatch_task_id_extracts_uuid() {
+        let s =
+            "Dispatched autonomous task to coder (task_id=123e4567-e89b-12d3-a456-426614174000).";
+        assert_eq!(
+            parse_dispatch_task_id(s).as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+    }
+
+    #[test]
+    fn parse_git_status_paths_supports_rename_line() {
+        let out = " M src/main.rs\nR  old.txt -> new.txt\n?? notes.md\n";
+        let paths = parse_git_status_paths(out);
+        assert_eq!(paths, vec!["new.txt", "notes.md", "src/main.rs"]);
+    }
+
+    #[test]
+    fn self_build_guardrails_detect_secret_addition() {
+        let diff = r#"
+diff --git a/config.toml b/config.toml
+index 1111111..2222222 100644
+--- a/config.toml
++++ b/config.toml
+@@ -1,3 +1,4 @@
++github_token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+"#;
+        let report = evaluate_self_build_guardrails(&["config.toml".to_string()], diff, "", "");
+        assert!(!report.passed);
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.contains("secret-like material")));
+    }
+
     #[tokio::test]
     async fn wait_for_autonomous_pulse_ignores_non_autonomous_sources_with_same_task_id() {
         // Regression: ensure pulses from non-AutonomousTask sources are never
@@ -3365,8 +4371,12 @@ mod tests {
                 .with_task_id("dispatch-42"),
         );
         let _ = tx.send(
-            Pulse::new(PulseSource::CronJob("test".into()), Urgency::Medium, "scheduled".into())
-                .with_task_id("dispatch-42"),
+            Pulse::new(
+                PulseSource::CronJob("test".into()),
+                Urgency::Medium,
+                "scheduled".into(),
+            )
+            .with_task_id("dispatch-42"),
         );
         // Wrong task_id from autonomous source must also be ignored.
         let _ = tx.send(
