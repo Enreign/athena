@@ -233,7 +233,9 @@ def fail_outcome_if_started(conn: sqlite3.Connection, dispatch_task_id: str, err
     return cur.rowcount > 0
 
 
-def score_plan_quality(response: str) -> float:
+def score_plan_quality(response: str, task_result: TaskResult) -> float:
+    # TODO: Implement structured plan-field scoring path
+    return 0.0
     text = response.strip()
     if not text:
         return 0.0

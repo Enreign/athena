@@ -36,7 +36,7 @@ def _setup_conn() -> sqlite3.Connection:
 
 
 class EvalHarnessRegressionTests(unittest.TestCase):
-    def test_to_text_handles_bytes(self) -> None:
+    def test_score_plan_quality_with_structured_fields(self) -> None:
         self.assertEqual(eval_harness._to_text(b"hello"), "hello")
         self.assertEqual(eval_harness._to_text(None), "")
 
