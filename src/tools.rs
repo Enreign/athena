@@ -1395,9 +1395,18 @@ impl Tool for ClaudeCodeTool {
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         if std::env::var_os("CLAUDECODE").is_some() {
+            let detail = "claude_code is unavailable inside an existing Claude Code session. Switch CLI tool to codex/opencode.";
             return Ok(ToolResult {
                 success: false,
-                output: "claude_code is unavailable inside an existing Claude Code session. Switch CLI tool to codex/opencode.".into(),
+                output: format_cli_contract_error(
+                    "claude_code",
+                    "session_conflict",
+                    false,
+                    true,
+                    None,
+                    cli_timeout_secs(),
+                    detail,
+                ),
             });
         }
         let prompt = build_cli_prompt(params)?;
@@ -2596,6 +2605,38 @@ mod tests {
         assert!(out.contains("tool=codex"));
         assert!(out.contains("code=cli_timeout"));
         assert!(out.contains("fallback=true"));
+    }
+
+    #[test]
+    fn test_session_conflict_early_return_emits_contract_marker() {
+        let detail = "claude_code is unavailable inside an existing Claude Code session. Switch CLI tool to codex/opencode.";
+        let output = format_cli_contract_error(
+            "claude_code",
+            "session_conflict",
+            false,
+            true,
+            None,
+            3600,
+            detail,
+        );
+        assert!(
+            output.starts_with("[athena_cli_contract]"),
+            "output must start with contract prefix"
+        );
+        assert!(output.contains("code=session_conflict"));
+        assert!(output.contains("tool=claude_code"));
+        assert!(output.contains("fallback=true"));
+        assert!(output.contains("retry_same=false"));
+        assert!(
+            output.contains(detail),
+            "original prose must be preserved as detail"
+        );
+
+        // Verify the contract line is parseable by the policy classifier
+        let (code, retry_same, fallback) = cli_error_policy_from_output(&output);
+        assert_eq!(code, "session_conflict");
+        assert!(!retry_same);
+        assert!(fallback);
     }
 
     // ── ManageToolsTool ──────────────────────────────────────────────
