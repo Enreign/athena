@@ -29,6 +29,9 @@ except ModuleNotFoundError:  # pragma: no cover
 
 TERMINAL_STATUSES = {"succeeded", "failed", "rolled_back"}
 OUTCOME_REASON_WAIT_TIMEOUT = "outcome_wait_timeout"
+DISPATCH_TASK_ID_RE = re.compile(
+    r"task_id=([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})"
+)
 
 
 def _to_text(value: object) -> str:
@@ -174,7 +177,7 @@ def git_status_paths(repo: Path) -> set[str]:
 
 
 def parse_dispatch_task_id(stderr: str) -> str | None:
-    m = re.search(r"task_id=([0-9a-fA-F-]{36})", stderr)
+    m = DISPATCH_TASK_ID_RE.search(stderr)
     return m.group(1) if m else None
 
 
