@@ -233,7 +233,76 @@ def fail_outcome_if_started(conn: sqlite3.Connection, dispatch_task_id: str, err
     return cur.rowcount > 0
 
 
-def score_plan_quality(response: str) -> float:
+def _get_dict_value_case_insensitive(payload: dict[str, Any], key: str) -> Any:
+    key_lc = key.lower()
+    for k, v in payload.items():
+        if str(k).lower() == key_lc:
+            return v
+    return None
+
+
+def _extract_structured_plan_payload(response: str) -> dict[str, Any] | None:
+    text = response.strip()
+    if not text:
+        return None
+
+    candidates = [text]
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+
+    parsed_objects: list[dict[str, Any]] = []
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed_objects.append(parsed)
+
+    def has_explicit_fields(obj: dict[str, Any]) -> bool:
+        return _get_dict_value_case_insensitive(obj, "plan") is not None or _get_dict_value_case_insensitive(
+            obj, "execution"
+        ) is not None
+
+    for obj in parsed_objects:
+        if has_explicit_fields(obj):
+            return obj
+        for wrapper in ("response", "final_response", "result", "output", "data"):
+            nested = _get_dict_value_case_insensitive(obj, wrapper)
+            if isinstance(nested, dict) and has_explicit_fields(nested):
+                return nested
+
+    return None
+
+
+def _field_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_field_text(item) for item in value]
+        return "\n".join(p for p in parts if p)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for v in value.values():
+            text = _field_text(v)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    return str(value)
+
+
+def _count_steps(text: str) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"(?m)^\s*(?:\d+[.)]|[-*])\s+", text))
+
+
+def _score_plan_quality_legacy(response: str) -> float:
     text = response.strip()
     if not text:
         return 0.0
@@ -247,6 +316,30 @@ def score_plan_quality(response: str) -> float:
         score += 0.2
     if any(k in text.lower() for k in ("verify", "test", "check", "rollback")):
         score += 0.1
+    return min(score, 1.0)
+
+
+def score_plan_quality(response: str) -> float:
+    structured = _extract_structured_plan_payload(response)
+    if structured is None:
+        return _score_plan_quality_legacy(response)
+
+    plan_text = _field_text(_get_dict_value_case_insensitive(structured, "plan"))
+    execution_text = _field_text(_get_dict_value_case_insensitive(structured, "execution"))
+
+    score = 0.0
+    if plan_text:
+        score += 0.4
+    if execution_text:
+        score += 0.3
+
+    if _count_steps(plan_text) + _count_steps(execution_text) >= 2:
+        score += 0.2
+
+    combined = "\n".join([plan_text, execution_text]).lower()
+    if any(k in combined for k in ("verify", "test", "check", "rollback")):
+        score += 0.1
+
     return min(score, 1.0)
 
 

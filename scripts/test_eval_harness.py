@@ -176,6 +176,32 @@ class EvalHarnessRegressionTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reasons, [])
 
+    def test_score_plan_quality_prefers_structured_fields(self) -> None:
+        response = """
+        {
+          "plan": [
+            "- inspect target files",
+            "- apply patch"
+          ],
+          "execution": [
+            "- updated scoring logic",
+            "- run tests to verify behavior"
+          ]
+        }
+        """
+        self.assertAlmostEqual(eval_harness.score_plan_quality(response), 1.0)
+
+    def test_score_plan_quality_legacy_plan_execution_fallback(self) -> None:
+        response = """
+        PLAN:
+        - inspect target files
+        - apply patch
+        EXECUTION:
+        - implemented changes
+        - ran checks
+        """
+        self.assertAlmostEqual(eval_harness.score_plan_quality(response), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
