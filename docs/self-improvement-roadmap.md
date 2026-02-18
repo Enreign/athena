@@ -193,6 +193,15 @@ Exit criteria:
 - low-risk lane consistently above mission thresholds for 4 consecutive weeks
 - medium-risk lane remains PR-only with high verification pass rate and low rollback trend
 
+## Parsing Hardening Status
+
+Canonical checklist for nightly updates: `docs/parsing-hardening-plan.md`.
+
+Latest snapshot:
+
+- Phase 1 (`optimizer/tournament parsing hardening`): complete
+- Phase 2 (`structured markers for manager/strategy loops`): in progress
+
 ## Governance and Safety
 
 - benchmark smoke runs are health checks, not quality proof
