@@ -230,6 +230,15 @@ pub struct TelegramConfig {
     /// Confirmation timeout in seconds
     #[serde(default = "default_confirm_timeout")]
     pub confirm_timeout_secs: u64,
+    /// Enable planning interview flow
+    #[serde(default = "default_planning_enabled")]
+    pub planning_enabled: bool,
+    /// Auto-start planning interview when messages look like planning requests
+    #[serde(default = "default_planning_auto")]
+    pub planning_auto: bool,
+    /// Planning interview timeout in seconds
+    #[serde(default = "default_planning_timeout")]
+    pub planning_timeout_secs: u64,
     /// Speech-to-text API URL (OpenAI Whisper-compatible endpoint)
     pub stt_url: Option<String>,
     /// STT API key (or set ATHENA_STT_API_KEY env var)
@@ -246,6 +255,9 @@ impl std::fmt::Debug for TelegramConfig {
             .field("allowed_chats", &self.allowed_chats)
             .field("allow_all", &self.allow_all)
             .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("planning_enabled", &self.planning_enabled)
+            .field("planning_auto", &self.planning_auto)
+            .field("planning_timeout_secs", &self.planning_timeout_secs)
             .field("stt_url", &self.stt_url)
             .field("stt_api_key", &"[REDACTED]")
             .field("stt_model", &self.stt_model)
@@ -261,6 +273,9 @@ impl Default for TelegramConfig {
             allowed_chats: vec![],
             allow_all: false,
             confirm_timeout_secs: default_confirm_timeout(),
+            planning_enabled: default_planning_enabled(),
+            planning_auto: default_planning_auto(),
+            planning_timeout_secs: default_planning_timeout(),
             stt_url: None,
             stt_api_key: None,
             stt_model: None,
@@ -270,6 +285,18 @@ impl Default for TelegramConfig {
 
 fn default_confirm_timeout() -> u64 {
     300
+}
+
+fn default_planning_enabled() -> bool {
+    true
+}
+
+fn default_planning_auto() -> bool {
+    true
+}
+
+fn default_planning_timeout() -> u64 {
+    900
 }
 
 #[derive(Debug, Deserialize, Clone)]
