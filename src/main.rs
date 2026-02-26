@@ -471,9 +471,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Memory { action }) => handle_memory(action, &memory, embedder.as_ref())?,
         Some(Commands::Ghosts) => {
-            // Start core to get merged ghost list (config + profiles)
-            let handle = AthenaCore::start(config, memory).await?;
-            for g in handle.list_ghosts() {
+            // List merged ghost definitions without requiring LLM connectivity.
+            let ghosts = profiles::load_ghosts(&config)?;
+            for g in ghosts {
                 println!("  {} — {} [{}]", g.name, g.description, g.tools.join(", "));
             }
         }
