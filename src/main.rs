@@ -21,6 +21,7 @@ mod manager;
 mod memory;
 mod mood;
 mod observer;
+mod ouath;
 mod proactive;
 mod profiles;
 mod pulse;
@@ -80,6 +81,11 @@ enum Commands {
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
+    /// Authenticate with OpenAI subscription (Ouath)
+    Ouath {
+        #[command(subcommand)]
+        action: OuathAction,
+    },
     /// Watch internal observer events in real time
     Observe,
     /// Manage scheduled jobs
@@ -147,6 +153,16 @@ enum Commands {
         #[command(subcommand)]
         action: SelfBuildAction,
     },
+}
+
+#[derive(Subcommand)]
+enum OuathAction {
+    /// Start OAuth login flow
+    Login,
+    /// Show current authentication status
+    Status,
+    /// Remove cached tokens
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -388,6 +404,12 @@ enum SelfBuildPromoteMode {
     Auto,
 }
 
+fn format_epoch(epoch_secs: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(epoch_secs, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -457,9 +479,19 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "telegram")]
         Some(Commands::Telegram) => {
+            let mut telegram_config = config.clone();
+            let telegram_provider = telegram_config
+                .telegram
+                .provider
+                .clone()
+                .unwrap_or_else(|| "ouath".into());
+            telegram_config.llm.provider = telegram_provider.clone();
+            let ouath_cfg = telegram_config.ouath.clone().unwrap_or_default();
+
             let system_info = telegram::SystemInfo {
-                provider: config.llm.provider.clone(),
-                model: match config.llm.provider.as_str() {
+                provider: telegram_provider.clone(),
+                model: match telegram_provider.as_str() {
+                    "ouath" => ouath_cfg.model.clone(),
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -472,7 +504,8 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_default(),
                     _ => config.ollama.model.clone(),
                 },
-                temperature: match config.llm.provider.as_str() {
+                temperature: match telegram_provider.as_str() {
+                    "ouath" => ouath_cfg.temperature,
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -481,7 +514,8 @@ async fn main() -> anyhow::Result<()> {
                     "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
                     _ => config.ollama.temperature,
                 },
-                max_tokens: match config.llm.provider.as_str() {
+                max_tokens: match telegram_provider.as_str() {
+                    "ouath" => ouath_cfg.max_tokens,
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -492,8 +526,43 @@ async fn main() -> anyhow::Result<()> {
                 },
                 started_at: tokio::time::Instant::now(),
             };
-            let handle = AthenaCore::start(config.clone(), memory).await?;
-            telegram::run_telegram(handle, config.telegram, system_info).await?;
+            let handle = AthenaCore::start(telegram_config.clone(), memory).await?;
+            telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
+        }
+        Some(Commands::Ouath { action }) => {
+            let ouath_config = config.ouath.clone().unwrap_or_default();
+            let auth = ouath::OuathAuth::new(ouath_config);
+            match action {
+                OuathAction::Login => {
+                    let tokens = auth.login_interactive().await?;
+                    let account = tokens.chatgpt_account_id.as_deref().unwrap_or("unknown");
+                    let expires = format_epoch(tokens.expires_at);
+                    println!("Ouath login complete.");
+                    println!("  Account: {}", account);
+                    println!("  Expires: {}", expires);
+                }
+                OuathAction::Status => match auth.load_tokens().await? {
+                    Some(tokens) => {
+                        let account = tokens.chatgpt_account_id.as_deref().unwrap_or("unknown");
+                        let expires = format_epoch(tokens.expires_at);
+                        println!("Ouath tokens found.");
+                        println!("  Account: {}", account);
+                        println!("  Expires: {}", expires);
+                        if tokens.expired(60) {
+                            println!("  Status: expired (refresh on next use)");
+                        } else {
+                            println!("  Status: valid");
+                        }
+                    }
+                    None => {
+                        println!("No Ouath tokens found. Run `athena ouath login`.");
+                    }
+                },
+                OuathAction::Logout => {
+                    auth.logout().await?;
+                    println!("Ouath tokens removed.");
+                }
+            }
         }
         Some(Commands::Observe) => unreachable!(), // handled above
         Some(Commands::Jobs { action }) => {

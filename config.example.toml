@@ -1,6 +1,21 @@
-# LLM provider: "ollama" (default), "openrouter", or "zen"
+# LLM provider: "ollama" (default), "ouath", "openrouter", or "zen"
 [llm]
 provider = "ollama"
+
+# OpenAI subscription (Ouath) via OAuth (used by Telegram by default).
+# Run `athena ouath login` to store tokens in auth_file (default: ~/.athena/ouath.json).
+# [ouath]
+# url = "https://chatgpt.com/backend-api/codex"
+# api_style = "responses"             # or "chat_completions"
+# model = "gpt-5.3-codex"
+# classifier_model = "gpt-5.3-codex"  # optional, defaults to model
+# auth_file = "~/.athena/ouath.json"
+# redirect_uri = "http://localhost:1455/auth/callback"
+# reasoning_effort = "medium"
+# reasoning_summary = "auto"
+# include = ["reasoning.encrypted_content"]
+# temperature = 0.3
+# max_tokens = 4096
 
 [ollama]
 url = "http://localhost:11434"
@@ -89,6 +104,7 @@ enabled = true
 
 [telegram]
 # token = "your-bot-token"   # or set ATHENA_TELEGRAM_TOKEN env var
+# provider = "ouath"          # optional, defaults to "ouath"
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
 confirm_timeout_secs = 300
