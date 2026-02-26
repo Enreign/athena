@@ -53,6 +53,7 @@ max_steps = 15
 
 # Ghosts are sub-agents that execute tasks inside Docker containers.
 # Each ghost can have its own soul file for personality/identity.
+# For deterministic CI/local runs, set ATHENA_DISABLE_HOME_PROFILES=1 to ignore ~/.athena/ghosts overrides.
 [[ghosts]]
 name = "coder"
 description = "Complex multi-file coding tasks: refactoring, new features, bug fixes across files."

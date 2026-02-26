@@ -33,6 +33,8 @@ jobs:
         run: cargo test -q --features telegram
 
       - name: Doctor guard
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- doctor --skip-llm --ci
 
       - name: Maintainability regression check

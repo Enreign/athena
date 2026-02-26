@@ -200,24 +200,22 @@ Maintainability risk:
 
 This map is intentionally quantitative and actionable: it shows where complexity is concentrated, which funnels are most fragile, and what refactor order gives the highest payoff first.
 
-## 9) Closure Update (2026-02-15)
+## 9) Closure Update (2026-02-26)
 
 Current snapshot after refactor pass:
 
-- Total Rust LOC: `19,747`
-- Total functions: `690`
-- Functions over 80 lines: `37` (at baseline gate)
-- Functions over 120 lines: `23` (improved)
-- Core hotspot reductions:
-  - `src/core.rs` max function now `78`
-  - `src/doctor.rs` max function now `72`
-  - `src/telegram.rs` max function now `147`
+- Total Rust LOC: `27,013`
+- Total functions: `874`
+- Functions over 80 lines: `51`
+- Functions over 120 lines: `30`
+- Current top hotspot function:
+  - `src/embeddings.rs::bench_memory_retrieval` (`835` lines)
 
 Validation status:
 
 - `cargo check -q`: pass
 - `cargo test -q`: pass
-- `cargo run -- doctor --skip-llm`: pass
+- `ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- doctor --skip-llm --ci`: `WARN` (exit `0`)
 - `scripts/maintainability_check.py`: pass
 
 ## 10) Maintainer Policy and Next Tranche
