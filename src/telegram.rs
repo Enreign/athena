@@ -548,6 +548,14 @@ fn planning_value_label(kind: &str, value: &str) -> Option<&'static str> {
     }
 }
 
+enum PlanningAction {
+    None,
+    Prompt(String, Option<InlineKeyboardMarkup>),
+    Dispatch(String),
+    Cancelled,
+    Done,
+}
+
 // ── CLI tool picker helpers ──────────────────────────────────────────
 
 const CLI_TOOLS: &[(&str, &str)] = &[
@@ -1368,6 +1376,85 @@ async fn dispatch_to_core_with_followup(
     Ok(())
 }
 
+/// Advance the planning interview by one step based on user text (pure logic, no I/O).
+fn planning_advance_step(
+    interview: &mut PlanningInterview,
+    text: &str,
+    remove_chat: &mut bool,
+) -> PlanningAction {
+    match interview.step {
+        PlanningStep::Goal => {
+            if is_skip_text(text) {
+                PlanningAction::Prompt("I need a goal to plan against. What does success look like?".to_string(), None)
+            } else {
+                interview.goal = Some(text.to_string());
+                interview.step = PlanningStep::Constraints;
+                PlanningAction::Prompt(
+                    "Any constraints I should respect? (timeline, budget, stack, scope)".to_string(),
+                    Some(planning_constraints_keyboard()),
+                )
+            }
+        }
+        PlanningStep::Constraints => {
+            let lowered = text.trim().to_lowercase();
+            if is_skip_text(text) || lowered == "none" || lowered == "no constraints" {
+                interview.constraints = Some("none".to_string());
+            } else {
+                interview.constraints = Some(text.to_string());
+            }
+            interview.step = PlanningStep::Output;
+            PlanningAction::Prompt(
+                "What format do you want the plan in: checklist, spec, or draft?".to_string(),
+                Some(planning_output_keyboard()),
+            )
+        }
+        PlanningStep::Output => {
+            interview.output = Some(if is_skip_text(text) { "checklist".to_string() } else { text.to_string() });
+            interview.step = PlanningStep::Summary;
+            PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()))
+        }
+        PlanningStep::Summary => {
+            if is_confirm_text(text) {
+                let prompt = planning_build_prompt(interview);
+                interview.step = PlanningStep::Refining;
+                PlanningAction::Dispatch(prompt)
+            } else if is_edit_text(text) {
+                interview.step = PlanningStep::Editing;
+                PlanningAction::Prompt(
+                    "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>".to_string(),
+                    None,
+                )
+            } else if apply_planning_edits(interview, text) {
+                PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()))
+            } else {
+                PlanningAction::Prompt(
+                    "Reply <code>confirm</code> to proceed, or send edits like <code>Goal: ...</code>.".to_string(),
+                    Some(planning_confirm_keyboard()),
+                )
+            }
+        }
+        PlanningStep::Editing => {
+            if apply_planning_edits(interview, text) {
+                interview.step = PlanningStep::Summary;
+                PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()))
+            } else {
+                PlanningAction::Prompt(
+                    "I couldn't read those edits. Try lines like <code>Goal: ...</code> or <code>Constraints: ...</code>.".to_string(),
+                    None,
+                )
+            }
+        }
+        PlanningStep::Refining => {
+            if is_done_text(text) {
+                *remove_chat = true;
+                PlanningAction::Done
+            } else {
+                PlanningAction::Dispatch(text.to_string())
+            }
+        }
+    }
+}
+
 async fn handle_planning_message(
     bot: &Bot,
     msg: &Message,
@@ -1379,164 +1466,62 @@ async fn handle_planning_message(
         return Ok(false);
     }
 
-    enum Action {
-        None,
-        Prompt(String, Option<InlineKeyboardMarkup>),
-        Dispatch(String),
-        Cancelled,
-        Done,
-    }
-
     let now = tokio::time::Instant::now();
-    let mut action = Action::None;
-
-    {
+    let action = {
         let mut planning = state.planning.lock().await;
         if let Some(interview) = planning.get_mut(&chat_id.0) {
             interview.last_updated = now;
-
             if is_cancel_text(text) {
                 planning.remove(&chat_id.0);
-                action = Action::Cancelled;
+                PlanningAction::Cancelled
             } else {
-                match interview.step {
-                    PlanningStep::Goal => {
-                        if is_skip_text(text) {
-                            action = Action::Prompt(
-                                "I need a goal to plan against. What does success look like?"
-                                    .to_string(),
-                                None,
-                            );
-                        } else {
-                            interview.goal = Some(text.to_string());
-                            interview.step = PlanningStep::Constraints;
-                            action = Action::Prompt(
-                                "Any constraints I should respect? (timeline, budget, stack, scope)"
-                                    .to_string(),
-                                Some(planning_constraints_keyboard()),
-                            );
-                        }
-                    }
-                    PlanningStep::Constraints => {
-                        let lowered = text.trim().to_lowercase();
-                        if is_skip_text(text) || lowered == "none" || lowered == "no constraints" {
-                            interview.constraints = Some("none".to_string());
-                        } else {
-                            interview.constraints = Some(text.to_string());
-                        }
-                        interview.step = PlanningStep::Output;
-                        action = Action::Prompt(
-                            "What format do you want the plan in: checklist, spec, or draft?"
-                                .to_string(),
-                            Some(planning_output_keyboard()),
-                        );
-                    }
-                    PlanningStep::Output => {
-                        if is_skip_text(text) {
-                            interview.output = Some("checklist".to_string());
-                        } else {
-                            interview.output = Some(text.to_string());
-                        }
-                        interview.step = PlanningStep::Summary;
-                        action =
-                            Action::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-                    }
-                    PlanningStep::Summary => {
-                        if is_confirm_text(text) {
-                            let prompt = planning_build_prompt(interview);
-                            interview.step = PlanningStep::Refining;
-                            action = Action::Dispatch(prompt);
-                        } else if is_edit_text(text) {
-                            interview.step = PlanningStep::Editing;
-                            action = Action::Prompt(
-                                "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>"
-                                    .to_string(),
-                                None,
-                            );
-                        } else if apply_planning_edits(interview, text) {
-                            action =
-                                Action::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-                        } else {
-                            action = Action::Prompt(
-                                "Reply <code>confirm</code> to proceed, or send edits like <code>Goal: ...</code>."
-                                    .to_string(),
-                                Some(planning_confirm_keyboard()),
-                            );
-                        }
-                    }
-                    PlanningStep::Editing => {
-                        if apply_planning_edits(interview, text) {
-                            interview.step = PlanningStep::Summary;
-                            action =
-                                Action::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-                        } else {
-                            action = Action::Prompt(
-                                "I couldn't read those edits. Try lines like <code>Goal: ...</code> or <code>Constraints: ...</code>."
-                                    .to_string(),
-                                None,
-                            );
-                        }
-                    }
-                    PlanningStep::Refining => {
-                        if is_done_text(text) {
-                            planning.remove(&chat_id.0);
-                            action = Action::Done;
-                        } else {
-                            action = Action::Dispatch(text.to_string());
-                        }
-                    }
-                }
+                let mut remove = false;
+                let action = planning_advance_step(interview, text, &mut remove);
+                if remove { planning.remove(&chat_id.0); }
+                action
             }
         } else if state.config.planning_auto && should_start_planning_interview(text) {
             let mut interview = PlanningInterview::new(now);
             if !is_bare_plan_request(text) {
                 interview.goal = Some(text.to_string());
                 interview.step = PlanningStep::Constraints;
-                planning.insert(chat_id.0, interview.clone());
-                action = Action::Prompt(
-                    "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints I should respect? (timeline, budget, stack, scope)"
-                        .to_string(),
+                planning.insert(chat_id.0, interview);
+                PlanningAction::Prompt(
+                    "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints I should respect? (timeline, budget, stack, scope)".to_string(),
                     Some(planning_constraints_keyboard()),
-                );
+                )
             } else {
-                planning.insert(chat_id.0, interview.clone());
-                action = Action::Prompt(
-                    "<b>Quick planning interview</b>\n\nWhat does success look like? One sentence is fine."
-                        .to_string(),
+                planning.insert(chat_id.0, interview);
+                PlanningAction::Prompt(
+                    "<b>Quick planning interview</b>\n\nWhat does success look like? One sentence is fine.".to_string(),
                     None,
-                );
+                )
             }
+        } else {
+            PlanningAction::None
         }
-    }
+    };
 
     match action {
-        Action::None => Ok(false),
-        Action::Cancelled => {
+        PlanningAction::None => Ok(false),
+        PlanningAction::Cancelled => {
             send_html(bot, chat_id, "<i>Planning cancelled.</i>").await?;
             Ok(true)
         }
-        Action::Prompt(html, keyboard) => {
+        PlanningAction::Prompt(html, keyboard) => {
             send_planning_prompt(bot, chat_id, html, keyboard).await?;
             Ok(true)
         }
-        Action::Dispatch(prompt) => {
+        PlanningAction::Dispatch(prompt) => {
             let session = telegram_session(msg, chat_id);
             dispatch_to_core_with_followup(
-                bot.clone(),
-                chat_id,
-                state.clone(),
-                session,
-                prompt,
+                bot.clone(), chat_id, state.clone(), session, prompt,
                 "<i>Status: Drafting plan…</i>",
-                Some((
-                    "<b>Plan generated.</b> What would you like to do next?".to_string(),
-                    planning_post_generate_keyboard(),
-                )),
-            )
-            .await?;
+                Some(("<b>Plan generated.</b> What would you like to do next?".to_string(), planning_post_generate_keyboard())),
+            ).await?;
             Ok(true)
         }
-        Action::Done => {
+        PlanningAction::Done => {
             send_html(bot, chat_id, "<i>Plan finalised.</i>").await?;
             Ok(true)
         }
@@ -1775,14 +1760,203 @@ async fn send_working_status(bot: &Bot, chat_id: ChatId) -> ResponseResult<Messa
 
 // ── Callback handler ─────────────────────────────────────────────────
 
+/// Resolve a planning callback button press into an action (pure logic, no I/O).
+fn resolve_planning_callback(
+    interview: &mut PlanningInterview,
+    kind: &str,
+    value: &str,
+    remove_chat: &mut bool,
+) -> (PlanningAction, Option<String>) {
+    let mut action = PlanningAction::None;
+    let mut cb_text: Option<String> = None;
+
+    interview.last_updated = tokio::time::Instant::now();
+
+    if kind == "confirm" {
+        match value {
+            "yes" => {
+                let prompt = planning_build_prompt(interview);
+                interview.step = PlanningStep::Refining;
+                action = PlanningAction::Dispatch(prompt);
+                cb_text = Some("Confirmed".to_string());
+            }
+            "edit" => {
+                interview.step = PlanningStep::Editing;
+                action = PlanningAction::Prompt(
+                    "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>".to_string(),
+                    None,
+                );
+                cb_text = Some("Edit mode".to_string());
+            }
+            "cancel" => {
+                *remove_chat = true;
+                action = PlanningAction::Cancelled;
+                cb_text = Some("Cancelled".to_string());
+            }
+            _ => {}
+        }
+    } else if let Some(label) = planning_value_label(kind, value) {
+        match kind {
+            "depth" => interview.depth = Some(label.to_string()),
+            "timeline" => interview.timeline = Some(label.to_string()),
+            "scope" => interview.scope = Some(label.to_string()),
+            "constraints" => interview.constraints = Some(label.to_string()),
+            "output" => interview.output = Some(label.to_string()),
+            _ => {}
+        }
+        cb_text = Some(if kind == "constraints" {
+            "Constraints: none".to_string()
+        } else {
+            format!("{}: {}", kind.chars().next().unwrap().to_uppercase().collect::<String>() + &kind[1..], label)
+        });
+        match interview.step {
+            PlanningStep::Constraints if matches!(kind, "timeline" | "scope" | "constraints") => {
+                interview.step = PlanningStep::Output;
+                action = PlanningAction::Prompt(
+                    "What format do you want the plan in: checklist, spec, or draft?".to_string(),
+                    Some(planning_output_keyboard()),
+                );
+            }
+            PlanningStep::Output if kind == "output" => {
+                interview.step = PlanningStep::Summary;
+                action = PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
+            }
+            _ => {}
+        }
+    } else if kind == "skip" {
+        match value {
+            "constraints" => {
+                interview.constraints = Some("none".to_string());
+                interview.step = PlanningStep::Output;
+                action = PlanningAction::Prompt(
+                    "What format do you want the plan in: checklist, spec, or draft?".to_string(),
+                    Some(planning_output_keyboard()),
+                );
+                cb_text = Some("Skipped constraints".to_string());
+            }
+            "output" => {
+                interview.output = Some("checklist".to_string());
+                interview.step = PlanningStep::Summary;
+                action = PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
+                cb_text = Some("Using checklist format".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    (action, cb_text)
+}
+
+/// Handle "plan:<kind>:<value>" callback queries.
+async fn handle_planning_callback(
+    bot: &Bot,
+    q: &CallbackQuery,
+    state: &TelegramState,
+    kind: &str,
+    value: &str,
+) -> ResponseResult<()> {
+    let Some(msg) = &q.message else {
+        bot.answer_callback_query(&q.id).text("Session expired, please retry.").await?;
+        return Ok(());
+    };
+    let Some(regular) = msg.regular_message() else {
+        bot.answer_callback_query(&q.id).text("Session expired, please retry.").await?;
+        return Ok(());
+    };
+    let chat_id = regular.chat.id;
+
+    let (action, cb_text) = {
+        let mut planning = state.planning.lock().await;
+        let Some(interview) = planning.get_mut(&chat_id.0) else {
+            bot.answer_callback_query(&q.id).text("Session expired, please retry.").await?;
+            return Ok(());
+        };
+        let mut remove = false;
+        let result = resolve_planning_callback(interview, kind, value, &mut remove);
+        if remove { planning.remove(&chat_id.0); }
+        result
+    };
+
+    if let Some(text) = cb_text {
+        bot.answer_callback_query(&q.id).text(text).await?;
+    } else {
+        bot.answer_callback_query(&q.id).await?;
+    }
+
+    execute_planning_action(bot, q, chat_id, state, action).await
+}
+
+/// Handle "plan:post:<action>" callback queries (Implement / Refine / Done).
+async fn handle_plan_post_callback(
+    bot: &Bot,
+    q: &CallbackQuery,
+    state: &TelegramState,
+    value: &str,
+) -> ResponseResult<()> {
+    let chat_id = q.message.as_ref().map(|m| m.chat().id).unwrap_or(ChatId(0));
+    match value {
+        "implement" => {
+            bot.answer_callback_query(&q.id).text("Starting implementation").await?;
+            { state.planning.lock().await.remove(&chat_id.0); }
+            let session = telegram_session_from_user(q.from.id.0.to_string(), chat_id);
+            dispatch_to_core(
+                bot.clone(), chat_id, state.clone(), session,
+                "Implement the plan above step by step. Start with the first actionable item.".to_string(),
+                "<i>Status: Implementing plan…</i>",
+            ).await?;
+        }
+        "refine" => {
+            bot.answer_callback_query(&q.id).text("Send your refinements").await?;
+            send_html(bot, chat_id, "<i>Send me what you'd like to change and I'll update the plan.</i>").await?;
+        }
+        "done" => {
+            bot.answer_callback_query(&q.id).text("Done").await?;
+            { state.planning.lock().await.remove(&chat_id.0); }
+            send_html(bot, chat_id, "<i>Plan finalised.</i>").await?;
+        }
+        _ => { bot.answer_callback_query(&q.id).await?; }
+    }
+    Ok(())
+}
+
+/// Execute a resolved planning action (send prompt, dispatch to core, etc.).
+async fn execute_planning_action(
+    bot: &Bot,
+    q: &CallbackQuery,
+    chat_id: ChatId,
+    state: &TelegramState,
+    action: PlanningAction,
+) -> ResponseResult<()> {
+    match action {
+        PlanningAction::None => {}
+        PlanningAction::Cancelled => {
+            send_html(bot, chat_id, "<i>Planning cancelled.</i>").await?;
+        }
+        PlanningAction::Prompt(html, keyboard) => {
+            send_planning_prompt(bot, chat_id, html, keyboard).await?;
+        }
+        PlanningAction::Dispatch(prompt) => {
+            let session = telegram_session_from_user(q.from.id.0.to_string(), chat_id);
+            dispatch_to_core_with_followup(
+                bot.clone(), chat_id, state.clone(), session, prompt,
+                "<i>Status: Drafting plan…</i>",
+                Some(("<b>Plan generated.</b> What would you like to do next?".to_string(), planning_post_generate_keyboard())),
+            ).await?;
+        }
+        PlanningAction::Done => {
+            send_html(bot, chat_id, "<i>Plan finalised.</i>").await?;
+        }
+    }
+    Ok(())
+}
+
 /// Handle callback queries (confirmation button presses).
 async fn handle_callback(bot: Bot, q: CallbackQuery, state: TelegramState) -> ResponseResult<()> {
-    let data = match q.data {
-        Some(d) => d,
+    let data = match &q.data {
+        Some(d) => d.clone(),
         None => return Ok(()),
     };
 
-    // Parse callback data by prefix
     let parts: Vec<&str> = data.splitn(3, ':').collect();
 
     // Handle "cli:<tool_id>" callbacks
@@ -1794,238 +1968,34 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: TelegramState) -> Re
         };
         match result {
             Ok(_) => {
-                state
-                    .handle
-                    .observer
-                    .emit(crate::observer::ObserverEvent::new(
-                        ObserverCategory::KnobChange,
-                        format!("cli_tool = {}", tool_id),
-                    ));
+                state.handle.observer.emit(crate::observer::ObserverEvent::new(
+                    ObserverCategory::KnobChange,
+                    format!("cli_tool = {}", tool_id),
+                ));
                 let label = cli_display_name(tool_id);
                 let keyboard = build_cli_keyboard(tool_id);
                 let html = format!("<b>Coding CLI tool:</b> {}", escape_html(&label));
                 if let Some(msg) = &q.message {
                     if let Some(regular) = msg.regular_message() {
-                        let _ = bot
-                            .edit_message_text(regular.chat.id, regular.id, &html)
-                            .parse_mode(ParseMode::Html)
-                            .reply_markup(keyboard)
-                            .await;
+                        let _ = bot.edit_message_text(regular.chat.id, regular.id, &html)
+                            .parse_mode(ParseMode::Html).reply_markup(keyboard).await;
                     }
                 }
-                bot.answer_callback_query(&q.id)
-                    .text(format!("Switched to {}", label))
-                    .await?;
+                bot.answer_callback_query(&q.id).text(format!("Switched to {}", label)).await?;
             }
-            Err(e) => {
-                bot.answer_callback_query(&q.id).text(e).await?;
-            }
+            Err(e) => { bot.answer_callback_query(&q.id).text(e).await?; }
         }
         return Ok(());
     }
 
     // Handle "plan:<kind>:<value>" callbacks
-    if parts.len() == 3 && parts[0] == "plan" {
-        let kind = parts[1];
-        let value = parts[2];
-
-        let Some(msg) = &q.message else {
-            bot.answer_callback_query(&q.id)
-                .text("Session expired, please retry.")
-                .await?;
-            return Ok(());
-        };
-        let Some(regular) = msg.regular_message() else {
-            bot.answer_callback_query(&q.id)
-                .text("Session expired, please retry.")
-                .await?;
-            return Ok(());
-        };
-        let chat_id = regular.chat.id;
-
-        enum Action {
-            None,
-            Prompt(String, Option<InlineKeyboardMarkup>),
-            Dispatch(String),
-            Cancelled,
-        }
-
-        let mut action = Action::None;
-        let mut callback_text: Option<String> = None;
-
-        {
-            let mut planning = state.planning.lock().await;
-            let Some(interview) = planning.get_mut(&chat_id.0) else {
-                bot.answer_callback_query(&q.id)
-                    .text("Session expired, please retry.")
-                    .await?;
-                return Ok(());
-            };
-
-            interview.last_updated = tokio::time::Instant::now();
-
-            if kind == "confirm" {
-                match value {
-                    "yes" => {
-                        let prompt = planning_build_prompt(interview);
-                        interview.step = PlanningStep::Refining;
-                        action = Action::Dispatch(prompt);
-                        callback_text = Some("Confirmed".to_string());
-                    }
-                    "edit" => {
-                        interview.step = PlanningStep::Editing;
-                        action = Action::Prompt(
-                            "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>"
-                                .to_string(),
-                            None,
-                        );
-                        callback_text = Some("Edit mode".to_string());
-                    }
-                    "cancel" => {
-                        planning.remove(&chat_id.0);
-                        action = Action::Cancelled;
-                        callback_text = Some("Cancelled".to_string());
-                    }
-                    _ => {}
-                }
-            } else if let Some(label) = planning_value_label(kind, value) {
-                match kind {
-                    "depth" => {
-                        interview.depth = Some(label.to_string());
-                        callback_text = Some(format!("Depth: {}", label));
-                    }
-                    "timeline" => {
-                        interview.timeline = Some(label.to_string());
-                        callback_text = Some(format!("Timeline: {}", label));
-                    }
-                    "scope" => {
-                        interview.scope = Some(label.to_string());
-                        callback_text = Some(format!("Scope: {}", label));
-                    }
-                    "constraints" => {
-                        interview.constraints = Some(label.to_string());
-                        callback_text = Some("Constraints: none".to_string());
-                    }
-                    "output" => {
-                        interview.output = Some(label.to_string());
-                        callback_text = Some(format!("Output: {}", label));
-                    }
-                    _ => {}
-                }
-
-                match interview.step {
-                    PlanningStep::Constraints if matches!(kind, "timeline" | "scope" | "constraints") => {
-                        interview.step = PlanningStep::Output;
-                        action = Action::Prompt(
-                            "What format do you want the plan in: checklist, spec, or draft?"
-                                .to_string(),
-                            Some(planning_output_keyboard()),
-                        );
-                    }
-                    PlanningStep::Output if kind == "output" => {
-                        interview.step = PlanningStep::Summary;
-                        action =
-                            Action::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-                    }
-                    _ => {}
-                }
-            } else if kind == "skip" {
-                match value {
-                    "constraints" => {
-                        interview.constraints = Some("none".to_string());
-                        interview.step = PlanningStep::Output;
-                        action = Action::Prompt(
-                            "What format do you want the plan in: checklist, spec, or draft?"
-                                .to_string(),
-                            Some(planning_output_keyboard()),
-                        );
-                        callback_text = Some("Skipped constraints".to_string());
-                    }
-                    "output" => {
-                        interview.output = Some("checklist".to_string());
-                        interview.step = PlanningStep::Summary;
-                        action =
-                            Action::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-                        callback_text = Some("Using checklist format".to_string());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if let Some(text) = callback_text {
-            bot.answer_callback_query(&q.id).text(text).await?;
-        } else {
-            bot.answer_callback_query(&q.id).await?;
-        }
-
-        match action {
-            Action::None => {}
-            Action::Cancelled => {
-                send_html(&bot, chat_id, "<i>Planning cancelled.</i>").await?;
-            }
-            Action::Prompt(html, keyboard) => {
-                send_planning_prompt(&bot, chat_id, html, keyboard).await?;
-            }
-            Action::Dispatch(prompt) => {
-                let session = telegram_session_from_user(q.from.id.0.to_string(), chat_id);
-                dispatch_to_core_with_followup(
-                    bot.clone(),
-                    chat_id,
-                    state.clone(),
-                    session,
-                    prompt,
-                    "<i>Status: Drafting plan…</i>",
-                    Some((
-                        "<b>Plan generated.</b> What would you like to do next?".to_string(),
-                        planning_post_generate_keyboard(),
-                    )),
-                )
-                .await?;
-            }
-        }
-
-        return Ok(());
+    if parts.len() == 3 && parts[0] == "plan" && parts[1] != "post" {
+        return handle_planning_callback(&bot, &q, &state, parts[1], parts[2]).await;
     }
 
-    // Handle post-generation planning actions (Implement / Refine / Done)
+    // Handle post-generation planning actions
     if parts.len() == 3 && parts[0] == "plan" && parts[1] == "post" {
-        let chat_id = q.message.as_ref().map(|m| m.chat().id).unwrap_or(ChatId(0));
-        match parts[2] {
-            "implement" => {
-                bot.answer_callback_query(&q.id).text("Starting implementation").await?;
-                {
-                    let mut planning = state.planning.lock().await;
-                    planning.remove(&chat_id.0);
-                }
-                let session = telegram_session_from_user(q.from.id.0.to_string(), chat_id);
-                dispatch_to_core(
-                    bot.clone(),
-                    chat_id,
-                    state.clone(),
-                    session,
-                    "Implement the plan above step by step. Start with the first actionable item.".to_string(),
-                    "<i>Status: Implementing plan…</i>",
-                )
-                .await?;
-            }
-            "refine" => {
-                bot.answer_callback_query(&q.id).text("Send your refinements").await?;
-                send_html(&bot, chat_id, "<i>Send me what you'd like to change and I'll update the plan.</i>").await?;
-            }
-            "done" => {
-                bot.answer_callback_query(&q.id).text("Done").await?;
-                {
-                    let mut planning = state.planning.lock().await;
-                    planning.remove(&chat_id.0);
-                }
-                send_html(&bot, chat_id, "<i>Plan finalised.</i>").await?;
-            }
-            _ => {
-                bot.answer_callback_query(&q.id).await?;
-            }
-        }
-        return Ok(());
+        return handle_plan_post_callback(&bot, &q, &state, parts[2]).await;
     }
 
     // Handle "confirm:<id>:<yes|no>" callbacks
@@ -2040,33 +2010,20 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: TelegramState) -> Re
     let mut pending = state.pending.lock().await;
     if let Some(tx) = pending.remove(confirm_id) {
         let _ = tx.send(approved);
-        let answer_html = if approved {
-            "<b>Approved</b>"
-        } else {
-            "<b>Denied</b>"
-        };
-
-        // Update the keyboard message
+        let answer_html = if approved { "<b>Approved</b>" } else { "<b>Denied</b>" };
         if let Some(msg) = &q.message {
             if let Some(regular) = msg.regular_message() {
                 let original = regular.text().unwrap_or("");
-                let _ = bot
-                    .edit_message_text(
-                        regular.chat.id,
-                        regular.id,
-                        format!("{}\n\n{}", escape_html(original), answer_html),
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await;
+                let _ = bot.edit_message_text(
+                    regular.chat.id, regular.id,
+                    format!("{}\n\n{}", escape_html(original), answer_html),
+                ).parse_mode(ParseMode::Html).await;
             }
         }
-
         let answer = if approved { "Approved" } else { "Denied" };
         bot.answer_callback_query(&q.id).text(answer).await?;
     } else {
-        bot.answer_callback_query(&q.id)
-            .text("Session expired, please retry.")
-            .await?;
+        bot.answer_callback_query(&q.id).text("Session expired, please retry.").await?;
     }
 
     Ok(())
