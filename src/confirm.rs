@@ -77,8 +77,7 @@ impl SensitivePatterns {
             })
             .map(|p| p.as_str())
             .collect();
-        let regex_set = regex::RegexSet::new(&valid)
-            .expect("all patterns were pre-validated");
+        let regex_set = regex::RegexSet::new(&valid).expect("all patterns were pre-validated");
         Self { regex_set }
     }
 
@@ -87,4 +86,3 @@ impl SensitivePatterns {
         self.regex_set.is_match(cmd)
     }
 }
-

@@ -1,0 +1,80 @@
+# Athena
+
+Secure autonomous multi-agent system for code execution, evaluation, and policy-bounded self-improvement.
+
+## What Athena Includes
+
+- multi-ghost task execution (`coder`, `scout`, feature/task contracts)
+- guarded autonomous dispatch with outcome tracking
+- memory and embedding-backed context
+- doctor + KPI + eval harness pipelines
+- supervised self-build and optimizer tournament tooling
+
+## Requirements
+
+- Rust toolchain (pinned via `rust-toolchain.toml`)
+- Python 3.11+ for `scripts/*.py`
+- Docker daemon (for containerized ghost execution)
+- one configured LLM provider:
+  - local Ollama (default), or
+  - OpenRouter / Zen compatible endpoint
+
+## Quickstart
+
+1. Clone and enter repository.
+2. Copy config template:
+   - `cp config.example.toml config.toml`
+3. Run baseline checks:
+   - `cargo check -q`
+   - `cargo test -q`
+   - `cargo run --quiet -- doctor --skip-llm`
+4. Start CLI:
+   - `cargo run -- chat`
+
+Useful no-network / deterministic local mode:
+
+- `ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- ghosts`
+
+This disables `~/.athena/ghosts/*.toml` overrides so behavior only depends on repository config.
+
+## Common Commands
+
+- list ghosts: `cargo run -- ghosts`
+- dispatch one task: `cargo run -- dispatch --goal "..." --wait-secs 120`
+- doctor report: `cargo run -- doctor --skip-llm`
+- KPI snapshot: `cargo run -- kpi snapshot --lane delivery`
+- feature contract flow: `cargo run -- feature --help`
+- self-build flow: `cargo run -- self-build --help`
+
+## CI
+
+Main CI checks are in:
+
+- `.github/workflows/maintainability.yml`
+- `.github/workflows/eval-harness.yml`
+- `.github/workflows/doctor.yml`
+
+Real-gate and nightly optimizer workflows are intentionally self-hosted.
+
+## Documentation
+
+- `docs/self-improvement-roadmap.md`
+- `docs/self-improvement-architecture.md`
+- `docs/eval-harness.md`
+- `docs/feature-contract-workflow.md`
+- `docs/secrets-vaultwarden.md`
+
+## Release
+
+Tag-based GitHub release workflow:
+
+- `.github/workflows/release.yml`
+
+Create a tag like `v0.1.0` and push it to publish release artifacts.
+
+## Project Policies
+
+- Security: `SECURITY.md`
+- Contributing: `CONTRIBUTING.md`
+- Changelog: `CHANGELOG.md`
+- License: `LICENSE`

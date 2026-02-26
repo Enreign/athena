@@ -10,7 +10,9 @@ pub fn attempt_fix(
 ) -> Option<TaskContract> {
     match error {
         AthenaError::Tool(message) => {
-            if message.contains("web_fetch") && (message.contains("timed out") || message.contains("timeout")) {
+            if message.contains("web_fetch")
+                && (message.contains("timed out") || message.contains("timeout"))
+            {
                 let context = format!(
                     "The tool '{}' failed with a timeout error when called with parameters: {}.\nError message: {}",
                     original_tool_name,
@@ -36,9 +38,7 @@ pub fn attempt_fix(
             } else if original_tool_name == "file_edit"
                 && (message.contains("not found") || message.contains("must be unique"))
             {
-                let path = original_tool_params["path"]
-                    .as_str()
-                    .unwrap_or_default();
+                let path = original_tool_params["path"].as_str().unwrap_or_default();
                 let old_string = original_tool_params["old_string"]
                     .as_str()
                     .unwrap_or_default();
@@ -67,7 +67,8 @@ pub fn attempt_fix(
                     constraints: vec![
                         "Read the file before attempting to edit.".to_string(),
                         "Ensure the new `old_string` is unique within the file.".to_string(),
-                        "Preserve the original `new_string` — only fix the `old_string`.".to_string(),
+                        "Preserve the original `new_string` — only fix the `old_string`."
+                            .to_string(),
                     ],
                     soul: Some(
                         "You are a senior Rust developer ghost, specialized in precise \
@@ -89,10 +90,7 @@ pub fn attempt_fix(
 
 /// Analyzes test output and attempts to generate a corrective task.
 /// Called when the VERIFY phase detects test failures.
-pub fn attempt_test_fix(
-    test_output: &str,
-    original_goal: &str,
-) -> Option<TaskContract> {
+pub fn attempt_test_fix(test_output: &str, original_goal: &str) -> Option<TaskContract> {
     if !test_output.contains("test result: FAILED")
         && !test_output.contains("FAILED")
         && !test_output.contains("error[E")

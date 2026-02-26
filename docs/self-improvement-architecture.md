@@ -4,6 +4,47 @@
 
 ## System Overview
 
+## Target Operating Model (Spec-Driven)
+
+Athena's long-horizon engineering loop should follow one explicit contract stack:
+
+1. `Feature Contract` defines user outcome, scope, constraints, and acceptance criteria.
+2. `Task Contracts` decompose a feature into a DAG of atomic tasks with dependencies.
+3. `Execution Contract` runs each task through normalized CLI wrappers and deterministic retry/fallback policy.
+4. `Eval Gate` scores plan/execution/tests/diff and blocks weak outcomes.
+5. `Promotion Policy` applies risk-tier controls (low-risk auto-merge only; medium/high risk PR-only).
+
+Key references:
+
+- `docs/feature-contract-v1.md`
+- `docs/task-contract-v1.md`
+- `docs/execution-contract-v1.md`
+- `docs/mission-contract.md`
+- `docs/self-improvement-roadmap.md`
+
+### Feature to Task DAG Scaling
+
+To scale from task-level execution to feature-level delivery:
+
+- each feature owns a single acceptance criteria set with stable IDs (for example, `AC-1`, `AC-2`)
+- each task maps to at least one acceptance criterion
+- dependencies are represented as a DAG (no cycles), so independent tasks can run in parallel
+- feature completion is blocked until all acceptance IDs have passing evidence
+
+```mermaid
+flowchart LR
+    FC["Feature Contract"] --> TD["Task DAG"]
+    TD --> T1["T1: Interface Contract"]
+    TD --> T2["T2: Backend Implementation"]
+    TD --> T3["T3: Frontend Integration"]
+    T1 --> T2
+    T1 --> T3
+    T2 --> T4["T4: E2E and Regression Tests"]
+    T3 --> T4
+    T4 --> EG["Eval Gate"]
+    EG --> PP["Promotion Policy"]
+```
+
 ```mermaid
 graph TB
     subgraph "SENSE — What Athena Knows About Herself"
@@ -170,12 +211,12 @@ flowchart TD
     style H fill:#1a5c1a,stroke:#4aff4a,color:#fff
 ```
 
-**What exists today**: Metrics collector runs, metrics injected into classify prompt. `attempt_test_fix()` exists but is dead code.
+**What exists today**: Metrics collector runs, metrics injected into classify prompt. `attempt_test_fix()` is now wired into CodeStrategy self-heal when VERIFY output indicates test failures.
 
 **What's missing**:
 - No anomaly detection thresholds — metrics are collected but never compared against baselines
 - No automatic dispatch when health degrades — only visible in classify prompt
-- `attempt_test_fix()` is never called from CodeStrategy
+- Self-heal policy is still shallow: one corrective cycle with heuristic triggering, not a deterministic multi-attempt policy
 - No feedback: if a fix works, there's no record that suppresses the same alert
 
 **How it should work**:
@@ -184,7 +225,7 @@ flowchart TD
 3. If `self_dev_enabled` + spontaneity gate: dispatches diagnostic task to scout ghost
 4. Scout identifies root cause → dispatches fix task to coder ghost
 5. Coder runs CodeStrategy with `test_generation=true`
-6. If VERIFY tests fail → `attempt_test_fix()` triggers retry
+6. If VERIFY tests fail → `attempt_test_fix()` triggers corrective retry (currently single cycle)
 7. On success: stores `"health_fix"` memory, emits pulse
 
 ---
@@ -352,10 +393,10 @@ flowchart TD
     style N fill:#1a5c3a,color:#fff
 ```
 
-**What exists today**: CodeStrategy runs EXPLORE → EXECUTE → VERIFY. `test_generation` controls whether VERIFY can write tests. `attempt_test_fix()` exists. Ripple warning is emitted.
+**What exists today**: CodeStrategy runs EXPLORE → EXECUTE → VERIFY. `test_generation` controls whether VERIFY can write tests. `attempt_test_fix()` is called in self-heal flow. Ripple warning is emitted.
 
 **What's missing**:
-- `attempt_test_fix()` is never called — VERIFY detects failures but doesn't trigger self-heal
+- Self-heal retry policy is not deterministic across error classes and is limited to a single corrective cycle
 - No success/failure recording after code changes — no feedback into future decisions
 - Ripple analysis doesn't use code_structure memories, only heuristic file path matching
 - No learning from outcomes: refactoring scanner can't distinguish "safe module" from "fragile module"
@@ -363,7 +404,7 @@ flowchart TD
 
 **How it should work**:
 1. Every CodeStrategy execution records outcome as memory (`code_change` or `code_change_failed`)
-2. VERIFY phase detects test failures → calls `attempt_test_fix()` → up to 2 retries
+2. VERIFY phase detects test failures → calls `attempt_test_fix()` using policy-driven retry limits
 3. Success/failure memories feed into refactoring scanner's context
 4. Scanner queries both `code_structure` and `code_change*` memories to understand what's safe to change
 5. Modules with history of failed changes get lower confidence → less likely to be auto-refactored
@@ -471,7 +512,8 @@ The user controls maximum autonomy via knob combinations.
 
 | Gap | Severity | Funnel | What's Missing |
 |-----|----------|--------|----------------|
-| `attempt_test_fix()` never called | **HIGH** | F4 | VERIFY detects test failure but doesn't trigger self-heal loop |
+| Self-heal retry policy is shallow/non-deterministic | **HIGH** | F4 | `attempt_test_fix()` is wired, but retry/fallback behavior is not policy-driven by stable error taxonomy |
+| No optimizer loop (OpenEvolve-style) | **HIGH** | Cross-funnel | No prompt/skill mutation, tournament evaluation, or merge-best promotion loop over fixed tasks |
 | No anomaly detection thresholds | **HIGH** | F1 | Metrics collected but never compared against baselines |
 | No outcome recording | **HIGH** | F4 | Code changes don't store success/failure memories |
 | No failure suppression | **MEDIUM** | F2 | Same bad refactoring idea can recur every 6h |

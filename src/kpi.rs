@@ -250,11 +250,15 @@ fn mean_time_to_fix_from_outcomes(
          ORDER BY finished_at ASC",
     )?;
     let failures: Vec<DateTime<Utc>> = fail_stmt
-        .query_map(params![lane, repo, risk_tier], |row| row.get::<_, String>(0))?
+        .query_map(params![lane, repo, risk_tier], |row| {
+            row.get::<_, String>(0)
+        })?
         .filter_map(|r| r.ok().and_then(|ts| parse_sqlite_datetime(&ts)))
         .collect();
     let successes: Vec<DateTime<Utc>> = ok_stmt
-        .query_map(params![lane, repo, risk_tier], |row| row.get::<_, String>(0))?
+        .query_map(params![lane, repo, risk_tier], |row| {
+            row.get::<_, String>(0)
+        })?
         .filter_map(|r| r.ok().and_then(|ts| parse_sqlite_datetime(&ts)))
         .collect();
     if failures.is_empty() || successes.is_empty() {
@@ -299,7 +303,12 @@ pub fn open_connection(config: &Config) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn compute_snapshot(conn: &Connection, lane: &str, repo: &str, risk_tier: &str) -> Result<KpiSnapshot> {
+pub fn compute_snapshot(
+    conn: &Connection,
+    lane: &str,
+    repo: &str,
+    risk_tier: &str,
+) -> Result<KpiSnapshot> {
     if let Some(tagged) = compute_snapshot_from_tagged_outcomes(conn, lane, repo, risk_tier)? {
         return Ok(tagged);
     }
@@ -307,7 +316,11 @@ pub fn compute_snapshot(conn: &Connection, lane: &str, repo: &str, risk_tier: &s
     let tasks_succeeded = count_memories(conn, &["code_change"])?;
     let tasks_failed = count_memories(
         conn,
-        &["code_change_failed", "refactoring_failed", "improvement_idea_failed"],
+        &[
+            "code_change_failed",
+            "refactoring_failed",
+            "improvement_idea_failed",
+        ],
     )?;
     let tasks_started = tasks_succeeded + tasks_failed;
 
@@ -444,7 +457,9 @@ pub fn list_history(
         sql.push_str(" WHERE ");
         sql.push_str(&where_parts.join(" AND "));
     }
-    sql.push_str(" ORDER BY captured_at DESC LIMIT ?");
+    sql.push_str(
+        " ORDER BY datetime(replace(replace(captured_at, 'T', ' '), 'Z', '')) DESC, captured_at DESC LIMIT ?",
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let mut params_dyn: Vec<rusqlite::types::Value> = Vec::new();
@@ -690,6 +705,26 @@ mod tests {
     }
 
     #[test]
+    fn list_history_orders_mixed_timestamp_formats_descending() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO kpi_snapshots
+             (lane, repo, risk_tier, captured_at, task_success_rate, verification_pass_rate, rollback_rate, mean_time_to_fix_secs,
+              tasks_started, tasks_succeeded, tasks_failed, verifications_total, verifications_passed, rollbacks)
+             VALUES
+             ('delivery','athena','low','2026-02-17T05:28:37.000Z',0.11,1.0,0.0,NULL,10,1,9,1,1,0),
+             ('delivery','athena','low','2026-02-17 18:24:17',0.40,1.0,0.0,NULL,10,4,6,1,1,0)",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_history(&conn, Some("delivery"), Some("athena"), 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].captured_at, "2026-02-17 18:24:17");
+        assert_eq!(rows[1].captured_at, "2026-02-17T05:28:37.000Z");
+    }
+
+    #[test]
     fn prefers_tagged_outcomes_for_lane_metrics() {
         let conn = setup_conn();
         conn.execute(
@@ -729,16 +764,12 @@ mod tests {
             .record_finish("t2", "succeeded", 0, 0, false, None)
             .unwrap();
 
-        assert!(
-            store
-                .fail_task_if_started("t1", "dispatch wait timeout")
-                .unwrap()
-        );
-        assert!(
-            !store
-                .fail_task_if_started("t2", "dispatch wait timeout")
-                .unwrap()
-        );
+        assert!(store
+            .fail_task_if_started("t1", "dispatch wait timeout")
+            .unwrap());
+        assert!(!store
+            .fail_task_if_started("t2", "dispatch wait timeout")
+            .unwrap());
 
         let conn = store.conn.lock().unwrap();
         let t1: (String, Option<String>) = conn
@@ -776,7 +807,7 @@ mod tests {
         let store = TaskOutcomeStore::new(conn);
 
         let changed = store
-            .fail_stale_started_tasks(1800, "stale_started_timeout")
+            .fail_stale_started_tasks(1800, "stale_started")
             .unwrap();
         assert_eq!(changed, 1);
 

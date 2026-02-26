@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --bin athena
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/athena dist/athena-linux-x86_64
+          tar -C dist -czf dist/athena-linux-x86_64.tar.gz athena-linux-x86_64
+          shasum -a 256 dist/athena-linux-x86_64.tar.gz > dist/athena-linux-x86_64.tar.gz.sha256
+          ls -lh dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/athena-linux-x86_64.tar.gz
+            dist/athena-linux-x86_64.tar.gz.sha256

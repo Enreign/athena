@@ -8,8 +8,8 @@ use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::heartbeat;
 use crate::introspect::{self, SharedMetrics, SystemMetrics};
-use crate::kpi::TaskOutcomeStore;
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
+use crate::kpi::TaskOutcomeStore;
 use crate::langfuse::SharedLangfuse;
 use crate::llm::LlmProvider;
 use crate::manager::Manager;
@@ -24,7 +24,7 @@ use crate::scheduler::CronEngine;
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
-const STALE_STARTED_REASON: &str = "stale_started_timeout";
+const STALE_STARTED_REASON: &str = "stale_started";
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
@@ -308,6 +308,7 @@ fn init_runtime_handles(
         pulse_bus.clone(),
         mood.clone(),
         activity.clone(),
+        outcome_store.clone(),
         auto_tx.clone(),
         langfuse.clone(),
     );
@@ -389,9 +390,11 @@ fn spawn_housekeeping_loops(
     pulse_bus: PulseBus,
     mood: Arc<MoodState>,
     activity: Arc<ActivityTracker>,
+    outcome_store: Arc<TaskOutcomeStore>,
     auto_tx: mpsc::Sender<AutonomousTask>,
     langfuse: SharedLangfuse,
 ) {
+    spawn_stale_started_sweeper(outcome_store, observer.clone());
     spawn_conversation_cleanup(memory.clone());
     spawn_mood_drift_loop(
         mood.clone(),
@@ -443,6 +446,29 @@ fn spawn_housekeeping_loops(
         auto_tx.clone(),
         langfuse.clone(),
     );
+}
+
+fn spawn_stale_started_sweeper(outcome_store: Arc<TaskOutcomeStore>, observer: ObserverHandle) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            match outcome_store
+                .fail_stale_started_tasks(STALE_STARTED_TASK_SECS, STALE_STARTED_REASON)
+            {
+                Ok(0) => {}
+                Ok(n) => observer.log(
+                    ObserverCategory::AutonomousTask,
+                    format!(
+                        "Sweeper marked {} stale started task(s) as failed (threshold={}s)",
+                        n, STALE_STARTED_TASK_SECS
+                    ),
+                ),
+                Err(e) => tracing::warn!("Stale started sweeper failed: {}", e),
+            }
+        }
+    });
 }
 
 fn init_cron_engine(
@@ -869,7 +895,11 @@ fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) 
     if !has_verify {
         return (0, 0);
     }
-    if success { (1, 1) } else { (1, 0) }
+    if success {
+        (1, 1)
+    } else {
+        (1, 0)
+    }
 }
 
 fn infer_rollback_flag(goal: &str, result: Option<&str>) -> bool {

@@ -60,9 +60,10 @@ impl ToolUsageStore {
         duration_ms: f64,
         error: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock usage store: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AthenaError::Tool(format!("Failed to lock usage store: {}", e)))?;
 
         let success_inc: i64 = if success { 1 } else { 0 };
         let failure_inc: i64 = if success { 0 } else { 1 };
@@ -86,9 +87,10 @@ impl ToolUsageStore {
 
     /// Get usage stats for a specific tool.
     pub fn get(&self, tool_name: &str) -> Result<Option<ToolUsageStats>> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock usage store: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AthenaError::Tool(format!("Failed to lock usage store: {}", e)))?;
 
         let mut stmt = conn.prepare(
             "SELECT tool_name, invocation_count, success_count, failure_count, avg_duration_ms, last_error, last_used
@@ -116,9 +118,10 @@ impl ToolUsageStore {
 
     /// Get usage stats for all tools.
     pub fn all(&self) -> Result<Vec<ToolUsageStats>> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock usage store: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AthenaError::Tool(format!("Failed to lock usage store: {}", e)))?;
 
         let mut stmt = conn.prepare(
             "SELECT tool_name, invocation_count, success_count, failure_count, avg_duration_ms, last_error, last_used

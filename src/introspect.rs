@@ -90,6 +90,8 @@ pub static ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Epoch second of the last error counter reset.
 static ERROR_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+/// Epoch second when the last anomaly diagnostic task was dispatched.
+static LAST_ANOMALY_DISPATCH_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Record an LLM call latency. Called from LLM providers.
 pub fn record_llm_latency(latency_ms: u64) {
@@ -156,6 +158,8 @@ const ANOMALY_LLM_LATENCY_MS: u64 = 5000;
 const ANOMALY_ERROR_RATE: f64 = 0.2;
 /// Minimum uptime before anomaly detection kicks in (avoid false positives at startup).
 const ANOMALY_MIN_UPTIME_SECS: u64 = 300;
+/// Cooldown between anomaly diagnostic dispatches to avoid queue floods.
+const ANOMALY_DISPATCH_COOLDOWN_SECS: u64 = 900;
 
 /// Spawn the periodic metrics collector task.
 pub fn spawn_metrics_collector(
@@ -298,6 +302,13 @@ pub fn spawn_metrics_collector(
 
                 if !anomalies.is_empty() {
                     let alert_msg = anomalies.join("; ");
+                    let now_epoch = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let last_dispatch = LAST_ANOMALY_DISPATCH_EPOCH.load(Ordering::Relaxed);
+                    let cooldown_remaining = ANOMALY_DISPATCH_COOLDOWN_SECS
+                        .saturating_sub(now_epoch.saturating_sub(last_dispatch));
 
                     // Langfuse anomaly span
                     let anomaly_span = lf_trace
@@ -315,25 +326,39 @@ pub fn spawn_metrics_collector(
                         format!("ANOMALY DETECTED: {}", alert_msg),
                     );
 
-                    let task = crate::core::AutonomousTask {
-                        goal: format!(
-                            "Health anomaly detected: {}. Investigate the root cause. \
+                    if last_dispatch > 0 && cooldown_remaining > 0 {
+                        observer.log(
+                            ObserverCategory::SelfMetrics,
+                            format!(
+                                "Anomaly diagnostic suppressed by cooldown ({}s remaining)",
+                                cooldown_remaining
+                            ),
+                        );
+                        if let Some(s) = dispatch_span {
+                            s.end(Some("suppressed by cooldown"));
+                        }
+                    } else {
+                        LAST_ANOMALY_DISPATCH_EPOCH.store(now_epoch, Ordering::Relaxed);
+                        let task = crate::core::AutonomousTask {
+                            goal: format!(
+                                "Health anomaly detected: {}. Investigate the root cause. \
                              Check recent tool failures, LLM provider status, and error logs. \
                              Suggest a fix or mitigation.",
-                            alert_msg
-                        ),
-                        context: format!("Current metrics: {}", metrics_summary),
-                        ghost: Some("scout".to_string()),
-                        target: crate::pulse::PulseTarget::Broadcast,
-                        lane: "self_improvement".to_string(),
-                        risk_tier: "high".to_string(),
-                        repo: crate::kpi::default_repo_name(),
-                        task_id: None,
-                    };
-                    let _ = auto_tx.send(task).await;
+                                alert_msg
+                            ),
+                            context: format!("Current metrics: {}", metrics_summary),
+                            ghost: Some("scout".to_string()),
+                            target: crate::pulse::PulseTarget::Broadcast,
+                            lane: "self_improvement".to_string(),
+                            risk_tier: "high".to_string(),
+                            repo: crate::kpi::default_repo_name(),
+                            task_id: None,
+                        };
+                        let _ = auto_tx.send(task).await;
 
-                    if let Some(s) = dispatch_span {
-                        s.end(Some("dispatched to scout"));
+                        if let Some(s) = dispatch_span {
+                            s.end(Some("dispatched to scout"));
+                        }
                     }
                 } else if let Some(ref t) = lf_trace {
                     let s = t.span("anomaly_check", Some(&metrics_summary));

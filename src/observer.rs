@@ -56,24 +56,24 @@ impl ObserverCategory {
     /// ANSI color code for the category.
     pub fn color(&self) -> &'static str {
         match self {
-            Self::Startup => "\x1b[1;37m",       // bright white
+            Self::Startup => "\x1b[1;37m",        // bright white
             Self::KnobChange => "\x1b[33m",       // yellow
-            Self::Heartbeat => "\x1b[36m",         // cyan
-            Self::CronTick => "\x1b[33m",          // yellow
-            Self::MoodChange => "\x1b[35m",        // magenta
-            Self::MemoryScan => "\x1b[32m",        // green
-            Self::StochasticRoll => "\x1b[2;37m",  // dim gray
-            Self::PulseEmitted => "\x1b[1;37m",    // white bold
-            Self::PulseSuppressed => "\x1b[2m",    // dim
-            Self::PulseDelivered => "\x1b[1;32m",  // bright green
-            Self::IdleMusing => "\x1b[34m",        // blue
-            Self::EnergyShift => "\x1b[2;33m",     // yellow dim
-            Self::ChatIn => "\x1b[1;34m",           // bright blue
-            Self::ChatOut => "\x1b[1;35m",          // bright magenta
-            Self::AutonomousTask => "\x1b[1;33m",   // bright yellow
-            Self::ToolUsage => "\x1b[36m",             // cyan
-            Self::ToolReload => "\x1b[1;33m",          // bright yellow
-            Self::SelfMetrics => "\x1b[2;36m",         // dim cyan
+            Self::Heartbeat => "\x1b[36m",        // cyan
+            Self::CronTick => "\x1b[33m",         // yellow
+            Self::MoodChange => "\x1b[35m",       // magenta
+            Self::MemoryScan => "\x1b[32m",       // green
+            Self::StochasticRoll => "\x1b[2;37m", // dim gray
+            Self::PulseEmitted => "\x1b[1;37m",   // white bold
+            Self::PulseSuppressed => "\x1b[2m",   // dim
+            Self::PulseDelivered => "\x1b[1;32m", // bright green
+            Self::IdleMusing => "\x1b[34m",       // blue
+            Self::EnergyShift => "\x1b[2;33m",    // yellow dim
+            Self::ChatIn => "\x1b[1;34m",         // bright blue
+            Self::ChatOut => "\x1b[1;35m",        // bright magenta
+            Self::AutonomousTask => "\x1b[1;33m", // bright yellow
+            Self::ToolUsage => "\x1b[36m",        // cyan
+            Self::ToolReload => "\x1b[1;33m",     // bright yellow
+            Self::SelfMetrics => "\x1b[2;36m",    // dim cyan
         }
     }
 }
@@ -171,7 +171,11 @@ pub fn spawn_uds_listener(observer: ObserverHandle) {
         let listener = match UnixListener::bind(&path) {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!("Failed to bind observer socket at {}: {}", path.display(), e);
+                tracing::warn!(
+                    "Failed to bind observer socket at {}: {}",
+                    path.display(),
+                    e
+                );
                 return;
             }
         };

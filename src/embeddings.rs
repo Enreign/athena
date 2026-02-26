@@ -39,7 +39,10 @@ impl Embedder {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| AthenaError::Internal(format!("Failed to load tokenizer: {}", e)))?;
 
-        Ok(Self { session: Mutex::new(session), tokenizer })
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+        })
     }
 
     /// Download model files from HuggingFace if they don't exist locally.
@@ -54,25 +57,16 @@ impl Embedder {
         std::fs::create_dir_all(model_dir)
             .map_err(|e| AthenaError::Internal(format!("Failed to create model dir: {}", e)))?;
 
-        let base_url = format!(
-            "https://huggingface.co/{}/resolve/main",
-            MODEL_REPO
-        );
+        let base_url = format!("https://huggingface.co/{}/resolve/main", MODEL_REPO);
 
         if !model_path.exists() {
             tracing::info!("Downloading embedding model (~23MB)...");
-            download_file(
-                &format!("{}/onnx/{}", base_url, MODEL_FILE),
-                &model_path,
-            )?;
+            download_file(&format!("{}/onnx/{}", base_url, MODEL_FILE), &model_path)?;
         }
 
         if !tokenizer_path.exists() {
             tracing::info!("Downloading tokenizer...");
-            download_file(
-                &format!("{}/{}", base_url, TOKENIZER_FILE),
-                &tokenizer_path,
-            )?;
+            download_file(&format!("{}/{}", base_url, TOKENIZER_FILE), &tokenizer_path)?;
         }
 
         tracing::info!("Embedding model ready at {}", model_dir.display());
@@ -82,11 +76,17 @@ impl Embedder {
     /// Tokenize, run ONNX inference, mean-pool, and L2-normalize to produce
     /// a 384-dimensional embedding vector.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let encoding = self.tokenizer.encode(text, true)
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
             .map_err(|e| AthenaError::Internal(format!("Tokenization failed: {}", e)))?;
 
         let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-        let mut attention_mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&m| m as i64).collect();
+        let mut attention_mask: Vec<i64> = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&m| m as i64)
+            .collect();
 
         // Truncate to MAX_LENGTH
         input_ids.truncate(MAX_LENGTH);
@@ -109,23 +109,25 @@ impl Embedder {
         let token_type_ids_tensor = Tensor::from_array(token_type_ids_array)
             .map_err(|e| AthenaError::Internal(format!("Input tensor creation failed: {}", e)))?;
 
-        let mut session = self.session.lock()
+        let mut session = self
+            .session
+            .lock()
             .map_err(|e| AthenaError::Internal(format!("Session lock poisoned: {}", e)))?;
-        let outputs = session.run(
-            ort::inputs![
+        let outputs = session
+            .run(ort::inputs![
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => attention_mask_tensor,
                 "token_type_ids" => token_type_ids_tensor,
-            ]
-        )
-        .map_err(|e| AthenaError::Internal(format!("ONNX inference failed: {}", e)))?;
+            ])
+            .map_err(|e| AthenaError::Internal(format!("ONNX inference failed: {}", e)))?;
 
         // Output shape: (1, seq_len, hidden_size=384)
         let token_embeddings = outputs[0]
             .try_extract_array::<f32>()
             .map_err(|e| AthenaError::Internal(format!("Output extraction failed: {}", e)))?;
 
-        let token_embeddings = token_embeddings.into_dimensionality::<ndarray::Ix3>()
+        let token_embeddings = token_embeddings
+            .into_dimensionality::<ndarray::Ix3>()
             .map_err(|e| AthenaError::Internal(format!("Dimension error: {}", e)))?;
 
         // Mean pooling: average token embeddings weighted by attention mask
@@ -251,7 +253,8 @@ mod tests {
         // [GEO] geography/weather, [HW] hardware, [ED] education, [PET] pets,
         // [ML] machine learning, [FIT] fitness/health, [WRK] work/career,
         // [TOOL] dev tools, [MISC] miscellaneous
-        let corpus: Vec<(&str, &str, &str)> = vec![
+        let corpus: Vec<(&str, &str, &str)> =
+            vec![
             // ── [PL] Programming Languages cluster (5 confusable) ──
             ("fact",   "pl",   "I prefer Python over Go for scripting tasks"),                           // 0
             ("fact",   "pl",   "I use Rust for systems programming and CLI tools"),                      // 1
@@ -338,8 +341,8 @@ mod tests {
         // ── Test cases: 60 queries across 8 categories ──────────────
         struct TestCase {
             query: &'static str,
-            expected: Vec<usize>,     // correct corpus indices
-            forbidden: Vec<usize>,    // wrong but confusable (same cluster distractors)
+            expected: Vec<usize>,  // correct corpus indices
+            forbidden: Vec<usize>, // wrong but confusable (same cluster distractors)
             category: &'static str,
         }
 
@@ -347,154 +350,387 @@ mod tests {
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "disambig" — pick the right one from a dense cluster
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "which language for scripting?",
-                       expected: vec![0], forbidden: vec![1,2,3,4], category: "disambig" },
-            TestCase { query: "what do I use for systems-level programming?",
-                       expected: vec![1], forbidden: vec![0,2,3,4], category: "disambig" },
-            TestCase { query: "what language for web frontend?",
-                       expected: vec![2], forbidden: vec![0,1,3,4], category: "disambig" },
-            TestCase { query: "which language did I learn in university?",
-                       expected: vec![3], forbidden: vec![0,1,2,4], category: "disambig" },
-            TestCase { query: "what do I use for shell automation?",
-                       expected: vec![4], forbidden: vec![0,1,2,3], category: "disambig" },
-            TestCase { query: "which database for caching?",
-                       expected: vec![6], forbidden: vec![5,7,8], category: "disambig" },
-            TestCase { query: "what is our document database?",
-                       expected: vec![7], forbidden: vec![5,6,8], category: "disambig" },
-            TestCase { query: "what database for local dev?",
-                       expected: vec![8], forbidden: vec![5,6,7], category: "disambig" },
-            TestCase { query: "tell me about my dog",
-                       expected: vec![25], forbidden: vec![26,27], category: "disambig" },
-            TestCase { query: "tell me about my cat",
-                       expected: vec![26], forbidden: vec![25,27], category: "disambig" },
-            TestCase { query: "where did we get our pet from?",
-                       expected: vec![27], forbidden: vec![26], category: "disambig" },
-            TestCase { query: "how does self-attention work in modern AI?",
-                       expected: vec![29], forbidden: vec![28,30,31], category: "disambig" },
-            TestCase { query: "what works best for tabular data?",
-                       expected: vec![30], forbidden: vec![28,29,31], category: "disambig" },
-            TestCase { query: "what are the benefits of fine-tuning LLMs?",
-                       expected: vec![31], forbidden: vec![28,29,30], category: "disambig" },
-
+            TestCase {
+                query: "which language for scripting?",
+                expected: vec![0],
+                forbidden: vec![1, 2, 3, 4],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what do I use for systems-level programming?",
+                expected: vec![1],
+                forbidden: vec![0, 2, 3, 4],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what language for web frontend?",
+                expected: vec![2],
+                forbidden: vec![0, 1, 3, 4],
+                category: "disambig",
+            },
+            TestCase {
+                query: "which language did I learn in university?",
+                expected: vec![3],
+                forbidden: vec![0, 1, 2, 4],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what do I use for shell automation?",
+                expected: vec![4],
+                forbidden: vec![0, 1, 2, 3],
+                category: "disambig",
+            },
+            TestCase {
+                query: "which database for caching?",
+                expected: vec![6],
+                forbidden: vec![5, 7, 8],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what is our document database?",
+                expected: vec![7],
+                forbidden: vec![5, 6, 8],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what database for local dev?",
+                expected: vec![8],
+                forbidden: vec![5, 6, 7],
+                category: "disambig",
+            },
+            TestCase {
+                query: "tell me about my dog",
+                expected: vec![25],
+                forbidden: vec![26, 27],
+                category: "disambig",
+            },
+            TestCase {
+                query: "tell me about my cat",
+                expected: vec![26],
+                forbidden: vec![25, 27],
+                category: "disambig",
+            },
+            TestCase {
+                query: "where did we get our pet from?",
+                expected: vec![27],
+                forbidden: vec![26],
+                category: "disambig",
+            },
+            TestCase {
+                query: "how does self-attention work in modern AI?",
+                expected: vec![29],
+                forbidden: vec![28, 30, 31],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what works best for tabular data?",
+                expected: vec![30],
+                forbidden: vec![28, 29, 31],
+                category: "disambig",
+            },
+            TestCase {
+                query: "what are the benefits of fine-tuning LLMs?",
+                expected: vec![31],
+                forbidden: vec![28, 29, 30],
+                category: "disambig",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "semantic" — zero/minimal keyword overlap
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "deep learning optimization techniques",
-                       expected: vec![28], forbidden: vec![], category: "semantic" },
-            TestCase { query: "outdoor recreation activities nearby",
-                       expected: vec![32], forbidden: vec![], category: "semantic" },
-            TestCase { query: "food allergies and dietary restrictions",
-                       expected: vec![10], forbidden: vec![], category: "semantic" },
-            TestCase { query: "my education and academic background",
-                       expected: vec![22], forbidden: vec![], category: "semantic" },
-            TestCase { query: "what computer hardware specs do I have?",
-                       expected: vec![18], forbidden: vec![], category: "semantic" },
-            TestCase { query: "Bay Area summer climate",
-                       expected: vec![14], forbidden: vec![], category: "semantic" },
-            TestCase { query: "Japanese cuisine preferences",
-                       expected: vec![9], forbidden: vec![], category: "semantic" },
-            TestCase { query: "relational data management system",
-                       expected: vec![5], forbidden: vec![], category: "semantic" },
-            TestCase { query: "morning wellness routine",
-                       expected: vec![34], forbidden: vec![], category: "semantic" },
-            TestCase { query: "cardiovascular exercise routine",
-                       expected: vec![33], forbidden: vec![], category: "semantic" },
-            TestCase { query: "music for concentration",
-                       expected: vec![46], forbidden: vec![], category: "semantic" },
-            TestCase { query: "UI color scheme preference",
-                       expected: vec![48], forbidden: vec![], category: "semantic" },
-
+            TestCase {
+                query: "deep learning optimization techniques",
+                expected: vec![28],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "outdoor recreation activities nearby",
+                expected: vec![32],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "food allergies and dietary restrictions",
+                expected: vec![10],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "my education and academic background",
+                expected: vec![22],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "what computer hardware specs do I have?",
+                expected: vec![18],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "Bay Area summer climate",
+                expected: vec![14],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "Japanese cuisine preferences",
+                expected: vec![9],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "relational data management system",
+                expected: vec![5],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "morning wellness routine",
+                expected: vec![34],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "cardiovascular exercise routine",
+                expected: vec![33],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "music for concentration",
+                expected: vec![46],
+                forbidden: vec![],
+                category: "semantic",
+            },
+            TestCase {
+                query: "UI color scheme preference",
+                expected: vec![48],
+                forbidden: vec![],
+                category: "semantic",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "exact" — keyword/exact match precision
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "PostgreSQL",
-                       expected: vec![5], forbidden: vec![6,7,8], category: "exact" },
-            TestCase { query: "Redis",
-                       expected: vec![6], forbidden: vec![5,7,8], category: "exact" },
-            TestCase { query: "MongoDB",
-                       expected: vec![7], forbidden: vec![5,6,8], category: "exact" },
-            TestCase { query: "VS Code",
-                       expected: vec![40], forbidden: vec![41,42,43,44], category: "exact" },
-            TestCase { query: "Neovim",
-                       expected: vec![41], forbidden: vec![40,42,43,44], category: "exact" },
-            TestCase { query: "Docker",
-                       expected: vec![43], forbidden: vec![40,41,42,44], category: "exact" },
-            TestCase { query: "golden retriever",
-                       expected: vec![25], forbidden: vec![26,27], category: "exact" },
-            TestCase { query: "Keychron keyboard",
-                       expected: vec![20], forbidden: vec![18,19,21], category: "exact" },
-
+            TestCase {
+                query: "PostgreSQL",
+                expected: vec![5],
+                forbidden: vec![6, 7, 8],
+                category: "exact",
+            },
+            TestCase {
+                query: "Redis",
+                expected: vec![6],
+                forbidden: vec![5, 7, 8],
+                category: "exact",
+            },
+            TestCase {
+                query: "MongoDB",
+                expected: vec![7],
+                forbidden: vec![5, 6, 8],
+                category: "exact",
+            },
+            TestCase {
+                query: "VS Code",
+                expected: vec![40],
+                forbidden: vec![41, 42, 43, 44],
+                category: "exact",
+            },
+            TestCase {
+                query: "Neovim",
+                expected: vec![41],
+                forbidden: vec![40, 42, 43, 44],
+                category: "exact",
+            },
+            TestCase {
+                query: "Docker",
+                expected: vec![43],
+                forbidden: vec![40, 41, 42, 44],
+                category: "exact",
+            },
+            TestCase {
+                query: "golden retriever",
+                expected: vec![25],
+                forbidden: vec![26, 27],
+                category: "exact",
+            },
+            TestCase {
+                query: "Keychron keyboard",
+                expected: vec![20],
+                forbidden: vec![18, 19, 21],
+                category: "exact",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "multi" — multiple correct answers in same cluster
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "tell me about San Francisco",
-                       expected: vec![14, 16, 36], forbidden: vec![], category: "multi" },
-            TestCase { query: "my development environment and tools",
-                       expected: vec![18, 40, 43, 44], forbidden: vec![], category: "multi" },
-            TestCase { query: "my exercise and fitness activities",
-                       expected: vec![32, 33, 35], forbidden: vec![], category: "multi" },
-            TestCase { query: "tell me about all my pets",
-                       expected: vec![25, 26, 27], forbidden: vec![], category: "multi" },
-            TestCase { query: "what databases do we use?",
-                       expected: vec![5, 6, 7, 8], forbidden: vec![], category: "multi" },
-            TestCase { query: "what programming languages do I know?",
-                       expected: vec![0, 1, 2, 3, 4], forbidden: vec![], category: "multi" },
-
+            TestCase {
+                query: "tell me about San Francisco",
+                expected: vec![14, 16, 36],
+                forbidden: vec![],
+                category: "multi",
+            },
+            TestCase {
+                query: "my development environment and tools",
+                expected: vec![18, 40, 43, 44],
+                forbidden: vec![],
+                category: "multi",
+            },
+            TestCase {
+                query: "my exercise and fitness activities",
+                expected: vec![32, 33, 35],
+                forbidden: vec![],
+                category: "multi",
+            },
+            TestCase {
+                query: "tell me about all my pets",
+                expected: vec![25, 26, 27],
+                forbidden: vec![],
+                category: "multi",
+            },
+            TestCase {
+                query: "what databases do we use?",
+                expected: vec![5, 6, 7, 8],
+                forbidden: vec![],
+                category: "multi",
+            },
+            TestCase {
+                query: "what programming languages do I know?",
+                expected: vec![0, 1, 2, 3, 4],
+                forbidden: vec![],
+                category: "multi",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "negative" — nothing in corpus should match
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "quantum entanglement in particle physics",
-                       expected: vec![], forbidden: vec![], category: "negative" },
-            TestCase { query: "the fall of the Roman Empire",
-                       expected: vec![], forbidden: vec![], category: "negative" },
-            TestCase { query: "how to change a flat tire",
-                       expected: vec![], forbidden: vec![], category: "negative" },
-            TestCase { query: "recipe for sourdough bread",
-                       expected: vec![], forbidden: vec![], category: "negative" },
-            TestCase { query: "rules of cricket",
-                       expected: vec![], forbidden: vec![], category: "negative" },
-            TestCase { query: "volcanic eruptions on Mars",
-                       expected: vec![], forbidden: vec![], category: "negative" },
-
+            TestCase {
+                query: "quantum entanglement in particle physics",
+                expected: vec![],
+                forbidden: vec![],
+                category: "negative",
+            },
+            TestCase {
+                query: "the fall of the Roman Empire",
+                expected: vec![],
+                forbidden: vec![],
+                category: "negative",
+            },
+            TestCase {
+                query: "how to change a flat tire",
+                expected: vec![],
+                forbidden: vec![],
+                category: "negative",
+            },
+            TestCase {
+                query: "recipe for sourdough bread",
+                expected: vec![],
+                forbidden: vec![],
+                category: "negative",
+            },
+            TestCase {
+                query: "rules of cricket",
+                expected: vec![],
+                forbidden: vec![],
+                category: "negative",
+            },
+            TestCase {
+                query: "volcanic eruptions on Mars",
+                expected: vec![],
+                forbidden: vec![],
+                category: "negative",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "cross" — query spans multiple clusters
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "what is my work setup like?",
-                       expected: vec![18, 19, 20, 40, 44], forbidden: vec![], category: "cross" },
-            TestCase { query: "things I do for my health",
-                       expected: vec![13, 33, 34, 35], forbidden: vec![], category: "cross" },
-            TestCase { query: "what have I studied or learned?",
-                       expected: vec![22, 23, 24], forbidden: vec![], category: "cross" },
-
+            TestCase {
+                query: "what is my work setup like?",
+                expected: vec![18, 19, 20, 40, 44],
+                forbidden: vec![],
+                category: "cross",
+            },
+            TestCase {
+                query: "things I do for my health",
+                expected: vec![13, 33, 34, 35],
+                forbidden: vec![],
+                category: "cross",
+            },
+            TestCase {
+                query: "what have I studied or learned?",
+                expected: vec![22, 23, 24],
+                forbidden: vec![],
+                category: "cross",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "tricky" — adversarial/edge-case queries
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "Python",  // should find PL, not the pet snake
-                       expected: vec![0], forbidden: vec![], category: "tricky" },
-            TestCase { query: "Max",     // dog's name — should find dog, not numbers
-                       expected: vec![25], forbidden: vec![], category: "tricky" },
-            TestCase { query: "Go",      // should find PL mention, tricky short word
-                       expected: vec![0], forbidden: vec![], category: "tricky" },
-            TestCase { query: "spring",  // Tokyo trip, not a framework
-                       expected: vec![17], forbidden: vec![], category: "tricky" },
-            TestCase { query: "mission",
-                       expected: vec![12], forbidden: vec![], category: "tricky" },
-
+            TestCase {
+                query: "Python", // should find PL, not the pet snake
+                expected: vec![0],
+                forbidden: vec![],
+                category: "tricky",
+            },
+            TestCase {
+                query: "Max", // dog's name — should find dog, not numbers
+                expected: vec![25],
+                forbidden: vec![],
+                category: "tricky",
+            },
+            TestCase {
+                query: "Go", // should find PL mention, tricky short word
+                expected: vec![0],
+                forbidden: vec![],
+                category: "tricky",
+            },
+            TestCase {
+                query: "spring", // Tokyo trip, not a framework
+                expected: vec![17],
+                forbidden: vec![],
+                category: "tricky",
+            },
+            TestCase {
+                query: "mission",
+                expected: vec![12],
+                forbidden: vec![],
+                category: "tricky",
+            },
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "paraphrase" — same intent, different phrasing
             // ═══════════════════════════════════════════════════════════
-            TestCase { query: "do I have any food sensitivities?",
-                       expected: vec![10], forbidden: vec![9,11,12,13], category: "paraphrase" },
-            TestCase { query: "what time does my alarm go off?",
-                       expected: vec![34], forbidden: vec![32,33,35], category: "paraphrase" },
-            TestCase { query: "which text editor is my daily driver?",
-                       expected: vec![40], forbidden: vec![41,42,43,44], category: "paraphrase" },
-            TestCase { query: "where did I go to school?",
-                       expected: vec![22], forbidden: vec![23,24], category: "paraphrase" },
-            TestCase { query: "what's my caffeine habit?",
-                       expected: vec![11], forbidden: vec![9,10,12,13], category: "paraphrase" },
-            TestCase { query: "what container tool do I rely on?",
-                       expected: vec![43], forbidden: vec![40,41,42,44], category: "paraphrase" },
+            TestCase {
+                query: "do I have any food sensitivities?",
+                expected: vec![10],
+                forbidden: vec![9, 11, 12, 13],
+                category: "paraphrase",
+            },
+            TestCase {
+                query: "what time does my alarm go off?",
+                expected: vec![34],
+                forbidden: vec![32, 33, 35],
+                category: "paraphrase",
+            },
+            TestCase {
+                query: "which text editor is my daily driver?",
+                expected: vec![40],
+                forbidden: vec![41, 42, 43, 44],
+                category: "paraphrase",
+            },
+            TestCase {
+                query: "where did I go to school?",
+                expected: vec![22],
+                forbidden: vec![23, 24],
+                category: "paraphrase",
+            },
+            TestCase {
+                query: "what's my caffeine habit?",
+                expected: vec![11],
+                forbidden: vec![9, 10, 12, 13],
+                category: "paraphrase",
+            },
+            TestCase {
+                query: "what container tool do I rely on?",
+                expected: vec![43],
+                forbidden: vec![40, 41, 42, 44],
+                category: "paraphrase",
+            },
         ];
 
         // ── Run benchmark ──────────────────────────────────────────
@@ -505,10 +741,10 @@ mod tests {
             category: String,
             expected: Vec<usize>,
             forbidden: Vec<usize>,
-            retrieved_1: Vec<usize>,    // top-1
-            retrieved_3: Vec<usize>,    // top-3
-            retrieved_5: Vec<usize>,    // top-5
-            top_scores: Vec<f32>,       // raw semantic scores
+            retrieved_1: Vec<usize>, // top-1
+            retrieved_3: Vec<usize>, // top-3
+            retrieved_5: Vec<usize>, // top-5
+            top_scores: Vec<f32>,    // raw semantic scores
             hit_1: bool,
             hit_3: bool,
             hit_5: bool,
@@ -516,7 +752,7 @@ mod tests {
             prec_1: f32,
             prec_3: f32,
             prec_5: f32,
-            distractor_count: usize,    // forbidden items that appeared in top-5
+            distractor_count: usize, // forbidden items that appeared in top-5
         }
 
         let mut results: Vec<QueryResult> = Vec::new();
@@ -532,7 +768,8 @@ mod tests {
             let top_scores: Vec<f32> = semantic.iter().map(|(_, s)| *s).collect();
 
             // Map to corpus indices
-            let all_indices: Vec<usize> = hybrid.iter()
+            let all_indices: Vec<usize> = hybrid
+                .iter()
                 .filter_map(|m| memory_contents.iter().position(|c| c == &m.content))
                 .collect();
 
@@ -552,7 +789,11 @@ mod tests {
                     }
                 }
                 let hit = first_rank > 0;
-                let rr = if first_rank > 0 { 1.0 / first_rank as f32 } else { 0.0 };
+                let rr = if first_rank > 0 {
+                    1.0 / first_rank as f32
+                } else {
+                    0.0
+                };
                 (hit, rr)
             };
 
@@ -562,7 +803,10 @@ mod tests {
                     let fp = top_scores.first().copied().unwrap_or(0.0) > 0.4;
                     return if !fp { 1.0 } else { 0.0 };
                 }
-                let hits = retrieved.iter().filter(|i| case.expected.contains(i)).count();
+                let hits = retrieved
+                    .iter()
+                    .filter(|i| case.expected.contains(i))
+                    .count();
                 hits as f32 / k as f32
             };
 
@@ -572,7 +816,11 @@ mod tests {
 
             // RR is based on deepest retrieval
             let rr = if case.expected.is_empty() {
-                if top_scores.first().copied().unwrap_or(0.0) > 0.4 { 0.0 } else { 1.0 }
+                if top_scores.first().copied().unwrap_or(0.0) > 0.4 {
+                    0.0
+                } else {
+                    1.0
+                }
             } else {
                 let mut first_rank = 0usize;
                 for (rank, idx) in retrieved_5.iter().enumerate() {
@@ -580,14 +828,19 @@ mod tests {
                         first_rank = rank + 1;
                     }
                 }
-                if first_rank > 0 { 1.0 / first_rank as f32 } else { 0.0 }
+                if first_rank > 0 {
+                    1.0 / first_rank as f32
+                } else {
+                    0.0
+                }
             };
 
             let prec_1 = precision_at(&retrieved_1, 1);
             let prec_3 = precision_at(&retrieved_3, 3);
             let prec_5 = precision_at(&retrieved_5, 5);
 
-            let distractor_count = retrieved_5.iter()
+            let distractor_count = retrieved_5
+                .iter()
                 .filter(|i| case.forbidden.contains(i))
                 .count();
 
@@ -600,9 +853,13 @@ mod tests {
                 retrieved_3,
                 retrieved_5,
                 top_scores,
-                hit_1, hit_3, hit_5,
+                hit_1,
+                hit_3,
+                hit_5,
                 rr,
-                prec_1, prec_3, prec_5,
+                prec_1,
+                prec_3,
+                prec_5,
                 distractor_count,
             });
         }
@@ -612,24 +869,55 @@ mod tests {
         let thin = "-".repeat(100);
         println!("\n{}", sep);
         println!("  MEMORY RETRIEVAL PRECISION BENCHMARK");
-        println!("  {} memories | {} queries | semantic threshold: {}",
-            corpus.len(), results.len(), semantic_threshold);
+        println!(
+            "  {} memories | {} queries | semantic threshold: {}",
+            corpus.len(),
+            results.len(),
+            semantic_threshold
+        );
         println!("{}\n", sep);
 
         // Per-query detail
         for r in &results {
-            let status = if r.hit_1 { " @1" } else if r.hit_3 { " @3" } else if r.hit_5 { " @5" } else { "  X" };
-            let scores_str = r.top_scores.iter().take(3)
-                .map(|s| format!("{:.3}", s)).collect::<Vec<_>>().join(", ");
-            let expected_str = if r.expected.is_empty() { "(none)".into() } else {
-                r.expected.iter().map(|i| format!("{}", i)).collect::<Vec<_>>().join(",")
+            let status = if r.hit_1 {
+                " @1"
+            } else if r.hit_3 {
+                " @3"
+            } else if r.hit_5 {
+                " @5"
+            } else {
+                "  X"
             };
-            let retrieved_str = if r.retrieved_5.is_empty() { "(none)".into() } else {
-                r.retrieved_5.iter().map(|i| format!("{}", i)).collect::<Vec<_>>().join(",")
+            let scores_str = r
+                .top_scores
+                .iter()
+                .take(3)
+                .map(|s| format!("{:.3}", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let expected_str = if r.expected.is_empty() {
+                "(none)".into()
+            } else {
+                r.expected
+                    .iter()
+                    .map(|i| format!("{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let retrieved_str = if r.retrieved_5.is_empty() {
+                "(none)".into()
+            } else {
+                r.retrieved_5
+                    .iter()
+                    .map(|i| format!("{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",")
             };
             let dist_warn = if r.distractor_count > 0 {
                 format!("  ⚠ {} distractor(s)", r.distractor_count)
-            } else { String::new() };
+            } else {
+                String::new()
+            };
             println!("[{}] {:<12} \"{}\"", status, r.category, r.query);
             println!("      expect: [{:<16}]  got: [{:<20}]  sim: [{}]  RR:{:.2}  P@1:{:.0} P@3:{:.0} P@5:{:.0}{}",
                 expected_str, retrieved_str, scores_str, r.rr,
@@ -639,16 +927,28 @@ mod tests {
         // ── Aggregate by category ──────────────────────────────────
         println!("\n{}", thin);
         println!("  AGGREGATE METRICS BY CATEGORY\n");
-        println!("  {:<14} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}  {:>10}",
-            "Category", "N", "Hit@1", "Hit@3", "Hit@5", "MRR", "P@1", "P@3", "P@5", "Distract");
+        println!(
+            "  {:<14} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}  {:>10}",
+            "Category", "N", "Hit@1", "Hit@3", "Hit@5", "MRR", "P@1", "P@3", "P@5", "Distract"
+        );
 
-        let categories = ["disambig", "semantic", "exact", "multi", "negative",
-                          "cross", "tricky", "paraphrase"];
+        let categories = [
+            "disambig",
+            "semantic",
+            "exact",
+            "multi",
+            "negative",
+            "cross",
+            "tricky",
+            "paraphrase",
+        ];
         let mut totals = Totals::default();
 
         for cat in &categories {
             let cr: Vec<&QueryResult> = results.iter().filter(|r| r.category == *cat).collect();
-            if cr.is_empty() { continue; }
+            if cr.is_empty() {
+                continue;
+            }
             let n = cr.len();
             let hit1 = cr.iter().filter(|r| r.hit_1).count();
             let hit3 = cr.iter().filter(|r| r.hit_3).count();
@@ -668,7 +968,9 @@ mod tests {
                 dist, n * 5);
 
             totals.n += n;
-            totals.hit1 += hit1; totals.hit3 += hit3; totals.hit5 += hit5;
+            totals.hit1 += hit1;
+            totals.hit3 += hit3;
+            totals.hit5 += hit5;
             totals.rr += cr.iter().map(|r| r.rr).sum::<f32>();
             totals.p1 += cr.iter().map(|r| r.prec_1).sum::<f32>();
             totals.p3 += cr.iter().map(|r| r.prec_3).sum::<f32>();
@@ -691,24 +993,36 @@ mod tests {
         println!();
 
         // ── Cluster confusion matrix (distractor analysis) ─────────
-        let disambig_results: Vec<&QueryResult> = results.iter()
-            .filter(|r| r.category == "disambig" || r.category == "paraphrase" || r.category == "exact")
+        let disambig_results: Vec<&QueryResult> = results
+            .iter()
+            .filter(|r| {
+                r.category == "disambig" || r.category == "paraphrase" || r.category == "exact"
+            })
             .collect();
-        let total_distractor_opps: usize = disambig_results.iter()
+        let total_distractor_opps: usize = disambig_results
+            .iter()
             .map(|r| r.forbidden.len().min(5))
             .sum();
-        let total_distractors: usize = disambig_results.iter()
-            .map(|r| r.distractor_count)
-            .sum();
+        let total_distractors: usize = disambig_results.iter().map(|r| r.distractor_count).sum();
         let distractor_rate = if total_distractor_opps > 0 {
             total_distractors as f32 / disambig_results.len() as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         println!("  DISTRACTOR ANALYSIS (disambig + paraphrase + exact)");
-        println!("  Queries with distractors in top-5: {}/{}",
-            disambig_results.iter().filter(|r| r.distractor_count > 0).count(),
-            disambig_results.len());
-        println!("  Total distractor hits: {} (avg {:.2} per query)", total_distractors, distractor_rate);
+        println!(
+            "  Queries with distractors in top-5: {}/{}",
+            disambig_results
+                .iter()
+                .filter(|r| r.distractor_count > 0)
+                .count(),
+            disambig_results.len()
+        );
+        println!(
+            "  Total distractor hits: {} (avg {:.2} per query)",
+            total_distractors, distractor_rate
+        );
         println!();
 
         // ── Hard-fail assertions ───────────────────────────────────
@@ -718,15 +1032,18 @@ mod tests {
 
         assert!(
             overall_hit3 >= 0.75,
-            "FAIL: Hit@3 = {:.0}% (threshold 75%)", overall_hit3 * 100.0
+            "FAIL: Hit@3 = {:.0}% (threshold 75%)",
+            overall_hit3 * 100.0
         );
         assert!(
             overall_mrr >= 0.60,
-            "FAIL: MRR = {:.3} (threshold 0.60)", overall_mrr
+            "FAIL: MRR = {:.3} (threshold 0.60)",
+            overall_mrr
         );
         assert!(
             overall_hit1 >= 0.55,
-            "FAIL: Hit@1 = {:.0}% (threshold 55%)", overall_hit1 * 100.0
+            "FAIL: Hit@1 = {:.0}% (threshold 55%)",
+            overall_hit1 * 100.0
         );
 
         println!("  All assertions passed:");
@@ -739,9 +1056,13 @@ mod tests {
     #[derive(Default)]
     struct Totals {
         n: usize,
-        hit1: usize, hit3: usize, hit5: usize,
+        hit1: usize,
+        hit3: usize,
+        hit5: usize,
         rr: f32,
-        p1: f32, p3: f32, p5: f32,
+        p1: f32,
+        p3: f32,
+        p5: f32,
         dist: usize,
     }
 
@@ -773,7 +1094,8 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
         )));
     }
 
-    let bytes = response.bytes()
+    let bytes = response
+        .bytes()
         .map_err(|e| AthenaError::Internal(format!("Failed to read response body: {}", e)))?;
 
     std::fs::write(dest, &bytes)

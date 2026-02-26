@@ -28,6 +28,15 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 TERMINAL_STATUSES = {"succeeded", "failed", "rolled_back"}
+OUTCOME_REASON_WAIT_TIMEOUT = "outcome_wait_timeout"
+
+
+def _to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 @dataclass
@@ -72,8 +81,8 @@ def run(
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout=e.stdout or "",
-            stderr=(e.stderr or "") + f"\nTimeout after {timeout_secs}s",
+            stdout=_to_text(e.stdout),
+            stderr=_to_text(e.stderr) + f"\nTimeout after {timeout_secs}s",
         )
 
 
@@ -98,8 +107,8 @@ def run_shell(
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout=e.stdout or "",
-            stderr=(e.stderr or "") + f"\nTimeout after {timeout_secs}s",
+            stdout=_to_text(e.stdout),
+            stderr=_to_text(e.stderr) + f"\nTimeout after {timeout_secs}s",
         )
 
 
@@ -130,6 +139,23 @@ def parse_db_path(config_path: Path) -> Path:
             if value:
                 return Path(value).expanduser()
     return default
+
+
+def lane_timeout_budget(lane: str, risk: str, fast_mode: bool = False) -> tuple[int, int, int]:
+    if fast_mode:
+        return 120, 120, 240
+    lane_key = lane.strip().lower()
+    risk_key = risk.strip().lower()
+    if lane_key == "delivery":
+        wait_map = {"low": 420, "medium": 600, "high": 900}
+        wait = wait_map.get(risk_key, 600)
+        return wait, max(wait, 480), max(wait + 240, 900)
+    if lane_key == "self_improvement":
+        wait_map = {"low": 240, "medium": 360, "high": 540}
+        wait = wait_map.get(risk_key, 360)
+        return wait, max(wait, 300), max(wait + 180, 600)
+    wait = 300
+    return wait, 360, 600
 
 
 def git_status_paths(repo: Path) -> set[str]:
@@ -189,6 +215,22 @@ def wait_for_terminal_outcome(
         time.sleep(poll_secs)
     latest = query_outcome(conn, dispatch_task_id)
     return latest, latest.get("status") in TERMINAL_STATUSES
+
+
+def fail_outcome_if_started(conn: sqlite3.Connection, dispatch_task_id: str, error: str) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE autonomous_task_outcomes
+           SET status = 'failed',
+               finished_at = datetime('now'),
+               error = COALESCE(error, ?2)
+         WHERE task_id = ?1
+           AND status = 'started'
+        """,
+        (dispatch_task_id, error),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def score_plan_quality(response: str) -> float:
@@ -269,6 +311,67 @@ def score_tests(repo: Path, test_command: str) -> tuple[float, str]:
     if p.returncode == 0:
         return 1.0, "passed"
     return 0.0, (p.stderr or p.stdout or "failed").strip()[:500]
+
+
+def _min_rule_value(rule: dict[str, Any], key: str, default: float) -> float:
+    raw = rule.get(key, default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def evaluate_gate(
+    results: list[TaskResult],
+    threshold: float,
+    suite: dict[str, Any],
+    overall: float,
+) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    gate_cfg = suite.get("gate_requirements", {}) or {}
+    min_overall = _min_rule_value(gate_cfg, "min_overall", threshold)
+    require_exec_success = bool(gate_cfg.get("require_exec_success", True))
+    lane_rules = gate_cfg.get("lane_rules", {}) or {}
+    task_rules = gate_cfg.get("task_rules", {}) or {}
+
+    if overall < min_overall:
+        reasons.append(f"overall_below_threshold overall={overall:.2f} min_overall={min_overall:.2f}")
+
+    for r in results:
+        if require_exec_success and r.exec_success < 1.0:
+            reasons.append(f"task={r.task_id} exec_success<{1.0:.2f} actual={r.exec_success:.2f}")
+
+        effective_rules: list[tuple[str, dict[str, Any]]] = []
+        lane_rule = lane_rules.get(r.lane)
+        if isinstance(lane_rule, dict):
+            effective_rules.append((f"lane:{r.lane}", lane_rule))
+        task_rule = task_rules.get(r.task_id)
+        if isinstance(task_rule, dict):
+            effective_rules.append((f"task:{r.task_id}", task_rule))
+
+        for scope, rule in effective_rules:
+            min_tests = _min_rule_value(rule, "min_tests_pass", 0.0)
+            min_diff = _min_rule_value(rule, "min_diff_quality", 0.0)
+            min_plan = _min_rule_value(rule, "min_plan_quality", 0.0)
+            min_overall_task = _min_rule_value(rule, "min_task_overall", 0.0)
+            if r.tests_pass < min_tests:
+                reasons.append(
+                    f"{scope} task={r.task_id} tests_pass<{min_tests:.2f} actual={r.tests_pass:.2f}"
+                )
+            if r.diff_quality < min_diff:
+                reasons.append(
+                    f"{scope} task={r.task_id} diff_quality<{min_diff:.2f} actual={r.diff_quality:.2f}"
+                )
+            if r.plan_quality < min_plan:
+                reasons.append(
+                    f"{scope} task={r.task_id} plan_quality<{min_plan:.2f} actual={r.plan_quality:.2f}"
+                )
+            if r.overall < min_overall_task:
+                reasons.append(
+                    f"{scope} task={r.task_id} overall<{min_overall_task:.2f} actual={r.overall:.2f}"
+                )
+
+    return len(reasons) == 0, reasons
 
 
 def build_dispatch_goal(raw_goal: str) -> str:
@@ -364,11 +467,26 @@ def run_task(
     lane = str(merged.get("lane", "delivery"))
     risk = str(merged.get("risk", "medium"))
     repo_name = str(merged.get("repo", "athena"))
-    wait_secs = int(merged.get("wait_secs", 240))
-    timeout_secs = int(merged.get("timeout_secs", wait_secs + 180))
-    outcome_wait_secs = int(merged.get("outcome_wait_secs", max(wait_secs, 120)))
+    strict_timeout_budget = bool(merged.get("strict_timeout_budget", True))
+    fast_mode = bool(dispatch_context and "[benchmark_fast_cli]" in dispatch_context.lower())
+    min_wait_secs, min_outcome_wait_secs, min_timeout_secs = lane_timeout_budget(
+        lane, risk, fast_mode=fast_mode
+    )
+    wait_raw = int(merged.get("wait_secs", min_wait_secs))
+    outcome_wait_raw = int(merged.get("outcome_wait_secs", max(wait_raw, 120)))
+    timeout_raw = int(merged.get("timeout_secs", wait_raw + 180))
+    if strict_timeout_budget:
+        wait_secs = max(wait_raw, min_wait_secs)
+        outcome_wait_secs = max(outcome_wait_raw, min_outcome_wait_secs)
+        timeout_secs = max(timeout_raw, min_timeout_secs, wait_secs + 60)
+    else:
+        wait_secs = max(wait_raw, 1)
+        outcome_wait_secs = max(outcome_wait_raw, 1)
+        timeout_secs = max(timeout_raw, 1)
     goal = build_dispatch_goal(str(merged.get("goal", "")).strip())
     test_command = str(merged.get("test_command", "")).strip()
+    if lane == "delivery" and not test_command:
+        test_command = "cargo check -q"
     task_name = str(merged.get("id", "unknown"))
 
     before = git_status_paths(repo)
@@ -409,6 +527,10 @@ def run_task(
         outcome, outcome_terminal = wait_for_terminal_outcome(
             conn, dispatch_task_id, max_wait_secs=outcome_wait_secs
         )
+        if not outcome_terminal:
+            if fail_outcome_if_started(conn, dispatch_task_id, OUTCOME_REASON_WAIT_TIMEOUT):
+                outcome = query_outcome(conn, dispatch_task_id)
+                outcome_terminal = outcome.get("status") in TERMINAL_STATUSES
 
     status = outcome.get("status", "unknown")
     error = outcome.get("error")
@@ -431,6 +553,9 @@ def run_task(
     )
 
     notes = [f"test_command={test_note}"]
+    notes.append(
+        f"timeout_budget(wait={wait_secs}s,outcome_wait={outcome_wait_secs}s,subprocess={timeout_secs}s)"
+    )
     if cli_tool:
         notes.append(f"cli_tool={cli_tool}")
     if cli_model:
@@ -473,6 +598,7 @@ def write_reports(
     results: list[TaskResult],
     gate_ok: bool,
     threshold: float,
+    gate_reasons: list[str],
     cli_tool: str | None,
     cli_model: str | None,
     dispatch_context: str | None,
@@ -489,6 +615,7 @@ def write_reports(
         "suite": suite.get("name"),
         "threshold": threshold,
         "gate_ok": gate_ok,
+        "gate_reasons": gate_reasons,
         "overall_score": overall,
         "cli_tool": cli_tool,
         "cli_model": cli_model,
@@ -519,6 +646,13 @@ def write_reports(
             f"{r.overall:.2f} | {r.exec_success:.2f} | {r.tests_pass:.2f} | {r.diff_quality:.2f} | {r.plan_quality:.2f} |"
         )
     lines.append("")
+    lines.append("## Gate Reasons")
+    if gate_reasons:
+        for reason in gate_reasons:
+            lines.append(f"- {reason}")
+    else:
+        lines.append("- none")
+    lines.append("")
     lines.append("## Notes")
     for r in results:
         lines.append(f"- `{r.task_id}`: {'; '.join(r.notes) if r.notes else 'none'}")
@@ -534,6 +668,7 @@ def append_history(
     suite_name: str,
     threshold: float,
     gate_ok: bool,
+    gate_reasons: list[str],
     overall: float,
     timestamp_utc: str,
     report_json: Path,
@@ -550,6 +685,7 @@ def append_history(
         "suite": suite_name,
         "threshold": threshold,
         "gate_ok": gate_ok,
+        "gate_reasons": gate_reasons,
         "overall_score": overall,
         "task_count": len(results),
         "exec_success_rate": (
@@ -722,13 +858,14 @@ def main() -> int:
     conn.close()
 
     overall = sum(r.overall for r in results) / max(len(results), 1)
-    gate_ok = overall >= threshold and all(r.exec_success >= 1.0 for r in results)
+    gate_ok, gate_reasons = evaluate_gate(results, threshold, suite, overall)
     report_json, report_md, overall, ts = write_reports(
         output_dir,
         suite,
         results,
         gate_ok,
         threshold,
+        gate_reasons,
         args.cli_tool,
         args.cli_model,
         args.dispatch_context,
@@ -739,6 +876,7 @@ def main() -> int:
         suite_name=str(suite.get("name", "unknown")),
         threshold=threshold,
         gate_ok=gate_ok,
+        gate_reasons=gate_reasons,
         overall=overall,
         timestamp_utc=ts,
         report_json=report_json,

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::config::{GhostConfig, Config, MountConfig};
+use crate::config::{Config, GhostConfig, MountConfig};
 use crate::error::{AthenaError, Result};
 
 /// A profile file loaded from ~/.athena/ghosts/*.toml
@@ -24,10 +24,27 @@ fn default_strategy() -> String {
     "react".into()
 }
 
+fn home_profile_loading_disabled() -> bool {
+    std::env::var("ATHENA_DISABLE_HOME_PROFILES")
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Load ghosts from config + ~/.athena/ghosts/*.toml profile directory.
 /// Profile ghosts override config ghosts with the same name.
 pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let mut ghosts: Vec<GhostConfig> = config.ghosts.clone();
+
+    if home_profile_loading_disabled() {
+        tracing::info!("Home ghost profiles disabled via ATHENA_DISABLE_HOME_PROFILES");
+        return Ok(ghosts);
+    }
 
     let profile_dir = match dirs::home_dir() {
         Some(h) => h.join(".athena").join("ghosts"),
@@ -44,7 +61,11 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let entries = match std::fs::read_dir(&profile_dir) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!("Cannot read profile directory {}: {}", profile_dir.display(), e);
+            tracing::warn!(
+                "Cannot read profile directory {}: {}",
+                profile_dir.display(),
+                e
+            );
             return Ok(ghosts);
         }
     };
@@ -57,20 +78,33 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
 
         match load_profile(&path) {
             Ok(profile) => {
-                tracing::info!("Loaded ghost profile: {} ({})", profile.name, path.display());
+                tracing::info!(
+                    "Loaded ghost profile: {} ({})",
+                    profile.name,
+                    path.display()
+                );
 
-                let soul = profile.soul_file.as_ref().and_then(|path| {
-                    match crate::config::load_soul_file(path) {
-                        Ok(content) => {
-                            tracing::info!("Loaded soul for profile ghost '{}' from {}", profile.name, path);
-                            Some(content)
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to load soul for profile ghost '{}': {}", profile.name, e);
-                            None
-                        }
-                    }
-                });
+                let soul =
+                    profile.soul_file.as_ref().and_then(
+                        |path| match crate::config::load_soul_file(path) {
+                            Ok(content) => {
+                                tracing::info!(
+                                    "Loaded soul for profile ghost '{}' from {}",
+                                    profile.name,
+                                    path
+                                );
+                                Some(content)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load soul for profile ghost '{}': {}",
+                                    profile.name,
+                                    e
+                                );
+                                None
+                            }
+                        },
+                    );
 
                 let ghost = GhostConfig {
                     name: profile.name.clone(),

@@ -358,7 +358,7 @@ fn build_funnel1(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) -> Fun
         status: if enabled {
             CheckStatus::Pass
         } else {
-            CheckStatus::Fail
+            CheckStatus::Warn
         },
         detail: format!(
             "proactive.enabled={} self_dev.enabled={}",
@@ -374,12 +374,15 @@ fn build_funnel1(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) -> Fun
         .as_ref()
         .map(|g| has_tool(g, "file_read") && has_tool(g, "shell"))
         .unwrap_or(false);
+    let health_monitor_requested = config.proactive.enabled || config.self_dev.enabled;
     checks.push(CheckItem {
         stage: "Diagnostic ghost wiring",
         status: if scout_ok {
             CheckStatus::Pass
-        } else {
+        } else if health_monitor_requested {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: if scout_ok {
             "scout ghost exists and has file_read + shell".to_string()
@@ -407,8 +410,10 @@ fn code_indexer_enabled_check(config: &Config) -> CheckItem {
         stage: "Code indexer enabled",
         status: if index_enabled {
             CheckStatus::Pass
-        } else {
+        } else if config.self_dev.enabled {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: format!(
             "self_dev.enabled={} code_indexer_enabled={}",
@@ -427,8 +432,10 @@ fn refactor_scanner_enabled_check(config: &Config) -> CheckItem {
         stage: "Refactoring scanner enabled",
         status: if refactor_enabled {
             CheckStatus::Pass
-        } else {
+        } else if config.self_dev.enabled {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: format!(
             "self_dev.enabled={} refactoring_scan_enabled={}",
@@ -439,20 +446,23 @@ fn refactor_scanner_enabled_check(config: &Config) -> CheckItem {
     }
 }
 
-fn refactor_wiring_check(snap: &DoctorSnapshot) -> CheckItem {
+fn refactor_wiring_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
     let coder_ok = snap
         .coder
         .as_ref()
         .map(|g| g.strategy == "code" && has_tool(g, "file_read"))
         .unwrap_or(false);
+    let ready = snap.scout.is_some() && coder_ok;
     CheckItem {
         stage: "Indexer/refactor ghost wiring",
-        status: if snap.scout.is_some() && coder_ok {
+        status: if ready {
             CheckStatus::Pass
-        } else {
+        } else if config.self_dev.enabled {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
-        detail: if snap.scout.is_some() && coder_ok {
+        detail: if ready {
             "scout + coder(strategy=code) present".to_string()
         } else {
             "missing scout or coder(strategy=code)".to_string()
@@ -498,7 +508,8 @@ fn refactor_artifacts_check(snap: &DoctorSnapshot) -> CheckItem {
             snap.counts.refactoring_failed
         ),
         fix: (refactor_artifacts == 0).then(|| {
-            "Wait for the refactoring scanner cycle or trigger related autonomous tasks.".to_string()
+            "Wait for the refactoring scanner cycle or trigger related autonomous tasks."
+                .to_string()
         }),
     }
 }
@@ -508,7 +519,7 @@ fn build_funnel2(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) -> Fun
     checks.push(llm_check(llm));
     checks.push(code_indexer_enabled_check(config));
     checks.push(refactor_scanner_enabled_check(config));
-    checks.push(refactor_wiring_check(snap));
+    checks.push(refactor_wiring_check(config, snap));
     checks.push(index_artifacts_check(snap));
     checks.push(refactor_artifacts_check(snap));
 
@@ -536,12 +547,15 @@ fn build_funnel3(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) -> Fun
     });
 
     let loops_enabled = config.proactive.enabled && config.heartbeat.enabled;
+    let loops_partial = config.proactive.enabled || config.heartbeat.enabled;
     checks.push(CheckItem {
         stage: "Reflection loops enabled",
         status: if loops_enabled {
             CheckStatus::Pass
-        } else {
+        } else if loops_partial {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: format!(
             "proactive.enabled={} heartbeat.enabled={}",
@@ -594,15 +608,15 @@ fn build_funnel3(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) -> Fun
 async fn build_funnel4(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) -> FunnelReport {
     let mut checks = Vec::new();
     checks.push(llm_check(llm));
-    checks.push(coder_strategy_check(snap));
-    checks.push(verify_tool_coverage_check(snap));
+    checks.push(coder_strategy_check(config, snap));
+    checks.push(verify_tool_coverage_check(config, snap));
     checks.push(self_heal_tool_coverage_check(snap));
 
     if needs_cargo_check(snap) {
         checks.push(run_cargo_check(config, snap).await);
     }
-    checks.push(coding_cli_declaration_check(snap));
-    checks.push(coding_cli_availability_check(snap));
+    checks.push(coding_cli_declaration_check(config, snap));
+    checks.push(coding_cli_availability_check(config, snap));
     checks.push(preferred_cli_viability_check(snap));
     checks.push(execution_learning_check(snap));
 
@@ -612,7 +626,7 @@ async fn build_funnel4(config: &Config, snap: &DoctorSnapshot, llm: &LlmHealth) 
     }
 }
 
-fn coder_strategy_check(snap: &DoctorSnapshot) -> CheckItem {
+fn coder_strategy_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
     let coder_is_code = snap
         .coder
         .as_ref()
@@ -622,8 +636,10 @@ fn coder_strategy_check(snap: &DoctorSnapshot) -> CheckItem {
         stage: "Coder strategy wiring",
         status: if coder_is_code {
             CheckStatus::Pass
-        } else {
+        } else if config.self_dev.enabled {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: if coder_is_code {
             "coder ghost uses strategy=code".to_string()
@@ -634,7 +650,7 @@ fn coder_strategy_check(snap: &DoctorSnapshot) -> CheckItem {
     }
 }
 
-fn verify_tool_coverage_check(snap: &DoctorSnapshot) -> CheckItem {
+fn verify_tool_coverage_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
     let coder_tools_ok = snap
         .coder
         .as_ref()
@@ -648,8 +664,10 @@ fn verify_tool_coverage_check(snap: &DoctorSnapshot) -> CheckItem {
         stage: "Execute/verify tool coverage",
         status: if coder_tools_ok {
             CheckStatus::Pass
-        } else {
+        } else if config.self_dev.enabled {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: if coder_tools_ok {
             "required read/verify tools present".to_string()
@@ -690,11 +708,15 @@ fn self_heal_tool_coverage_check(snap: &DoctorSnapshot) -> CheckItem {
     }
 }
 
-fn coding_cli_declaration_check(snap: &DoctorSnapshot) -> CheckItem {
+fn coding_cli_declaration_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
     CheckItem {
         stage: "Coding CLI declaration",
         status: if snap.declared_cli_tools.is_empty() {
-            CheckStatus::Fail
+            if config.self_dev.enabled {
+                CheckStatus::Fail
+            } else {
+                CheckStatus::Warn
+            }
         } else {
             CheckStatus::Pass
         },
@@ -708,7 +730,7 @@ fn coding_cli_declaration_check(snap: &DoctorSnapshot) -> CheckItem {
     }
 }
 
-fn coding_cli_availability_check(snap: &DoctorSnapshot) -> CheckItem {
+fn coding_cli_availability_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
     let usable_declared = snap
         .declared_cli_tools
         .iter()
@@ -718,8 +740,12 @@ fn coding_cli_availability_check(snap: &DoctorSnapshot) -> CheckItem {
         stage: "Coding CLI availability",
         status: if usable_declared > 0 {
             CheckStatus::Pass
-        } else {
+        } else if snap.declared_cli_tools.is_empty() {
+            CheckStatus::Warn
+        } else if config.self_dev.enabled {
             CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
         },
         detail: format!(
             "installed coding tools={} (detected: {})",

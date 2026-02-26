@@ -613,13 +613,20 @@ async fn command_dispatch(
         task_id: None,
     };
 
-    if let Err(e) = state.handle.dispatch_task(task).await {
-        let html = format!("<i>Failed to dispatch: {}</i>", escape_html(&e.to_string()));
-        send_html(bot, chat_id, &html).await?;
-    } else {
-        let label = ghost_name.unwrap_or_else(|| "auto".into());
-        let html = format!("<i>⚡ Dispatched to {}</i>", escape_html(&label));
-        send_html(bot, chat_id, &html).await?;
+    match state.handle.dispatch_task(task).await {
+        Err(e) => {
+            let html = format!("<i>Failed to dispatch: {}</i>", escape_html(&e.to_string()));
+            send_html(bot, chat_id, &html).await?;
+        }
+        Ok(task_id) => {
+            let label = ghost_name.unwrap_or_else(|| "auto".into());
+            let html = format!(
+                "<i>⚡ Dispatched to {} (task_id={})</i>",
+                escape_html(&label),
+                escape_html(&task_id)
+            );
+            send_html(bot, chat_id, &html).await?;
+        }
     }
     Ok(())
 }
@@ -841,8 +848,11 @@ async fn check_rate_limit(
 ) -> ResponseResult<bool> {
     let mut last_req = state.last_request.lock().await;
     let now = tokio::time::Instant::now();
-    if should_rate_limit(last_req.get(&chat_id.0).copied(), now, tokio::time::Duration::from_secs(5))
-    {
+    if should_rate_limit(
+        last_req.get(&chat_id.0).copied(),
+        now,
+        tokio::time::Duration::from_secs(5),
+    ) {
         send_html(
             bot,
             chat_id,
@@ -1021,7 +1031,11 @@ mod tests {
     #[test]
     fn rate_limit_allows_and_blocks_by_cooldown() {
         let now = tokio::time::Instant::now();
-        assert!(!should_rate_limit(None, now, tokio::time::Duration::from_secs(5)));
+        assert!(!should_rate_limit(
+            None,
+            now,
+            tokio::time::Duration::from_secs(5)
+        ));
         assert!(should_rate_limit(
             Some(now),
             now + tokio::time::Duration::from_secs(1),

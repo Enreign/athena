@@ -85,7 +85,10 @@ pub struct DynamicTool {
 
 impl DynamicTool {
     pub fn new(def: DynamicToolDefinition, host_workspace: Option<String>) -> Self {
-        Self { def, host_workspace }
+        Self {
+            def,
+            host_workspace,
+        }
     }
 
     /// Tool name accessor
@@ -126,10 +129,18 @@ impl DynamicTool {
         if self.def.parameters.is_empty() {
             return format!("{} — {}", self.def.name, self.def.description);
         }
-        let param_details: Vec<String> = self.def.parameters.iter()
+        let param_details: Vec<String> = self
+            .def
+            .parameters
+            .iter()
             .map(|p| format!("{}: {}", p.name, p.description))
             .collect();
-        format!("{} — {}\n    Parameters: {}", self.def.name, self.def.description, param_details.join("; "))
+        format!(
+            "{} — {}\n    Parameters: {}",
+            self.def.name,
+            self.def.description,
+            param_details.join("; ")
+        )
     }
 
     /// Render the command template by substituting `{{key}}` with values from params.
@@ -213,10 +224,13 @@ impl Tool for DynamicTool {
                 ParameterType::Boolean => "boolean",
             };
             let req = if p.required { "required" } else { "optional" };
-            desc.push_str(&format!("\n  - {} ({}{}): {}",
+            desc.push_str(&format!(
+                "\n  - {} ({}{}): {}",
                 p.name,
                 type_str,
-                if p.required { format!(", {}", req) } else {
+                if p.required {
+                    format!(", {}", req)
+                } else {
                     match &p.default {
                         Some(v) => format!(", default={}", v),
                         None => format!(", {}", req),
@@ -328,8 +342,13 @@ pub fn discover(path: &Path, host_workspace: &str) -> Result<Vec<Box<dyn Tool>>>
 
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
-    let entries = std::fs::read_dir(path)
-        .map_err(|e| AthenaError::Config(format!("Failed to read dynamic tools dir {}: {}", path.display(), e)))?;
+    let entries = std::fs::read_dir(path).map_err(|e| {
+        AthenaError::Config(format!(
+            "Failed to read dynamic tools dir {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
 
     for entry in entries {
         let entry = match entry {
@@ -366,7 +385,12 @@ pub fn discover(path: &Path, host_workspace: &str) -> Result<Vec<Box<dyn Tool>>>
             ExecutionMode::Host => Some(host_workspace.to_string()),
             ExecutionMode::Docker => None,
         };
-        tracing::info!("Loaded dynamic tool '{}' ({:?}) from {}", def.name, def.execution, file_path.display());
+        tracing::info!(
+            "Loaded dynamic tool '{}' ({:?}) from {}",
+            def.name,
+            def.execution,
+            file_path.display()
+        );
         tools.push(Box::new(DynamicTool::new(def, ws)));
     }
 
@@ -383,8 +407,13 @@ pub fn discover_host(path: &Path, host_workspace: &str) -> Result<Vec<DynamicToo
 
     let mut tools = Vec::new();
 
-    let entries = std::fs::read_dir(path)
-        .map_err(|e| AthenaError::Config(format!("Failed to read dynamic tools dir {}: {}", path.display(), e)))?;
+    let entries = std::fs::read_dir(path).map_err(|e| {
+        AthenaError::Config(format!(
+            "Failed to read dynamic tools dir {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
 
     for entry in entries {
         let entry = match entry {
@@ -421,7 +450,11 @@ pub fn discover_host(path: &Path, host_workspace: &str) -> Result<Vec<DynamicToo
             continue;
         }
 
-        tracing::info!("Loaded host tool '{}' for direct path from {}", def.name, file_path.display());
+        tracing::info!(
+            "Loaded host tool '{}' for direct path from {}",
+            def.name,
+            file_path.display()
+        );
         tools.push(DynamicTool::new(def, Some(host_workspace.to_string())));
     }
 
@@ -437,7 +470,7 @@ pub fn spawn_hot_reload(
     direct_tools: Arc<tokio::sync::RwLock<HashMap<String, DynamicTool>>>,
     observer: ObserverHandle,
 ) {
-    use notify::{Watcher, RecursiveMode, Event, EventKind};
+    use notify::{Event, EventKind, RecursiveMode, Watcher};
 
     // Ensure the directory exists before watching
     if !path.is_dir() {
@@ -453,16 +486,18 @@ pub fn spawn_hot_reload(
     let watch_path = path.clone();
     std::thread::spawn(move || {
         let tx = tx;
-        let mut watcher = match notify::recommended_watcher(move |res: std::result::Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                        let _ = tx.blocking_send(());
+        let mut watcher = match notify::recommended_watcher(
+            move |res: std::result::Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                            let _ = tx.blocking_send(());
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-        }) {
+            },
+        ) {
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!("Failed to create file watcher for hot-reload: {}", e);
@@ -499,7 +534,8 @@ pub fn spawn_hot_reload(
             match discover_host(&path, &host_workspace) {
                 Ok(tools) => {
                     let count = tools.len();
-                    let names: Vec<String> = tools.iter().map(|t| t.tool_name().to_string()).collect();
+                    let names: Vec<String> =
+                        tools.iter().map(|t| t.tool_name().to_string()).collect();
                     let new_map: HashMap<String, DynamicTool> = tools
                         .into_iter()
                         .map(|t| (t.tool_name().to_string(), t))
@@ -728,7 +764,10 @@ command: "git {{subcommand}}"
     fn test_host_allowed_commands_rejection() {
         let def = make_host_def("git", "rm -rf /");
         let tool = DynamicTool::new(def, Some(".".into()));
-        assert!(!check_allowed(&tool, "rm -rf /"), "rm should not be in allowed list");
+        assert!(
+            !check_allowed(&tool, "rm -rf /"),
+            "rm should not be in allowed list"
+        );
     }
 
     #[test]
@@ -745,8 +784,12 @@ command: "git {{subcommand}}"
     fn test_host_blocked_patterns_rejection() {
         let def = make_host_def("git", "git {{subcommand}}");
         let tool = DynamicTool::new(def, Some(".".into()));
-        let cmd = tool.render_command(&serde_json::json!({"subcommand": "push --force origin main"}));
-        assert!(check_blocked(&tool, &cmd).is_some(), "Should block 'push --force'");
+        let cmd =
+            tool.render_command(&serde_json::json!({"subcommand": "push --force origin main"}));
+        assert!(
+            check_blocked(&tool, &cmd).is_some(),
+            "Should block 'push --force'"
+        );
     }
 
     #[test]
@@ -754,7 +797,10 @@ command: "git {{subcommand}}"
         let def = make_host_def("git", "git {{subcommand}}");
         let tool = DynamicTool::new(def, Some(".".into()));
         let cmd = tool.render_command(&serde_json::json!({"subcommand": "push origin main"}));
-        assert!(check_blocked(&tool, &cmd).is_none(), "Normal push should not be blocked");
+        assert!(
+            check_blocked(&tool, &cmd).is_none(),
+            "Normal push should not be blocked"
+        );
     }
 
     // ── Host tool forced confirmation ───────────────────────────────
@@ -765,14 +811,20 @@ command: "git {{subcommand}}"
         let mut def = make_host_def("git", "git status");
         def.needs_confirmation = false;
         let tool = DynamicTool::new(def, Some(".".into()));
-        assert!(tool.needs_confirmation(), "Host tools must always require confirmation");
+        assert!(
+            tool.needs_confirmation(),
+            "Host tools must always require confirmation"
+        );
     }
 
     #[test]
     fn test_docker_tool_no_forced_confirmation() {
         let def = make_def("echo", "echo hi");
         let tool = DynamicTool::new(def, None);
-        assert!(!tool.needs_confirmation(), "Docker tools respect YAML setting");
+        assert!(
+            !tool.needs_confirmation(),
+            "Docker tools respect YAML setting"
+        );
     }
 
     // ── Discover host tools ─────────────────────────────────────────

@@ -13,11 +13,21 @@ It runs a stable task suite end-to-end and scores:
 - tests pass
 - diff quality
 
+## Current Limits (2026-02-16)
+
+- CI currently runs smoke via mock dispatch (`eval/benchmark-mini-ci.json`) to validate harness mechanics.
+- CLI smoke benchmark (`eval/benchmark-cli-smoke.json`) is integration-focused and lightweight.
+- Fast benchmark mode (`[benchmark_fast_cli]`) skips EXPLORE/VERIFY in strategy and is not a full-quality gate.
+
+Roadmap and target gate model: `docs/self-improvement-roadmap.md`.
+
 ## Suite
 
 Default suite file:
 
 - `eval/benchmark-suite.json`
+- real quality gate profile: `eval/benchmark-real-gate.json`
+- smoke profile: `eval/benchmark-cli-smoke.json`
 
 Current lanes covered:
 
@@ -98,6 +108,48 @@ Matrix output:
 - `eval/results/cli-matrix-<timestamp>.json`
 - `eval/results/cli-matrix-<timestamp>.md`
 
+## Overnight Soak
+
+Run unattended reliability soak (doctor + 3-CLI matrix + KPI snapshots + dashboard + maintainability snapshot + ranked improvement backlog):
+
+```bash
+./scripts/start-soak-autonomy.sh 28800 1800 overnight8h
+```
+
+Arguments:
+
+- arg1: duration seconds (`28800` = 8h)
+- arg2: interval seconds (`1800` = 30m)
+- arg3: run label
+
+Launcher output includes:
+
+- `session=<screen session>`
+- `run_dir=<path>`
+- `launch_log=<path>`
+
+Inspect progress:
+
+```bash
+tail -f "<run_dir>/soak.log"
+screen -ls | rg athena_soak
+```
+
+On completion, a summary is generated at:
+
+- `<run_dir>/summary.md`
+
+## Real Quality Gate
+
+Run real delivery-quality suite (separate from smoke health):
+
+```bash
+python3 scripts/eval_harness.py --suite eval/benchmark-real-gate.json
+```
+
+Use smoke for integration uptime and real suite for promotion decisions.
+Real gate enforces strict per-task `delivery` minima (`tests_pass=1.0`, `diff_quality>=0.8`) in addition to suite overall threshold.
+
 ## Output
 
 Reports are written to:
@@ -114,8 +166,13 @@ And console prints gate result:
 
 Gate passes when:
 
-- overall weighted score `>= pass_threshold` (suite-level)
-- all tasks have `exec_success = 1.0`
+- suite-level threshold passes (`overall weighted score >= pass_threshold`)
+- `require_exec_success` (if enabled) passes
+- all configured `gate_requirements` pass, including optional lane/task minima such as:
+  - minimum `tests_pass`
+  - minimum `diff_quality`
+  - minimum `plan_quality`
+  - minimum per-task `overall`
 
 ## Notes
 
@@ -142,3 +199,8 @@ Output:
 GitHub Actions workflow:
 
 - `.github/workflows/eval-harness.yml`
+
+Planned CI evolution:
+
+- keep smoke job as quick regression sentinel
+- real benchmark gate is wired as manual self-hosted workflow: `.github/workflows/eval-real-gate.yml`
