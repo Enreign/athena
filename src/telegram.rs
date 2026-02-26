@@ -1634,7 +1634,7 @@ mod tests {
     #[test]
     fn tool_result_html_strips_prefix_and_escapes() {
         let html = tool_result_html("shell", "[tool result]\n<ok>", true);
-        assert!(html.contains("<b>shell</b>"));
+        assert!(html.contains("<b>Behind the scenes — shell</b>"));
         assert!(html.contains("&lt;ok&gt;"));
         assert!(!html.contains("[tool result]"));
     }
