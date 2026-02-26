@@ -906,23 +906,23 @@ impl Config {
             self.github.token = Some(token);
         }
         if let Some(openrouter) = self.openrouter.as_mut() {
-            if openrouter.api_key.is_none() {
-                openrouter.api_key = std::env::var("OPENROUTER_API_KEY").ok();
+            if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+                openrouter.api_key = Some(key);
             }
         }
         if let Some(zen) = self.zen.as_mut() {
-            if zen.api_key.is_none() {
-                zen.api_key = std::env::var("OPENCODE_API_KEY").ok();
+            if let Ok(key) = std::env::var("OPENCODE_API_KEY") {
+                zen.api_key = Some(key);
             }
         }
-        if self.langfuse.public_key.is_none() {
-            self.langfuse.public_key = std::env::var("LANGFUSE_PUBLIC_KEY").ok();
+        if let Ok(key) = std::env::var("LANGFUSE_PUBLIC_KEY") {
+            self.langfuse.public_key = Some(key);
         }
-        if self.langfuse.secret_key.is_none() {
-            self.langfuse.secret_key = std::env::var("LANGFUSE_SECRET_KEY").ok();
+        if let Ok(key) = std::env::var("LANGFUSE_SECRET_KEY") {
+            self.langfuse.secret_key = Some(key);
         }
-        if self.langfuse.base_url.is_none() {
-            self.langfuse.base_url = std::env::var("LANGFUSE_BASE_URL").ok();
+        if let Ok(url) = std::env::var("LANGFUSE_BASE_URL") {
+            self.langfuse.base_url = Some(url);
         }
         if self.langfuse.enabled == false
             && self.langfuse.public_key.is_some()
