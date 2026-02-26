@@ -58,6 +58,14 @@ impl PlanningInterview {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ImplementContext {
+    goal: String,
+    prompt: String,
+    cli_tool: String,
+    last_updated: tokio::time::Instant,
+}
+
 // ── HTML formatting helpers ──────────────────────────────────────────
 
 /// Escape text for safe inclusion in Telegram HTML messages.
@@ -257,6 +265,8 @@ struct TelegramState {
     last_request: Arc<Mutex<HashMap<i64, tokio::time::Instant>>>,
     /// Planning interviews keyed by chat id
     planning: Arc<Mutex<HashMap<i64, PlanningInterview>>>,
+    /// Pending implementation confirmations keyed by chat id
+    implementing: Arc<Mutex<HashMap<i64, ImplementContext>>>,
     system_info: SystemInfo,
 }
 
@@ -556,6 +566,77 @@ enum PlanningAction {
     Done,
 }
 
+// ── Implement command helpers ─────────────────────────────────────────
+
+fn build_implement_prompt(goal: &str, interview: Option<&PlanningInterview>) -> String {
+    let mut out = String::from("Implement the following step by step using the CLI coding tool.\n\n");
+    if let Some(iv) = interview {
+        if let Some(g) = &iv.goal {
+            out.push_str(&format!("Goal: {}\n", g));
+        } else {
+            out.push_str(&format!("Goal: {}\n", goal));
+        }
+        if let Some(c) = &iv.constraints {
+            out.push_str(&format!("Constraints: {}\n", c));
+        }
+        if let Some(t) = &iv.timeline {
+            out.push_str(&format!("Timeline: {}\n", t));
+        }
+        if let Some(s) = &iv.scope {
+            out.push_str(&format!("Scope: {}\n", s));
+        }
+    } else {
+        out.push_str(&format!("Goal: {}\n", goal));
+    }
+    out.push_str("\nInstructions:\n");
+    out.push_str("- Start with the first actionable item.\n");
+    out.push_str("- After completing each step, briefly report what was done.\n");
+    out.push_str("- Continue until the goal is fully implemented.\n");
+    out.push_str("- End with a summary of all changes made.\n");
+    out
+}
+
+fn implement_confirmation_html(goal: &str, cli_tool: &str, cli_model: &str) -> String {
+    let display_goal = match goal.char_indices().nth(200) {
+        Some((idx, _)) => &goal[..idx],
+        None => goal,
+    };
+    let model = if cli_model.is_empty() { "default" } else { cli_model };
+    format!(
+        "<b>Implement</b>\n\n<b>Goal:</b> {}\n<b>Tool:</b> {}\n<b>Model:</b> {}",
+        escape_html(display_goal),
+        escape_html(&cli_display_name(cli_tool)),
+        escape_html(model),
+    )
+}
+
+fn implement_keyboard(current_cli: &str) -> InlineKeyboardMarkup {
+    let cli_row: Vec<InlineKeyboardButton> = CLI_TOOLS
+        .iter()
+        .map(|(id, name)| {
+            let label = if *id == current_cli { format!("{} \u{2713}", name) } else { name.to_string() };
+            InlineKeyboardButton::callback(label, format!("impl:cli:{}", id))
+        })
+        .collect();
+    let action_row = vec![
+        InlineKeyboardButton::callback("Start", "impl:start:go"),
+        InlineKeyboardButton::callback("Cancel", "impl:start:cancel"),
+    ];
+    InlineKeyboardMarkup::new(vec![cli_row, action_row])
+}
+
+fn implement_report_followup(goal: &str, cli_tool: &str) -> (String, InlineKeyboardMarkup) {
+    let html = format!(
+        "<b>Implementation complete</b>\n\n<b>Goal:</b> {}\n<b>Tool used:</b> {}\n\nReview the output above.",
+        escape_html(goal),
+        escape_html(&cli_display_name(cli_tool)),
+    );
+    let kb = InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("Done", "impl:post:done"),
+    ]]);
+    (html, kb)
+}
+
 // ── CLI tool picker helpers ──────────────────────────────────────────
 
 const CLI_TOOLS: &[(&str, &str)] = &[
@@ -599,6 +680,7 @@ async fn command_help(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
 
         <b>Commands:</b>
         /plan — Start a planning interview
+        /implement <code>&lt;goal&gt;</code> — Implement with CLI tool
         /status — System status &amp; uptime
         /model — Show/switch LLM model
         /models — List available models from API
@@ -666,6 +748,39 @@ async fn command_plan(
     }
 
     send_planning_prompt(bot, chat_id, prompt, keyboard).await
+}
+
+async fn command_implement(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    let arg = text.strip_prefix("/implement").unwrap_or_default().trim();
+    if arg.is_empty() {
+        send_html(
+            bot, chat_id,
+            "<b>Usage:</b> <code>/implement &lt;goal&gt;</code>\n\nDescribe what you want to implement.",
+        ).await?;
+        return Ok(());
+    }
+
+    let cli_tool = state.handle.knobs.read().unwrap().cli_tool.clone();
+    let cli_model = state.handle.knobs.read().unwrap().cli_model.clone();
+    let prompt = build_implement_prompt(arg, None);
+
+    let ctx = ImplementContext {
+        goal: arg.to_string(),
+        prompt,
+        cli_tool: cli_tool.clone(),
+        last_updated: tokio::time::Instant::now(),
+    };
+    { state.implementing.lock().await.insert(chat_id.0, ctx); }
+
+    let html = implement_confirmation_html(arg, &cli_tool, &cli_model);
+    let kb = implement_keyboard(&cli_tool);
+    bot.send_message(chat_id, html).parse_mode(ParseMode::Html).reply_markup(kb).await?;
+    Ok(())
 }
 
 async fn command_ghosts(bot: &Bot, chat_id: ChatId, state: &TelegramState) -> ResponseResult<()> {
@@ -1095,6 +1210,10 @@ async fn handle_slash_commands(
     }
     if text == "/plan" || text.starts_with("/plan ") {
         command_plan(bot, chat_id, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/implement" || text.starts_with("/implement ") {
+        command_implement(bot, chat_id, text, state).await?;
         return Ok(true);
     }
     if text == "/ghosts" {
@@ -1667,6 +1786,41 @@ mod tests {
         assert!(is_done_text("perfect"));
         assert!(!is_done_text("keep going"));
     }
+
+    #[test]
+    fn build_implement_prompt_standalone() {
+        let prompt = super::build_implement_prompt("refactor auth", None);
+        assert!(prompt.contains("Goal: refactor auth"));
+        assert!(prompt.contains("Start with the first actionable item"));
+        assert!(!prompt.contains("Constraints:"));
+    }
+
+    #[test]
+    fn build_implement_prompt_with_plan() {
+        let iv = super::PlanningInterview {
+            step: super::PlanningStep::Refining,
+            goal: Some("launch MVP".to_string()),
+            constraints: Some("no budget".to_string()),
+            timeline: Some("this week".to_string()),
+            scope: Some("implementation".to_string()),
+            output: None,
+            depth: None,
+            last_updated: tokio::time::Instant::now(),
+        };
+        let prompt = super::build_implement_prompt("launch MVP", Some(&iv));
+        assert!(prompt.contains("Goal: launch MVP"));
+        assert!(prompt.contains("Constraints: no budget"));
+        assert!(prompt.contains("Timeline: this week"));
+        assert!(prompt.contains("Scope: implementation"));
+    }
+
+    #[test]
+    fn implement_confirmation_html_escapes() {
+        let html = super::implement_confirmation_html("fix <script>", "claude_code", "");
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("Claude Code"));
+        assert!(html.contains("default"));
+    }
 }
 
 // ── Message handler ──────────────────────────────────────────────────
@@ -1760,6 +1914,17 @@ async fn send_working_status(bot: &Bot, chat_id: ChatId) -> ResponseResult<Messa
 
 // ── Callback handler ─────────────────────────────────────────────────
 
+fn planning_prompt_output() -> PlanningAction {
+    PlanningAction::Prompt(
+        "What format do you want the plan in: checklist, spec, or draft?".to_string(),
+        Some(planning_output_keyboard()),
+    )
+}
+
+fn planning_prompt_summary(interview: &PlanningInterview) -> PlanningAction {
+    PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()))
+}
+
 /// Resolve a planning callback button press into an action (pure logic, no I/O).
 fn resolve_planning_callback(
     interview: &mut PlanningInterview,
@@ -1767,84 +1932,73 @@ fn resolve_planning_callback(
     value: &str,
     remove_chat: &mut bool,
 ) -> (PlanningAction, Option<String>) {
-    let mut action = PlanningAction::None;
-    let mut cb_text: Option<String> = None;
-
     interview.last_updated = tokio::time::Instant::now();
 
     if kind == "confirm" {
-        match value {
+        return match value {
             "yes" => {
                 let prompt = planning_build_prompt(interview);
                 interview.step = PlanningStep::Refining;
-                action = PlanningAction::Dispatch(prompt);
-                cb_text = Some("Confirmed".to_string());
+                (PlanningAction::Dispatch(prompt), Some("Confirmed".into()))
             }
             "edit" => {
                 interview.step = PlanningStep::Editing;
-                action = PlanningAction::Prompt(
-                    "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>".to_string(),
-                    None,
-                );
-                cb_text = Some("Edit mode".to_string());
+                (PlanningAction::Prompt(
+                    "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>".into(), None,
+                ), Some("Edit mode".into()))
             }
-            "cancel" => {
-                *remove_chat = true;
-                action = PlanningAction::Cancelled;
-                cb_text = Some("Cancelled".to_string());
-            }
-            _ => {}
-        }
-    } else if let Some(label) = planning_value_label(kind, value) {
-        match kind {
-            "depth" => interview.depth = Some(label.to_string()),
-            "timeline" => interview.timeline = Some(label.to_string()),
-            "scope" => interview.scope = Some(label.to_string()),
-            "constraints" => interview.constraints = Some(label.to_string()),
-            "output" => interview.output = Some(label.to_string()),
-            _ => {}
-        }
-        cb_text = Some(if kind == "constraints" {
-            "Constraints: none".to_string()
-        } else {
-            format!("{}: {}", kind.chars().next().unwrap().to_uppercase().collect::<String>() + &kind[1..], label)
-        });
-        match interview.step {
-            PlanningStep::Constraints if matches!(kind, "timeline" | "scope" | "constraints") => {
-                interview.step = PlanningStep::Output;
-                action = PlanningAction::Prompt(
-                    "What format do you want the plan in: checklist, spec, or draft?".to_string(),
-                    Some(planning_output_keyboard()),
-                );
-            }
-            PlanningStep::Output if kind == "output" => {
-                interview.step = PlanningStep::Summary;
-                action = PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-            }
-            _ => {}
-        }
-    } else if kind == "skip" {
-        match value {
-            "constraints" => {
-                interview.constraints = Some("none".to_string());
-                interview.step = PlanningStep::Output;
-                action = PlanningAction::Prompt(
-                    "What format do you want the plan in: checklist, spec, or draft?".to_string(),
-                    Some(planning_output_keyboard()),
-                );
-                cb_text = Some("Skipped constraints".to_string());
-            }
-            "output" => {
-                interview.output = Some("checklist".to_string());
-                interview.step = PlanningStep::Summary;
-                action = PlanningAction::Prompt(planning_summary_html(interview), Some(planning_confirm_keyboard()));
-                cb_text = Some("Using checklist format".to_string());
-            }
-            _ => {}
-        }
+            "cancel" => { *remove_chat = true; (PlanningAction::Cancelled, Some("Cancelled".into())) }
+            _ => (PlanningAction::None, None),
+        };
     }
 
-    (action, cb_text)
+    if kind == "skip" {
+        return match value {
+            "constraints" => {
+                interview.constraints = Some("none".into());
+                interview.step = PlanningStep::Output;
+                (planning_prompt_output(), Some("Skipped constraints".into()))
+            }
+            "output" => {
+                interview.output = Some("checklist".into());
+                interview.step = PlanningStep::Summary;
+                (planning_prompt_summary(interview), Some("Using checklist format".into()))
+            }
+            _ => (PlanningAction::None, None),
+        };
+    }
+
+    let Some(label) = planning_value_label(kind, value) else {
+        return (PlanningAction::None, None);
+    };
+    match kind {
+        "depth" => interview.depth = Some(label.into()),
+        "timeline" => interview.timeline = Some(label.into()),
+        "scope" => interview.scope = Some(label.into()),
+        "constraints" => interview.constraints = Some(label.into()),
+        "output" => interview.output = Some(label.into()),
+        _ => {}
+    }
+    let cb = format!("{}{}: {}", kind[..1].to_uppercase(), &kind[1..], label);
+    let action = match interview.step {
+        PlanningStep::Constraints if matches!(kind, "timeline" | "scope" | "constraints") => {
+            let has_all = interview.timeline.is_some()
+                && interview.scope.is_some()
+                && interview.constraints.is_some();
+            if has_all {
+                interview.step = PlanningStep::Output;
+                planning_prompt_output()
+            } else {
+                PlanningAction::None
+            }
+        }
+        PlanningStep::Output if kind == "output" => {
+            interview.step = PlanningStep::Summary;
+            planning_prompt_summary(interview)
+        }
+        _ => PlanningAction::None,
+    };
+    (action, Some(cb))
 }
 
 /// Handle "plan:<kind>:<value>" callback queries.
@@ -1896,14 +2050,22 @@ async fn handle_plan_post_callback(
     let chat_id = q.message.as_ref().map(|m| m.chat().id).unwrap_or(ChatId(0));
     match value {
         "implement" => {
-            bot.answer_callback_query(&q.id).text("Starting implementation").await?;
-            { state.planning.lock().await.remove(&chat_id.0); }
-            let session = telegram_session_from_user(q.from.id.0.to_string(), chat_id);
-            dispatch_to_core(
-                bot.clone(), chat_id, state.clone(), session,
-                "Implement the plan above step by step. Start with the first actionable item.".to_string(),
-                "<i>Status: Implementing plan…</i>",
-            ).await?;
+            bot.answer_callback_query(&q.id).text("Preparing implementation").await?;
+            let interview = { state.planning.lock().await.remove(&chat_id.0) };
+            let goal = interview.as_ref().and_then(|iv| iv.goal.clone()).unwrap_or_default();
+            let prompt = build_implement_prompt(&goal, interview.as_ref());
+            let cli_tool = state.handle.knobs.read().unwrap().cli_tool.clone();
+            let cli_model = state.handle.knobs.read().unwrap().cli_model.clone();
+            let ctx = ImplementContext {
+                goal: goal.clone(),
+                prompt,
+                cli_tool: cli_tool.clone(),
+                last_updated: tokio::time::Instant::now(),
+            };
+            { state.implementing.lock().await.insert(chat_id.0, ctx); }
+            let html = implement_confirmation_html(&goal, &cli_tool, &cli_model);
+            let kb = implement_keyboard(&cli_tool);
+            bot.send_message(chat_id, html).parse_mode(ParseMode::Html).reply_markup(kb).await?;
         }
         "refine" => {
             bot.answer_callback_query(&q.id).text("Send your refinements").await?;
@@ -1950,6 +2112,68 @@ async fn execute_planning_action(
     Ok(())
 }
 
+/// Handle "impl:<kind>:<value>" callback queries for the /implement flow.
+async fn handle_implement_callback(
+    bot: &Bot,
+    q: &CallbackQuery,
+    state: &TelegramState,
+    kind: &str,
+    value: &str,
+) -> ResponseResult<()> {
+    let chat_id = q.message.as_ref().map(|m| m.chat().id).unwrap_or(ChatId(0));
+
+    if kind == "cli" {
+        // Update CLI tool selection
+        let mut implementing = state.implementing.lock().await;
+        let Some(ctx) = implementing.get_mut(&chat_id.0) else {
+            bot.answer_callback_query(&q.id).text("Session expired.").await?;
+            return Ok(());
+        };
+        ctx.cli_tool = value.to_string();
+        ctx.last_updated = tokio::time::Instant::now();
+        let cli_model = state.handle.knobs.read().unwrap().cli_model.clone();
+        let html = implement_confirmation_html(&ctx.goal, value, &cli_model);
+        let kb = implement_keyboard(value);
+        drop(implementing);
+
+        // Update the knob
+        { let mut k = state.handle.knobs.write().unwrap(); let _ = k.set("cli_tool", value); }
+
+        // Edit the original message
+        if let Some(msg) = &q.message {
+            if let Some(regular) = msg.regular_message() {
+                let _ = bot.edit_message_text(regular.chat.id, regular.id, &html)
+                    .parse_mode(ParseMode::Html).reply_markup(kb).await;
+            }
+        }
+        bot.answer_callback_query(&q.id).text(format!("Tool: {}", cli_display_name(value))).await?;
+    } else if kind == "start" && value == "go" {
+        let ctx = { state.implementing.lock().await.remove(&chat_id.0) };
+        let Some(ctx) = ctx else {
+            bot.answer_callback_query(&q.id).text("Session expired.").await?;
+            return Ok(());
+        };
+        bot.answer_callback_query(&q.id).text("Starting implementation").await?;
+        { let mut k = state.handle.knobs.write().unwrap(); let _ = k.set("cli_tool", &ctx.cli_tool); }
+        let (report_html, report_kb) = implement_report_followup(&ctx.goal, &ctx.cli_tool);
+        let session = telegram_session_from_user(q.from.id.0.to_string(), chat_id);
+        dispatch_to_core_with_followup(
+            bot.clone(), chat_id, state.clone(), session, ctx.prompt,
+            "<i>Status: Implementing…</i>",
+            Some((report_html, report_kb)),
+        ).await?;
+    } else if kind == "start" && value == "cancel" {
+        { state.implementing.lock().await.remove(&chat_id.0); }
+        bot.answer_callback_query(&q.id).text("Cancelled").await?;
+        send_html(bot, chat_id, "<i>Implementation cancelled.</i>").await?;
+    } else if kind == "post" && value == "done" {
+        bot.answer_callback_query(&q.id).text("Done").await?;
+    } else {
+        bot.answer_callback_query(&q.id).await?;
+    }
+    Ok(())
+}
+
 /// Handle callback queries (confirmation button presses).
 async fn handle_callback(bot: Bot, q: CallbackQuery, state: TelegramState) -> ResponseResult<()> {
     let data = match &q.data {
@@ -1986,6 +2210,11 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: TelegramState) -> Re
             Err(e) => { bot.answer_callback_query(&q.id).text(e).await?; }
         }
         return Ok(());
+    }
+
+    // Handle "impl:<kind>:<value>" callbacks
+    if parts.len() == 3 && parts[0] == "impl" {
+        return handle_implement_callback(&bot, &q, &state, parts[1], parts[2]).await;
     }
 
     // Handle "plan:<kind>:<value>" callbacks
@@ -2066,6 +2295,7 @@ pub async fn run_telegram(
         Arc::new(Mutex::new(HashMap::new()));
 
     let planning: Arc<Mutex<HashMap<i64, PlanningInterview>>> = Arc::new(Mutex::new(HashMap::new()));
+    let implementing: Arc<Mutex<HashMap<i64, ImplementContext>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Spawn stale confirmation cleanup task
     let cleanup_pending = pending.clone();
@@ -2087,17 +2317,26 @@ pub async fn run_telegram(
         }
     });
 
-    // Spawn stale planning cleanup task
+    // Spawn stale planning + implementing cleanup task
     let cleanup_planning = planning.clone();
+    let cleanup_implementing = implementing.clone();
     let planning_timeout = tokio::time::Duration::from_secs(config.planning_timeout_secs);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
             let now = tokio::time::Instant::now();
-            let mut map = cleanup_planning.lock().await;
-            if !map.is_empty() {
-                map.retain(|_, interview| now.duration_since(interview.last_updated) < planning_timeout);
+            {
+                let mut map = cleanup_planning.lock().await;
+                if !map.is_empty() {
+                    map.retain(|_, interview| now.duration_since(interview.last_updated) < planning_timeout);
+                }
+            }
+            {
+                let mut map = cleanup_implementing.lock().await;
+                if !map.is_empty() {
+                    map.retain(|_, ctx| now.duration_since(ctx.last_updated) < planning_timeout);
+                }
             }
         }
     });
@@ -2108,6 +2347,7 @@ pub async fn run_telegram(
         config,
         last_request,
         planning,
+        implementing,
         system_info,
     };
 
@@ -2115,6 +2355,7 @@ pub async fn run_telegram(
     let commands = vec![
         BotCommand::new("help", "Show available commands"),
         BotCommand::new("plan", "Start a planning interview"),
+        BotCommand::new("implement", "Implement a goal with CLI tool"),
         BotCommand::new("status", "System status & uptime"),
         BotCommand::new("model", "Show/switch LLM model"),
         BotCommand::new("models", "List available models"),
