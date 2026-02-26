@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::error::{AthenaError, Result};
-use crate::llm::{LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig};
+use crate::llm::{LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig, OuathClient};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -12,6 +12,8 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub ollama: OllamaConfig,
+    #[serde(default)]
+    pub ouath: Option<OuathConfig>,
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
     #[serde(default)]
@@ -64,6 +66,84 @@ impl Default for LlmConfig {
 
 fn default_provider() -> String {
     "ollama".into()
+}
+
+#[derive(Deserialize, Clone)]
+pub struct OuathConfig {
+    #[serde(default = "default_ouath_url")]
+    pub url: String,
+    /// Optional API style override: "responses" or "chat_completions".
+    pub api_style: Option<String>,
+    #[serde(default = "default_ouath_model")]
+    pub model: String,
+    pub classifier_model: Option<String>,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    #[serde(default = "default_ouath_auth_file")]
+    pub auth_file: String,
+    /// Override the OAuth redirect URI (default: http://localhost:1455/auth/callback)
+    pub redirect_uri: Option<String>,
+    /// Optional reasoning effort for responses API (e.g., "low", "medium", "high")
+    pub reasoning_effort: Option<String>,
+    /// Optional reasoning summary behavior for responses API (e.g., "auto")
+    pub reasoning_summary: Option<String>,
+    /// Optional include fields for responses API (e.g., ["reasoning.encrypted_content"])
+    #[serde(default)]
+    pub include: Vec<String>,
+}
+
+impl std::fmt::Debug for OuathConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OuathConfig")
+            .field("url", &self.url)
+            .field("api_style", &self.api_style)
+            .field("model", &self.model)
+            .field("classifier_model", &self.classifier_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
+            .field("auth_file", &self.auth_file)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning_summary", &self.reasoning_summary)
+            .field("include", &self.include)
+            .finish()
+    }
+}
+
+fn default_ouath_url() -> String {
+    "https://chatgpt.com/backend-api/codex".into()
+}
+
+fn default_ouath_model() -> String {
+    "gpt-5.3-codex".into()
+}
+
+fn default_ouath_auth_file() -> String {
+    "~/.athena/ouath.json".into()
+}
+
+impl Default for OuathConfig {
+    fn default() -> Self {
+        Self {
+            url: default_ouath_url(),
+            api_style: None,
+            model: default_ouath_model(),
+            classifier_model: None,
+            temperature: default_temperature(),
+            max_tokens: default_max_tokens(),
+            context_window: default_context_window(),
+            auth_file: default_ouath_auth_file(),
+            redirect_uri: None,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            include: Vec::new(),
+        }
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -139,6 +219,8 @@ fn default_zen_url() -> String {
 pub struct TelegramConfig {
     /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
     pub token: Option<String>,
+    /// Optional LLM provider override for Telegram (default: "ouath")
+    pub provider: Option<String>,
     /// Allowed chat IDs (empty = deny all unless allow_all = true)
     #[serde(default)]
     pub allowed_chats: Vec<i64>,
@@ -160,6 +242,7 @@ impl std::fmt::Debug for TelegramConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelegramConfig")
             .field("token", &"[REDACTED]")
+            .field("provider", &self.provider)
             .field("allowed_chats", &self.allowed_chats)
             .field("allow_all", &self.allow_all)
             .field("confirm_timeout_secs", &self.confirm_timeout_secs)
@@ -174,6 +257,7 @@ impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
             token: None,
+            provider: None,
             allowed_chats: vec![],
             allow_all: false,
             confirm_timeout_secs: default_confirm_timeout(),
@@ -658,6 +742,7 @@ impl Default for Config {
         Self {
             llm: LlmConfig::default(),
             ollama: OllamaConfig::default(),
+            ouath: Some(OuathConfig::default()),
             openrouter: None,
             zen: None,
             docker: DockerConfig::default(),
@@ -851,7 +936,7 @@ impl Config {
     /// Ordered provider candidates: configured provider first, then common fallbacks.
     pub fn provider_candidates(&self) -> Vec<String> {
         let mut out = vec![self.llm.provider.clone()];
-        for p in ["openrouter", "zen", "ollama"] {
+        for p in ["ouath", "openrouter", "zen", "ollama"] {
             if !out.iter().any(|x| x == p) {
                 out.push(p.to_string());
             }
@@ -863,6 +948,10 @@ impl Config {
     pub fn build_llm_provider_for(&self, provider: &str) -> Result<Arc<dyn LlmProvider>> {
         match provider {
             "ollama" => Ok(Arc::new(OllamaClient::new(self.ollama.clone()))),
+            "ouath" => {
+                let cfg = self.ouath.clone().unwrap_or_default();
+                Ok(Arc::new(OuathClient::new(cfg)))
+            }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
                     AthenaError::Config(
@@ -944,6 +1033,17 @@ impl Config {
                 }
                 None => Ok(fallback.clone()),
             },
+            "ouath" => {
+                let cfg = self.ouath.clone().unwrap_or_default();
+                match &cfg.classifier_model {
+                    Some(model) => {
+                        let mut cloned = cfg.clone();
+                        cloned.model = model.clone();
+                        Ok(Arc::new(OuathClient::new(cloned)))
+                    }
+                    None => Ok(fallback.clone()),
+                }
+            }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
                     AthenaError::Config(
