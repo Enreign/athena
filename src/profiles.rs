@@ -24,10 +24,27 @@ fn default_strategy() -> String {
     "react".into()
 }
 
+fn home_profile_loading_disabled() -> bool {
+    std::env::var("ATHENA_DISABLE_HOME_PROFILES")
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Load ghosts from config + ~/.athena/ghosts/*.toml profile directory.
 /// Profile ghosts override config ghosts with the same name.
 pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let mut ghosts: Vec<GhostConfig> = config.ghosts.clone();
+
+    if home_profile_loading_disabled() {
+        tracing::info!("Home ghost profiles disabled via ATHENA_DISABLE_HOME_PROFILES");
+        return Ok(ghosts);
+    }
 
     let profile_dir = match dirs::home_dir() {
         Some(h) => h.join(".athena").join("ghosts"),

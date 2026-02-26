@@ -21,4 +21,6 @@ jobs:
         run: cargo build --quiet --bin athena
 
       - name: Run doctor guard
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- doctor --skip-llm --ci
