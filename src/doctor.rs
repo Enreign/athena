@@ -272,7 +272,7 @@ fn credentials_hygiene_check(snap: &DoctorSnapshot) -> CheckItem {
             )
         },
         fix: (!snap.inline_secret_labels.is_empty()).then(|| {
-            "Move secrets out of config.toml into env vars or a local secret manager (Vaultwarden/Bitwarden CLI).".to_string()
+            "Move secrets out of config.toml into env vars or your preferred secret manager.".to_string()
         }),
     }
 }
