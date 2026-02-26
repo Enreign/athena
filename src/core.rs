@@ -199,10 +199,8 @@ struct CoreRuntimeHandles {
 
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
-        let (llm, selected_provider) = connect_main_llm(&config).await?;
+        let (llm, orchestrator, embedder) = init_llm_stack(&config).await?;
         let llm_for_handle = llm.clone();
-        let orchestrator = connect_orchestrator(&config, &selected_provider, &llm).await?;
-        let embedder = init_embedder_opt(&config).await;
 
         spawn_embedding_backfill(memory.clone(), embedder.clone());
 
@@ -238,22 +236,21 @@ impl AthenaCore {
         );
         let persona_soul_for_reentry = config.persona.soul.clone();
 
-        let (tx, rx) = mpsc::channel::<CoreRequest>(32);
-        spawn_core_event_loop(
+        let (tx, rx) = init_core_channel();
+
+        let llm_for_reentry = manager.llm_ref();
+        spawn_core_loops(
             rx,
-            manager.clone(),
+            manager,
+            auto_rx,
             activity.clone(),
             knobs.clone(),
             observer.clone(),
-            memory.clone(),
-            persona_soul_for_reentry,
-        );
-        spawn_autonomous_task_consumer(
-            auto_rx,
-            manager,
-            observer.clone(),
             pulse_bus.clone(),
             memory.clone(),
+            llm_for_reentry,
+            persona_soul_for_reentry,
+            langfuse.clone(),
             outcome_store,
         );
 
@@ -273,6 +270,53 @@ impl AthenaCore {
             metrics,
         })
     }
+}
+
+async fn init_llm_stack(
+    config: &Config,
+) -> Result<(Arc<dyn LlmProvider>, Arc<dyn LlmProvider>, Option<Arc<Embedder>>)> {
+    let (llm, selected_provider) = connect_main_llm(config).await?;
+    let orchestrator = connect_orchestrator(config, &selected_provider, &llm).await?;
+    let embedder = init_embedder_opt(config).await;
+    Ok((llm, orchestrator, embedder))
+}
+
+fn init_core_channel() -> (mpsc::Sender<CoreRequest>, mpsc::Receiver<CoreRequest>) {
+    mpsc::channel::<CoreRequest>(32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_core_loops(
+    rx: mpsc::Receiver<CoreRequest>,
+    manager: Arc<Manager>,
+    auto_rx: mpsc::Receiver<AutonomousTask>,
+    activity: Arc<ActivityTracker>,
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    pulse_bus: PulseBus,
+    memory: Arc<MemoryStore>,
+    _llm_for_reentry: Arc<dyn LlmProvider>,
+    persona_soul_for_reentry: Option<String>,
+    _langfuse: SharedLangfuse,
+    outcome_store: Arc<TaskOutcomeStore>,
+) {
+    spawn_core_event_loop(
+        rx,
+        manager.clone(),
+        activity,
+        knobs,
+        observer.clone(),
+        memory.clone(),
+        persona_soul_for_reentry,
+    );
+    spawn_autonomous_task_consumer(
+        auto_rx,
+        manager,
+        observer,
+        pulse_bus,
+        memory,
+        outcome_store,
+    );
 }
 
 fn init_runtime_handles(
@@ -824,6 +868,15 @@ fn handle_autonomous_task_success(
         truncate_obs(&result, 200),
     );
     let _ = memory.store("code_change", &outcome, None);
+    if let Some(signature) = extract_health_alert_signature(&task.context) {
+        let fix_note = format!(
+            "{} | {} | {}",
+            signature,
+            goal_summary,
+            truncate_obs(&result, 200)
+        );
+        let _ = memory.store("health_fix", &fix_note, None);
+    }
 
     let pulse = Pulse::new(
         crate::pulse::PulseSource::AutonomousTask,
@@ -936,6 +989,14 @@ fn auto_store_task_result(
             );
         }
     }
+}
+
+fn extract_health_alert_signature(context: &str) -> Option<String> {
+    let marker = "health_alert_signature=";
+    context
+        .lines()
+        .find_map(|line| line.strip_prefix(marker).map(|v| v.trim().to_string()))
+        .filter(|v| !v.is_empty())
 }
 
 fn failure_category(goal_summary: &str) -> &'static str {

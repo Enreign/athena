@@ -111,6 +111,10 @@ enabled = true
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
 confirm_timeout_secs = 300
+# Planning interview flow
+planning_enabled = true
+planning_auto = true
+planning_timeout_secs = 900
 
 [github]
 # token = "ghp_..."  # discouraged; prefer GH_TOKEN env var or .env
