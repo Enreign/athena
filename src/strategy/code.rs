@@ -235,6 +235,12 @@ impl CodeStrategy {
             let Some(fix_contract) =
                 crate::self_heal::attempt_test_fix(&summary, &contract.goal)
             else {
+                // No test failures detected. If a previous attempt already
+                // applied a fix, return the current (now-passing) summary so
+                // the caller uses the post-fix result instead of the original.
+                if attempt > 0 {
+                    return Ok(Some(summary));
+                }
                 return Ok(None);
             };
 
