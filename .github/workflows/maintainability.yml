@@ -33,7 +33,7 @@ jobs:
         run: cargo test -q --features telegram
 
       - name: Doctor guard
-        run: cargo run --quiet -- doctor --skip-llm --ci
+        run: cargo run --quiet -- doctor --skip-llm
 
       - name: Maintainability regression check
         run: |
