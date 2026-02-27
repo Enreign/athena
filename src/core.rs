@@ -199,7 +199,7 @@ struct CoreRuntimeHandles {
 
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
-        let (llm, orchestrator, embedder) = init_llm_stack(&config).await?;
+        let (llm, fast, orchestrator, embedder) = init_llm_stack(&config).await?;
         let llm_for_handle = llm.clone();
 
         spawn_embedding_backfill(memory.clone(), embedder.clone());
@@ -224,6 +224,7 @@ impl AthenaCore {
             &config,
             merged_ghosts,
             llm,
+            fast,
             orchestrator,
             memory.clone(),
             embedder,
@@ -274,11 +275,12 @@ impl AthenaCore {
 
 async fn init_llm_stack(
     config: &Config,
-) -> Result<(Arc<dyn LlmProvider>, Arc<dyn LlmProvider>, Option<Arc<Embedder>>)> {
+) -> Result<(Arc<dyn LlmProvider>, Arc<dyn LlmProvider>, Arc<dyn LlmProvider>, Option<Arc<Embedder>>)> {
     let (llm, selected_provider) = connect_main_llm(config).await?;
     let orchestrator = connect_orchestrator(config, &selected_provider, &llm).await?;
+    let fast = connect_fast(config, &selected_provider, &llm).await?;
     let embedder = init_embedder_opt(config).await;
-    Ok((llm, orchestrator, embedder))
+    Ok((llm, fast, orchestrator, embedder))
 }
 
 fn init_core_channel() -> (mpsc::Sender<CoreRequest>, mpsc::Receiver<CoreRequest>) {
@@ -550,6 +552,7 @@ fn build_manager(
     config: &Config,
     merged_ghosts: Vec<GhostConfig>,
     llm: Arc<dyn LlmProvider>,
+    fast: Arc<dyn LlmProvider>,
     orchestrator: Arc<dyn LlmProvider>,
     memory: Arc<MemoryStore>,
     embedder: Option<Arc<Embedder>>,
@@ -564,6 +567,7 @@ fn build_manager(
         config,
         merged_ghosts,
         llm,
+        fast,
         orchestrator,
         memory,
         embedder,
@@ -1079,6 +1083,33 @@ async fn connect_orchestrator(
             tracing::warn!(
                 error = %e,
                 "Orchestrator provider unreachable, falling back to main provider"
+            );
+            Ok(llm.clone())
+        }
+    }
+}
+
+async fn connect_fast(
+    config: &Config,
+    selected_provider: &str,
+    llm: &Arc<dyn LlmProvider>,
+) -> Result<Arc<dyn LlmProvider>> {
+    let fast = config.build_fast_provider_for(selected_provider, llm)?;
+    if fast.provider_name() == llm.provider_name() && fast.current_model() == llm.current_model() {
+        return Ok(fast);
+    }
+
+    eprint!("Connecting to {} (fast)... ", fast.provider_name());
+    match fast.health_check().await {
+        Ok(()) => {
+            eprintln!("ok");
+            Ok(fast)
+        }
+        Err(e) => {
+            eprintln!("failed: {}", e);
+            tracing::warn!(
+                error = %e,
+                "Fast provider unreachable, falling back to main provider"
             );
             Ok(llm.clone())
         }

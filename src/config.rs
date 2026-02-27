@@ -79,6 +79,7 @@ pub struct OuathConfig {
     #[serde(default = "default_ouath_model")]
     pub model: String,
     pub classifier_model: Option<String>,
+    pub fast_model: Option<String>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
@@ -105,6 +106,7 @@ impl std::fmt::Debug for OuathConfig {
             .field("api_style", &self.api_style)
             .field("model", &self.model)
             .field("classifier_model", &self.classifier_model)
+            .field("fast_model", &self.fast_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
@@ -136,6 +138,7 @@ impl Default for OuathConfig {
             api_style: None,
             model: default_ouath_model(),
             classifier_model: None,
+            fast_model: None,
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
             context_window: default_context_window(),
@@ -155,6 +158,7 @@ pub struct OpenRouterConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub classifier_model: Option<String>,
+    pub fast_model: Option<String>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
@@ -170,6 +174,7 @@ impl std::fmt::Debug for OpenRouterConfig {
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
             .field("classifier_model", &self.classifier_model)
+            .field("fast_model", &self.fast_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
@@ -191,6 +196,7 @@ pub struct ZenConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub classifier_model: Option<String>,
+    pub fast_model: Option<String>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
@@ -206,6 +212,7 @@ impl std::fmt::Debug for ZenConfig {
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
             .field("classifier_model", &self.classifier_model)
+            .field("fast_model", &self.fast_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
             .field("context_window", &self.context_window)
@@ -557,6 +564,7 @@ pub struct OllamaConfig {
     #[serde(default = "default_model")]
     pub model: String,
     pub classifier_model: Option<String>,
+    pub fast_model: Option<String>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
@@ -710,6 +718,7 @@ impl Default for OllamaConfig {
             url: default_ollama_url(),
             model: default_model(),
             classifier_model: None,
+            fast_model: None,
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
         }
@@ -1211,6 +1220,110 @@ impl Config {
         fallback: &Arc<dyn LlmProvider>,
     ) -> Result<Arc<dyn LlmProvider>> {
         self.build_orchestrator_provider_for(self.llm.provider.as_str(), fallback)
+    }
+
+    /// Build a fast/lightweight LLM provider for an explicit provider name.
+    /// Used for low-complexity ghost tasks (read-only scouts, simple Q&A, summaries).
+    /// Falls back to `fallback` if no `fast_model` is configured.
+    pub fn build_fast_provider_for(
+        &self,
+        provider: &str,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        match provider {
+            "ollama" => match &self.ollama.fast_model {
+                Some(model) => {
+                    let mut cfg = self.ollama.clone();
+                    cfg.model = model.clone();
+                    Ok(Arc::new(OllamaClient::new(cfg)))
+                }
+                None => Ok(fallback.clone()),
+            },
+            "ouath" => {
+                let cfg = self.ouath.clone().unwrap_or_default();
+                match &cfg.fast_model {
+                    Some(model) => {
+                        let mut cloned = cfg.clone();
+                        cloned.model = model.clone();
+                        Ok(Arc::new(OuathClient::new(cloned)))
+                    }
+                    None => Ok(fallback.clone()),
+                }
+            }
+            "openrouter" => {
+                let cfg = self.openrouter.as_ref().ok_or_else(|| {
+                    AthenaError::Config(
+                        "provider = \"openrouter\" but [openrouter] section is missing".into(),
+                    )
+                })?;
+                match &cfg.fast_model {
+                    Some(model) => {
+                        let api_key = cfg
+                            .api_key
+                            .clone()
+                            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+                            .ok_or_else(|| {
+                                AthenaError::Config(
+                                    "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)"
+                                        .into(),
+                                )
+                            })?;
+                        Ok(Arc::new(OpenAiCompatibleClient::new(
+                            OpenAiCompatibleConfig {
+                                url: cfg.url.clone(),
+                                api_key,
+                                model: model.clone(),
+                                temperature: cfg.temperature,
+                                max_tokens: cfg.max_tokens,
+                                context_window: cfg.context_window,
+                            },
+                            "OpenRouter/fast",
+                        )))
+                    }
+                    None => Ok(fallback.clone()),
+                }
+            }
+            "zen" => {
+                let cfg = self.zen.as_ref().ok_or_else(|| {
+                    AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
+                })?;
+                match &cfg.fast_model {
+                    Some(model) => {
+                        let api_key = cfg
+                            .api_key
+                            .clone()
+                            .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
+                            .ok_or_else(|| {
+                                AthenaError::Config(
+                                    "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)"
+                                        .into(),
+                                )
+                            })?;
+                        Ok(Arc::new(OpenAiCompatibleClient::new(
+                            OpenAiCompatibleConfig {
+                                url: cfg.url.clone(),
+                                api_key,
+                                model: model.clone(),
+                                temperature: cfg.temperature,
+                                max_tokens: cfg.max_tokens,
+                                context_window: cfg.context_window,
+                            },
+                            "Zen/fast",
+                        )))
+                    }
+                    None => Ok(fallback.clone()),
+                }
+            }
+            _ => Ok(fallback.clone()),
+        }
+    }
+
+    /// Build the fast LLM provider (falls back to main provider if no fast_model set)
+    pub fn build_fast_provider(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        self.build_fast_provider_for(self.llm.provider.as_str(), fallback)
     }
 
     /// Resolve the db path, expanding ~ to home dir

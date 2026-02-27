@@ -11,6 +11,7 @@ provider = "ouath"
 # api_style = "responses"             # or "chat_completions"
 # model = "gpt-5.3-codex"
 # classifier_model = "gpt-5.3-codex"  # optional, defaults to model
+# fast_model = "gpt-5.3-codex-mini"   # optional lightweight model for scouts/simple tasks
 # auth_file = "~/.athena/ouath.json"
 # redirect_uri = "http://localhost:1455/auth/callback"
 # reasoning_effort = "medium"
@@ -23,6 +24,7 @@ provider = "ouath"
 url = "http://localhost:11434"
 model = "qwen2.5:7b"
 classifier_model = "qwen2.5:3b"    # lighter model for routing decisions
+# fast_model = "qwen2.5:3b"        # lightweight model for scouts/simple tasks (defaults to model)
 temperature = 0.3
 max_tokens = 4096
 
@@ -30,6 +32,7 @@ max_tokens = 4096
 # [openrouter]
 # model = "google/gemini-2.5-flash"                # ghost/ReAct loop
 # classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
+# fast_model = "google/gemini-2.5-flash-lite"      # scouts/simple tasks (optional, defaults to model)
 # url = "https://openrouter.ai/api/v1"
 # api_key = ""
 # temperature = 0.3
@@ -39,6 +42,7 @@ max_tokens = 4096
 # [zen]
 # model = "zen-v1"
 # classifier_model = "zen-v1-mini"  # optional, defaults to model
+# fast_model = "zen-v1-mini"        # scouts/simple tasks (optional, defaults to model)
 # url = "https://opencode.ai/zen/v1"
 # api_key = ""
 # temperature = 0.3

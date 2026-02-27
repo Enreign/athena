@@ -38,8 +38,18 @@ fn compact_context_line(input: &str, max_chars: usize) -> String {
         .to_string()
 }
 
+/// Model tier for routing tasks to appropriate LLM providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    /// Standard model for complex coding, multi-file changes, deep reasoning.
+    Standard,
+    /// Fast/lightweight model for read-only scouts, summaries, simple Q&A.
+    Fast,
+}
+
 pub struct Manager {
     llm: Arc<dyn LlmProvider>,
+    fast: Arc<dyn LlmProvider>,
     orchestrator: Arc<dyn LlmProvider>,
     executor: Executor,
     ghosts: Vec<GhostConfig>,
@@ -69,6 +79,7 @@ impl Manager {
         config: &Config,
         ghosts: Vec<GhostConfig>,
         llm: Arc<dyn LlmProvider>,
+        fast: Arc<dyn LlmProvider>,
         orchestrator: Arc<dyn LlmProvider>,
         memory: Arc<MemoryStore>,
         embedder: Option<Arc<Embedder>>,
@@ -131,6 +142,7 @@ impl Manager {
 
         Self {
             llm,
+            fast,
             orchestrator,
             executor,
             ghosts,
@@ -153,6 +165,19 @@ impl Manager {
     /// Expose a clonable reference to the LLM provider (for reentry scheduling).
     pub fn llm_ref(&self) -> Arc<dyn LlmProvider> {
         self.llm.clone()
+    }
+
+    /// Expose a clonable reference to the fast/lightweight LLM provider.
+    pub fn fast_llm_ref(&self) -> Arc<dyn LlmProvider> {
+        self.fast.clone()
+    }
+
+    /// Select the LLM provider for the given model tier.
+    fn llm_for_tier(&self, tier: ModelTier) -> &dyn LlmProvider {
+        match tier {
+            ModelTier::Standard => &*self.llm,
+            ModelTier::Fast => &*self.fast,
+        }
     }
 
     /// Expose cloneable handle to direct_tools (for hot-reload watcher).
@@ -404,6 +429,7 @@ impl Manager {
                 ghost_name,
                 goal,
                 context,
+                model_tier,
             } => {
                 let ghost = self
                     .ghosts
@@ -411,7 +437,11 @@ impl Manager {
                     .find(|g| g.name == ghost_name)
                     .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
 
-                eprintln!("Delegating to ghost: {}", ghost.name);
+                let tier_label = match model_tier {
+                    ModelTier::Fast => " (fast)",
+                    ModelTier::Standard => "",
+                };
+                eprintln!("Delegating to ghost: {}{}", ghost.name, tier_label);
 
                 let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
                 let is_self_dev = ghost_name == "coder" || goal.to_lowercase().contains("refactor");
@@ -438,12 +468,13 @@ impl Manager {
                 let ghost_span = lf_trace
                     .as_ref()
                     .map(|t| t.span(&format!("ghost:{}", ghost.name), Some(&contract.goal)));
+                let routed_llm = self.llm_for_tier(model_tier);
                 let result = self
                     .executor
                     .run(
                         &contract,
                         ghost,
-                        &*self.llm,
+                        routed_llm,
                         confirmer,
                         status_tx,
                         lf_trace.as_ref(),
@@ -714,11 +745,16 @@ CRITICAL RULES — VIOLATION WILL CAUSE ERRORS:
 - When classifying as COMPLEX, put the full task description (including any plan the user provided)
   into the "goal" field so the ghost has complete context.
 
+MODEL TIER (for complex tasks only):
+- "standard" — code generation, multi-file changes, deep reasoning, refactoring (default)
+- "fast" — read-only exploration, file listing, simple analysis, summaries
+Include "model_tier" in complex JSON when "fast" is appropriate. Omit for standard (default).
+
 Respond with ONLY one of these JSON formats (no other text):
 - Simple: {{"type": "simple", "answer": "your direct answer (in character, using user profile context)"}}
 - Direct (single): {{"type": "direct", "tool": "<tool_name>", "params": {{...}}}}
 - Direct (multi):  {{"type": "direct", "steps": [{{"tool": "<tool_name>", "params": {{...}}}}, ...]}}
-- Complex: {{"type": "complex", "ghost": "<ghost_name>", "goal": "<clear goal for ghost>", "context": "<relevant context>"}}
+- Complex: {{"type": "complex", "ghost": "<ghost_name>", "goal": "<clear goal for ghost>", "context": "<relevant context>", "model_tier": "standard|fast"}}
 
 DIRECT EXAMPLES (note: params must have COMPLETE arguments):
 - "git status"       → {{"type": "direct", "tool": "git", "params": {{"subcommand": "status"}}}}
@@ -814,6 +850,7 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             goal: user_input.to_string(),
             context: "Classifier attempted direct execution but tool validation failed."
                 .to_string(),
+            model_tier: ModelTier::Standard,
         })
     }
 
@@ -830,10 +867,12 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 .to_string();
             let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
             let context = json["context"].as_str().unwrap_or("").to_string();
+            let model_tier = Self::parse_model_tier(json, &ghost_name);
             return Some(Classification::Complex {
                 ghost_name,
                 goal,
                 context,
+                model_tier,
             });
         }
 
@@ -843,10 +882,12 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             let ghost_name = json["ghost"].as_str().unwrap_or("self-dev").to_string();
             let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
             let context = json["context"].as_str().unwrap_or("").to_string();
+            let model_tier = Self::parse_model_tier(json, &ghost_name);
             return Some(Classification::Complex {
                 ghost_name,
                 goal,
                 context,
+                model_tier,
             });
         }
 
@@ -892,7 +933,27 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             goal: user_input.to_string(),
             context: "The orchestrator attempted to use tools directly. Delegate this task properly."
                 .to_string(),
+            model_tier: ModelTier::Standard,
         }
+    }
+
+    /// Parse model tier from classifier JSON output.
+    /// Defaults to Standard unless the classifier explicitly says "fast",
+    /// or the ghost is a read-only scout.
+    fn parse_model_tier(json: &serde_json::Value, ghost_name: &str) -> ModelTier {
+        // Explicit tier from classifier
+        if let Some(tier) = json["model_tier"].as_str() {
+            match tier {
+                "fast" => return ModelTier::Fast,
+                "standard" => return ModelTier::Standard,
+                _ => {}
+            }
+        }
+        // Scout ghosts default to fast tier (read-only, exploratory)
+        if ghost_name == "scout" {
+            return ModelTier::Fast;
+        }
+        ModelTier::Standard
     }
 
     fn tool_json_leak_reason(text: &str) -> Option<&'static str> {
@@ -1131,12 +1192,13 @@ enum Classification {
         ghost_name: String,
         goal: String,
         context: String,
+        model_tier: ModelTier,
     },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Classification, Manager};
+    use super::{Classification, Manager, ModelTier};
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
     use serde_json::json;
     use std::collections::HashMap;
@@ -1216,10 +1278,12 @@ mod tests {
                 ghost_name,
                 goal,
                 context,
+                model_tier,
             } => {
                 assert_eq!(ghost_name, "scout");
                 assert_eq!(goal, "find files");
                 assert_eq!(context, "ctx");
+                assert_eq!(model_tier, ModelTier::Fast); // scouts default to fast
             }
             _ => panic!("expected complex classification"),
         }
