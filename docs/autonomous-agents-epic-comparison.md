@@ -76,20 +76,52 @@ Categories are weighted by how much they affect a typical engineering team's ado
 
 ### 1. Autonomy & Self-Governance
 
+How much can the agent do without human intervention, and how does it control its own behavior?
+
+**Autonomous task execution** — Can the agent receive a task and complete it end-to-end without human involvement? This ranges from simple command execution (Basic) to multi-step workflows that plan, code, test, and submit results independently (Strong). Agents that support fire-and-forget background execution or parallel task queues score higher.
+
+**Bounded autonomy controls** — Can the operator limit what the agent does on its own? Implementations vary: binary auto-approve flags, per-tool confirmation gates, permission modes (suggest/auto-edit/full-auto), approval scopes, or composable runtime knobs. Agents with multiple orthogonal controls (e.g., separate toggles for proactive behavior, tool approval, and spontaneity) score higher than binary on/off switches.
+
+**Self-healing on failure** — When a tool call, test, or build fails, does the agent automatically attempt to fix it? Basic: retries the same action. Good: analyzes the error and tries a different approach. Strong: has multiple recovery strategies for different error types. Most agents are still Basic here — the failure mode is usually "show the error to the user."
+
+**Self-improvement** — Does the agent get better at its job over time without human intervention? This could mean detecting code health issues, finding refactoring opportunities, or learning from past mistakes. Very few agents attempt this.
+
+**Confidence-based escalation** — When the agent is uncertain, does it pause and ask rather than guessing? Implementations: permission prompts before destructive actions, confirmation gates on sensitive tools, or explicit "I'm not sure" responses that defer to the human.
+
+**Budget/resource controls** — Can the operator track and limit token usage, API costs, or compute? Ranges from displaying costs after the fact (Basic) to enforcing hard limits that stop execution (Strong).
+
 | Capability | Athena | Pilot | Devin | OpenHands | Cursor | Copilot | Claude Code | Codex | Aider |
 |------------|--------|-------|-------|-----------|--------|---------|-------------|-------|-------|
 | Autonomous task execution | **Strong** | **Strong** | **Strong** | **Good** | **Good** (background agents) | **Good** (coding agent) | **Good** | **Strong** (parallel agents, automations) | **Good** (git loop) |
-| Bounded autonomy levels | **Strong** (5 levels) | -- | -- | -- | **Good** (adjustable) | **Basic** | **Good** (permission modes) | **Good** (approval scopes) | -- |
-| Self-healing on failure | **Basic** (2 error patterns) | **Good** (CI retry) | **Good** (error loop) | **Basic** | **Basic** (lint fix loop) | **Basic** (CI retry) | **Basic** (hooks) | **Good** (error loop) | **Good** (auto-retry with context) |
-| Self-improvement | **Good** (code health + refactoring detection) | -- | **Good** (learns over time) | -- | -- | -- | -- | -- | -- |
-| Confidence-based escalation | **Good** (confirmation gates) | -- | **Good** (asks when unsure) | -- | **Good** | **Basic** | **Good** (permission prompts) | **Good** (approval system) | **Basic** |
+| Bounded autonomy controls | **Good** (composable knobs: auto-approve, per-tool confirmation, spontaneity 0-1, proactive master switch, quiet hours) | -- | -- | -- | **Good** (adjustable) | **Basic** | **Good** (permission modes: suggest/auto-edit/full-auto) | **Good** (approval scopes) | -- |
+| Self-healing on failure | **Basic** (2 error patterns: web_fetch timeout, file_edit not-found) | **Good** (CI retry) | **Good** (error loop) | **Basic** | **Basic** (lint fix loop) | **Basic** (CI retry) | **Basic** (hooks) | **Good** (error loop) | **Good** (auto-retry with context) |
+| Self-improvement | **Good** (code health monitoring + refactoring detection) | -- | **Good** (learns over time) | -- | -- | -- | -- | -- | -- |
+| Confidence-based escalation | **Good** (per-tool confirmation gates, host tools always confirm, destructive command detection) | -- | **Good** (asks when unsure) | -- | **Good** | **Basic** | **Good** (permission prompts) | **Good** (approval system) | **Basic** |
 | Budget/resource controls | **Good** (token tracking) | **Good** (cost display) | -- | -- | **Good** (credit system) | **Good** (request limits) | **Good** (context limits) | **Good** (message limits per tier) | **Good** (API cost display) |
 
-Athena and Pilot lead on autonomous execution depth. Athena's bounded autonomy levels are unique among self-hosted agents. Self-healing is an area where most agents remain basic — Aider's auto-retry approach and Pilot's CI retry loop are the most practical implementations.
+Athena and Pilot lead on autonomous execution. Athena's autonomy controls are composable (auto-approve + per-tool confirmation + spontaneity knob + proactive toggles + quiet hours), offering fine-grained control rather than discrete levels. Claude Code's three permission modes (suggest/auto-edit/full-auto) are the simplest effective approach. Self-healing remains basic across the field.
 
 ---
 
 ### 2. Ticket-to-PR Pipeline
+
+The core value loop: can the agent take a ticket (issue, task, bug report) and produce a reviewed, mergeable pull request?
+
+**Ticket intake from trackers** — Does the agent connect to issue trackers (GitHub Issues, Jira, Linear, Asana, Slack) and pick up work automatically? Basic: can read issues via CLI. Strong: monitors multiple platforms. Best-in-class: auto-picks up labeled tickets within seconds.
+
+**Auto-label monitoring** — Can the agent watch for a specific label (e.g., `athena`, `@copilot`) and start work automatically when applied? This is the difference between "assign to agent" and "agent finds its own work."
+
+**Plan before coding** — Does the agent create an explicit plan (feature contract, task list, spec) before writing code? Agents that plan first tend to produce higher-quality output on complex tasks. Basic: jumps straight to code. Strong: creates detailed plans with acceptance criteria.
+
+**Code generation** — Quality of the agent's code output. Most modern agents using frontier models score similarly here. Differentiation comes from context awareness, multi-file coherence, and test generation.
+
+**Quality gates (test/lint)** — Does the agent run tests and linters before submitting? Does it fix failures automatically? Basic: runs tests. Strong: runs tests, lints, builds, and iterates on failures.
+
+**Auto-PR creation** — Can the agent create a pull request automatically? Strong: creates PRs with descriptions. Best-in-class: auto-merges on passing CI.
+
+**CI monitoring & auto-fix** — After creating a PR, does the agent watch CI and fix failures? This closes the loop — most agents stop after creating the PR.
+
+**Self-review before submit** — Does the agent review its own code before submitting? This catches obvious errors, security issues, and style violations before human review.
 
 | Capability | Athena | Pilot | Devin | OpenHands | Copilot | Factory | Codex | Sweep | Jules |
 |------------|--------|-------|-------|-----------|---------|---------|-------|-------|-------|
@@ -108,6 +140,20 @@ Pilot leads the ticket-to-PR pipeline with Autopilot CI, 8-platform ticket intak
 
 ### 3. Multi-Agent Architecture
 
+Does the agent use multiple specialized sub-agents, and how does it coordinate them?
+
+**Multiple agent personas** — Can the system run different agents with different skills, tools, or system prompts? Examples: Athena's ghosts (coder, scout, custom), Devin's Planner/Coder/Critic, Factory's Droids. Agents with configurable personas score higher than fixed roles.
+
+**Parallel agent execution** — Can multiple agents work simultaneously on different tasks or subtasks? This is the difference between sequential task processing and true parallelism. Implementations vary: git worktrees (Conductor, Codex), Docker containers (Athena), cloud VMs (Devin), or in-process threads (Claude Code subagents).
+
+**Agent isolation** — Are parallel agents isolated from each other so they can't conflict? Docker containers, git worktrees, and cloud sandboxes all provide isolation. Without isolation, parallel agents risk merge conflicts and file corruption.
+
+**Ghost/agent routing** — How does the system decide which agent handles a task? Simple: user specifies. Good: rule-based routing. Strong: classifier model or coordinator agent that analyzes the task and delegates.
+
+**Multi-phase pipelines** — Does the system decompose work into phases (explore → plan → code → verify → heal)? Explicit phases improve quality by separating concerns. Most agents run a single loop.
+
+**Custom agent profiles** — Can users define new agent types with custom tools, prompts, and configurations? Athena loads profiles from `~/.athena/ghosts/*.toml`. Codex uses its Skills library. Claude Code supports markdown agent definitions.
+
 | Capability | Athena | Pilot | Devin | OpenHands | Factory | Conductor | Claude Code | Codex | Intent | Cursor |
 |------------|--------|-------|-------|-----------|---------|-----------|-------------|-------|--------|--------|
 | Multiple agent personas | **Strong** (ghosts: coder, scout, custom) | -- | **Strong** (Planner, Coder, Critic) | **Good** (configurable) | **Strong** (4 Droids) | -- | **Good** (subagents) | **Good** (via Skills) | **Strong** (coordinator + specialist agents) | -- |
@@ -122,6 +168,22 @@ Athena has the deepest multi-agent architecture among self-hosted tools with con
 ---
 
 ### 4. Memory & Learning
+
+Does the agent remember what it learned and get better over time?
+
+**Semantic memory (embeddings)** — Does the agent store memories as vector embeddings for similarity search? This enables "find memories similar to X" rather than exact keyword matching. Athena uses ONNX 384-dimensional embeddings with cosine similarity. No other surveyed self-hosted agent implements this.
+
+**Long-term memory** — Can the agent persist knowledge across sessions? Implementations: SQLite databases (Athena), flat files (CLAUDE.md), project-level learning (Devin), or codebase indexes (Cursor). The key question is whether the memory is structured and searchable vs. a simple text dump.
+
+**Recency decay** — Do older memories lose relevance over time? Athena implements configurable half-life decay so recent context is weighted more heavily in search results. Without decay, memory databases grow without bound and old irrelevant context pollutes results.
+
+**Deduplication** — When storing new memories, does the agent detect and merge duplicates? Athena uses cosine similarity thresholds — if a new memory is too similar to an existing one, it updates rather than duplicates. Without deduplication, agents accumulate redundant context.
+
+**Cross-session learning** — Does the agent carry context from one task to the next? This ranges from simple file-based notes (CLAUDE.md) to full database-backed knowledge graphs. Pilot claims 40% token savings via context continuation across related tasks.
+
+**Codebase indexing** — Can the agent build a searchable index of the codebase for context retrieval? This is critical for large repos. Augment Code leads with 500K+ file indexing across multiple repos. Cursor indexes up to 50K files. Aider uses tree-sitter AST-based repo maps.
+
+**Relationship tracking** — Does the agent track per-user interaction patterns (topics discussed, communication preferences, warmth)? Athena has the schema but sentiment computation is not fully implemented.
 
 | Capability | Athena | Pilot | Devin | OpenHands | Augment | Aider | Claude Code | Codex | Intent | Cursor |
 |------------|--------|-------|-------|-----------|---------|-------|-------------|-------|--------|--------|
@@ -139,6 +201,20 @@ Athena has the most sophisticated memory architecture among self-hosted agents (
 
 ### 5. Execution & Sandboxing
 
+How does the agent run code, and how is it protected from causing damage?
+
+**Sandboxed execution** — Does the agent run in an isolated environment (Docker container, VM, cloud sandbox)? This prevents the agent from accidentally deleting files, leaking secrets, or making network requests it shouldn't. Agents that run directly on the host (Claude Code, Aider) rely on permission prompts instead.
+
+**Container hardening** — Beyond basic Docker, does the agent apply security hardening? Athena drops all Linux capabilities (`CAP_DROP ALL`), uses a read-only root filesystem, disables networking, limits PIDs to 256, and mounts `/tmp` as `tmpfs` with `noexec`. This is defense-in-depth — even if the LLM generates malicious code, the sandbox limits the blast radius.
+
+**Tool safety validation** — Does the agent validate tool inputs before execution? Athena checks for path traversal (`..`), SSRF (blocks `localhost`, private IPs), and sensitive file access (`.env`, `*.pem`, `credentials.json`). Claude Code uses a permission system that prompts before file writes. Most agents have no input validation.
+
+**CLI tool integration** — Can the agent delegate work to other CLI agents (Claude Code, Codex, opencode)? This is an Athena-specific pattern where the orchestrator dispatches tasks to external agents running inside its Docker sandbox.
+
+**Hot upgrade** — Can the agent update itself without downtime? Pilot implements binary self-replacement. No other surveyed agent has this.
+
+**Deployment options** — Where can the agent run? Options: local binary, Docker, Kubernetes, cloud VMs, SaaS-only. Self-hosted agents (Athena, Pilot, Aider) offer the most flexibility. Cloud-only agents (Devin, Copilot's coding agent) require data to leave your environment.
+
 | Capability | Athena | Pilot | Devin | OpenHands | Copilot | Claude Code | Codex | Aider |
 |------------|--------|-------|-------|-----------|---------|-------------|-------|-------|
 | Sandboxed execution | **Best-in-class** (hardened Docker) | **Good** (Docker/K8s) | **Strong** (cloud sandbox) | **Strong** (Docker) | **Strong** (Actions sandbox) | -- (host) | **Good** (directory + network sandbox) | -- (host) |
@@ -153,6 +229,22 @@ Athena has the most hardened sandbox configuration (CAP_DROP ALL + SSRF + path t
 ---
 
 ### 6. Observability & Diagnostics
+
+Can you see what the agent is doing, why it made decisions, and how it's performing?
+
+**Real-time event stream** — Does the agent emit structured events as it works? Athena streams 18 event types (startup, mood change, tool usage, pulse delivery, etc.) via a Unix domain socket. OpenHands has an event log. Most agents provide only final output.
+
+**Langfuse integration** — Does the agent send traces, spans, and generation metadata to an observability platform? Athena integrates with Langfuse for trace-level visibility into LLM calls, tool executions, and background task pipelines. No other self-hosted agent has this.
+
+**KPI tracking** — Does the agent track its own performance metrics (task success rate, verification pass rate, mean time to fix)? Athena segments KPIs by lane (delivery vs. self-improvement), repo, and risk tier.
+
+**Health diagnostics** — Can the agent diagnose its own configuration and health? Athena's `doctor` command runs 4 diagnostic funnels checking LLM connectivity, proactive feature wiring, memory pipeline health, and execution environment readiness.
+
+**Introspection (self-metrics)** — Does the agent monitor its own process metrics (RSS memory, CPU, error rate, LLM latency)? Athena collects these and triggers anomaly detection when thresholds are exceeded.
+
+**Cost visibility** — Can you see how much the agent is costing? Ranges from per-response token counts to dashboards with running totals.
+
+**Dashboard / UI** — Does the agent have a visual interface for monitoring? Most CLI agents lack this. Devin, OpenHands, and Factory offer web UIs. Pilot has a TUI dashboard.
 
 | Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
 |------------|--------|-------|-------|-----------|---------|-------------|
@@ -170,6 +262,24 @@ Athena has the deepest observability stack among self-hosted agents (event strea
 
 ### 7. Planning & Orchestration
 
+How does the agent plan complex work and manage multi-step workflows?
+
+**Feature contracts (DAG)** — Can the agent define tasks as a directed acyclic graph with dependencies? Athena implements topological sort via Kahn's algorithm with cycle detection and dependency validation. This ensures tasks execute in the correct order. No other surveyed agent has this.
+
+**Task dependency ordering** — Can the agent understand that task B depends on task A completing first? Even without full DAG support, some agents handle linear dependencies.
+
+**Interactive plan review** — Can the human review and approve the agent's plan before execution begins? Devin shows plans for approval. Conductor and Claude Code have plan modes. This is critical for trust — users want to verify the approach before the agent writes code.
+
+**Acceptance criteria** — Can the agent map explicit success criteria to tasks? Athena's feature contracts define acceptance criteria and validate that every criterion is covered by at least one task.
+
+**Verification profiles** — Can the agent run different levels of verification (fast smoke test vs. strict full test suite)? Athena supports `fast` and `strict` profiles. Pilot uses configurable quality gates.
+
+**Workspace from PR/issue** — Can the agent create an isolated workspace directly from a PR or issue? Conductor leads here — click a PR and get a workspace with the code ready to review.
+
+**Checkpoints & rollback** — Does the agent save progress at each phase so it can roll back? Git commits at each phase (Codex, Intent auto-commit) or explicit checkpoint systems (Conductor).
+
+**Diff review workflow** — Can the human review the agent's changes as a diff before merging? Codex has built-in diff viewing with inline comments. Conductor has a dedicated diff review UI.
+
 | Capability | Athena | Pilot | Devin | Conductor | Copilot | Claude Code | Codex | Intent | Augment |
 |------------|--------|-------|-------|-----------|---------|-------------|-------|--------|---------|
 | Feature contracts (DAG) | **Strong** (topological ordering, cycle detection) | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -186,6 +296,22 @@ Athena has the strongest planning primitives (feature contracts with DAG orderin
 ---
 
 ### 8. Integrations & Ecosystem
+
+What external tools and platforms does the agent connect to?
+
+**GitHub / GitLab** — How deeply does the agent integrate with source control platforms? Basic: wraps the `gh` CLI. Strong: native API integration for PRs, issues, comments, Actions. Best-in-class: the agent IS the platform (Copilot on GitHub).
+
+**Jira / Linear** — Can the agent read and update project management tickets? Important for teams that track work outside GitHub Issues.
+
+**Slack / Telegram** — Can the agent receive tasks and send updates via messaging platforms? Athena's Telegram integration includes a multi-step planning interview with inline keyboards. Most agents have no messaging integration.
+
+**MCP protocol** — Does the agent support the Model Context Protocol for extensible tool access? MCP lets agents connect to a growing ecosystem of third-party tools without custom integration code. Codex, Cursor, and Claude Code all support MCP.
+
+**IDE integration** — Can the agent work inside an editor? Ranges from VS Code extensions to native IDEs (Cursor, Windsurf). CLI-only agents (Athena, Aider) have no IDE integration.
+
+**CI/CD** — Does the agent integrate with continuous integration? Pilot leads with its Autopilot CI loop. Copilot's coding agent runs inside GitHub Actions.
+
+**Skills/plugins** — Does the agent have an extensibility system for adding new capabilities? Codex's Skills library includes Figma, Vercel, Linear, and Cloudflare integrations.
 
 | Capability | Athena | Pilot | Devin | Copilot | Factory | Cursor | Claude Code | Codex | Intent | Aider |
 |------------|--------|-------|-------|---------|---------|--------|-------------|-------|--------|-------|
@@ -205,6 +331,22 @@ Athena's Telegram integration is unique (planning interviews with inline keyboar
 
 ### 9. Developer Experience
 
+How easy is it to start using the agent and how pleasant is the day-to-day interaction?
+
+**Setup complexity** — How quickly can a developer go from zero to working agent? Best-in-class: a single install command or app download. Agents requiring Docker, config files, or API key setup score lower.
+
+**Interactive chat** — Can the developer have a back-and-forth conversation with the agent? CLI chat, IDE sidebar, web UI, or messaging app. Agents with multiple interaction modes (Athena: CLI + Telegram) score higher.
+
+**Streaming responses** — Does the agent stream output as it works, or does it return everything at once? Streaming provides feedback that the agent is working and lets the developer course-correct early.
+
+**Voice input** — Can the developer speak to the agent? Athena supports voice via Telegram's speech-to-text. Codex has built-in voice dictation. Rare feature.
+
+**Custom commands** — Can the developer define shortcuts for common operations? Claude Code and Codex both support this (slash commands and Skills, respectively).
+
+**Configuration depth** — How many runtime parameters can be tuned? Athena has 50+ knobs (spontaneity, quiet hours, heartbeat interval, mood drift, etc.). Most agents have a settings file with 5-10 options.
+
+**Documentation** — How well-documented is the agent? Claude Code's documentation is the most comprehensive. Aider has an active community with detailed guides.
+
 | Capability | Athena | Pilot | Devin | Cursor | Copilot | Claude Code | Codex | Intent | Aider |
 |------------|--------|-------|-------|--------|---------|-------------|-------|--------|-------|
 | Setup complexity | **Good** (binary + config) | **Strong** (single Go binary) | Easy (cloud) | **Best-in-class** (IDE download) | **Best-in-class** (already in VS Code) | **Best-in-class** (npm install) | **Strong** (macOS app) | **Good** (macOS app, beta) | **Best-in-class** (pip install) |
@@ -221,6 +363,20 @@ IDE-based tools (Cursor, Copilot) have the lowest adoption friction. Codex's mac
 
 ### 10. Security & Compliance
 
+How does the agent protect against malicious or accidental damage, and does it meet enterprise compliance requirements?
+
+**Container hardening** — Beyond running in Docker, does the agent apply security best practices? Measures include: dropping Linux capabilities, read-only filesystems, PID limits, memory limits, network isolation, and running as non-root. Athena applies all of these.
+
+**Path traversal protection** — Does the agent prevent LLM-generated code from accessing files outside the workspace (e.g., `../../etc/passwd`)? Athena validates all paths and rejects `..` traversal. Codex scopes directory access to the current project.
+
+**SSRF protection** — Does the agent prevent the LLM from making requests to internal network addresses (localhost, private IPs)? Athena blocks all private IP ranges, IPv6 loopback, and link-local addresses. Codex disables network access by default.
+
+**Sensitive file blocking** — Does the agent prevent access to secrets and credentials (`.env`, `*.pem`, `credentials.json`)? Athena has a regex-based blocklist.
+
+**SOC 2 / compliance certs** — Does the vendor have enterprise compliance certifications? Amazon Q (HIPAA, SOC2) and Factory (SOC2, GDPR, ISO) lead here. Self-hosted open-source agents (Athena, Aider) have no certifications but offer data sovereignty.
+
+**Self-hosted / data privacy** — Can the agent run entirely on your infrastructure with no data leaving your environment? Critical for teams with strict data governance requirements.
+
 | Capability | Athena | Pilot | Devin | Copilot | Amazon Q | Factory | Claude Code | Codex |
 |------------|--------|-------|-------|---------|----------|---------|-------------|-------|
 | Container hardening | **Best-in-class** | **Good** | **Strong** | **Good** | **Good** | **Good** | -- | -- |
@@ -236,7 +392,19 @@ Athena has the deepest technical security hardening (container + input validatio
 
 ### 11. Experimental Features
 
-This category covers capabilities that are novel but not primary adoption drivers for most teams.
+This category covers capabilities that are novel but not primary adoption drivers for most teams. They are weighted at 0.5x because they represent architectural exploration rather than proven productivity features.
+
+**Mood system** — Does the agent simulate emotional state that affects its behavior? Athena models energy (0-1, with a time-of-day curve peaking at 9-11am) and valence (positive/negative), plus 10 personality modifiers (curious, focused, playful, contemplative, etc.). The mood description is injected into system prompts.
+
+**Idle musings & conversation re-entry** — Does the agent proactively follow up after a conversation ends? Athena samples random memories when idle, generates reflections via LLM, and can schedule follow-up messages based on past context.
+
+**Cron/interval scheduling** — Can the agent run tasks on a schedule without human triggers? Athena implements POSIX cron, interval-with-jitter, and one-shot scheduling. Codex's Automations feature is the closest competitor — it runs instructions on a defined schedule with results landing in a review queue.
+
+**Quiet hours & rate limiting** — Does the agent respect the human's off-hours? Athena suppresses non-urgent pulses during configurable quiet hours (timezone-aware) and limits pulse delivery to 4/hour for non-urgent messages.
+
+**Soul files** — Can the agent's personality and identity be customized via configuration files? Athena loads soul files from `~/.athena/souls/`. Claude Code uses `CLAUDE.md` for a simpler version of the same concept.
+
+**Relationship tracking** — Does the agent track per-user interaction patterns? Athena has the database schema (`relationship_stats` table) but the sentiment computation pipeline is not fully implemented.
 
 | Capability | Athena | Codex | Others |
 |------------|--------|-------|--------|
