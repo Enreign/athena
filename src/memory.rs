@@ -756,6 +756,116 @@ impl MemoryStore {
             Err(e) => Err(AthenaError::Db(e)),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Task checkpoint methods for session resumption
+    // -----------------------------------------------------------------------
+
+    /// Save or update a task checkpoint.
+    pub fn save_checkpoint(
+        &self,
+        task_id: &str,
+        goal: &str,
+        context: &str,
+        ghost: Option<&str>,
+        phase: &str,
+        completed_steps: &[String],
+        context_summary: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            AthenaError::Tool(format!("Failed to lock memory store: {}", e))
+        })?;
+        let steps_json = serde_json::to_string(completed_steps).unwrap_or_else(|_| "[]".into());
+        conn.execute(
+            "INSERT OR REPLACE INTO task_checkpoints
+             (task_id, goal, context, ghost, phase, completed_steps, context_summary, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+            rusqlite::params![task_id, goal, context, ghost, phase, steps_json, context_summary],
+        )?;
+        Ok(())
+    }
+
+    /// Load a task checkpoint by ID.
+    pub fn load_checkpoint(&self, task_id: &str) -> Result<Option<TaskCheckpoint>> {
+        let conn = self.conn.lock().map_err(|e| {
+            AthenaError::Tool(format!("Failed to lock memory store: {}", e))
+        })?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id, goal, context, ghost, phase, completed_steps, context_summary, updated_at
+             FROM task_checkpoints WHERE task_id = ?1",
+        )?;
+        match stmt.query_row(rusqlite::params![task_id], |row| {
+            Ok(TaskCheckpoint {
+                task_id: row.get(0)?,
+                goal: row.get(1)?,
+                context: row.get(2)?,
+                ghost: row.get(3)?,
+                phase: row.get(4)?,
+                completed_steps_json: row.get(5)?,
+                context_summary: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        }) {
+            Ok(cp) => Ok(Some(cp)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AthenaError::Db(e)),
+        }
+    }
+
+    /// List incomplete (non-finished) task checkpoints.
+    pub fn list_incomplete_checkpoints(&self) -> Result<Vec<TaskCheckpoint>> {
+        let conn = self.conn.lock().map_err(|e| {
+            AthenaError::Tool(format!("Failed to lock memory store: {}", e))
+        })?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id, goal, context, ghost, phase, completed_steps, context_summary, updated_at
+             FROM task_checkpoints
+             WHERE phase NOT IN ('completed', 'failed')
+             ORDER BY updated_at DESC
+             LIMIT 20",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(TaskCheckpoint {
+                    task_id: row.get(0)?,
+                    goal: row.get(1)?,
+                    context: row.get(2)?,
+                    ghost: row.get(3)?,
+                    phase: row.get(4)?,
+                    completed_steps_json: row.get(5)?,
+                    context_summary: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Mark a checkpoint as completed.
+    pub fn complete_checkpoint(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            AthenaError::Tool(format!("Failed to lock memory store: {}", e))
+        })?;
+        conn.execute(
+            "UPDATE task_checkpoints SET phase = 'completed', updated_at = datetime('now') WHERE task_id = ?1",
+            rusqlite::params![task_id],
+        )?;
+        Ok(())
+    }
+}
+
+/// A task checkpoint for session resumption.
+#[derive(Debug, Clone)]
+pub struct TaskCheckpoint {
+    pub task_id: String,
+    pub goal: String,
+    pub context: String,
+    pub ghost: Option<String>,
+    pub phase: String,
+    pub completed_steps_json: String,
+    pub context_summary: String,
+    pub updated_at: String,
 }
 
 struct JobRow {

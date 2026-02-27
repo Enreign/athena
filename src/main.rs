@@ -153,6 +153,18 @@ enum Commands {
         #[command(subcommand)]
         action: SelfBuildAction,
     },
+    /// Resume an interrupted task from its checkpoint
+    Resume {
+        /// Task ID to resume (use 'list' to see incomplete tasks)
+        #[arg(long)]
+        task_id: Option<String>,
+        /// List all incomplete task checkpoints
+        #[arg(long)]
+        list: bool,
+        /// How long to wait for the resumed task (seconds)
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -631,6 +643,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
+        Some(Commands::Resume {
+            task_id,
+            list,
+            wait_secs,
+        }) => handle_resume(task_id, list, wait_secs, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
@@ -649,6 +666,122 @@ fn validate_risk(risk: &str) -> anyhow::Result<()> {
         "low" | "medium" | "high" => Ok(()),
         _ => anyhow::bail!("Invalid risk '{}'. Use: low | medium | high", risk),
     }
+}
+
+async fn handle_resume(
+    task_id: Option<String>,
+    list: bool,
+    wait_secs: u64,
+    config: Config,
+    memory: Arc<MemoryStore>,
+) -> anyhow::Result<()> {
+    if list {
+        let checkpoints = memory.list_incomplete_checkpoints()?;
+        if checkpoints.is_empty() {
+            println!("No incomplete task checkpoints found.");
+        } else {
+            println!("Incomplete task checkpoints:");
+            for cp in &checkpoints {
+                let ghost = cp.ghost.as_deref().unwrap_or("auto");
+                let goal_preview = if cp.goal.len() > 80 {
+                    format!("{}...", &cp.goal[..cp.goal.floor_char_boundary(77)])
+                } else {
+                    cp.goal.clone()
+                };
+                println!(
+                    "  {} [{}] ghost={} updated={}\n    {}",
+                    cp.task_id, cp.phase, ghost, cp.updated_at, goal_preview
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let task_id = match task_id {
+        Some(id) => id,
+        None => {
+            // Auto-pick the most recent incomplete checkpoint
+            let checkpoints = memory.list_incomplete_checkpoints()?;
+            match checkpoints.first() {
+                Some(cp) => {
+                    println!("Resuming most recent incomplete task: {}", cp.task_id);
+                    cp.task_id.clone()
+                }
+                None => {
+                    println!("No incomplete task checkpoints found. Nothing to resume.");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let checkpoint = match memory.load_checkpoint(&task_id)? {
+        Some(cp) => cp,
+        None => {
+            eprintln!("No checkpoint found for task_id: {}", task_id);
+            return Ok(());
+        }
+    };
+
+    println!(
+        "Resuming task: {} (phase: {}, ghost: {})",
+        task_id,
+        checkpoint.phase,
+        checkpoint.ghost.as_deref().unwrap_or("auto")
+    );
+
+    // Build enriched context from checkpoint
+    let resume_context = format!(
+        "RESUMING INTERRUPTED TASK\n\
+         Previous phase: {}\n\
+         Previous context summary: {}\n\
+         Completed steps: {}\n\n\
+         Original context: {}",
+        checkpoint.phase,
+        checkpoint.context_summary,
+        checkpoint.completed_steps_json,
+        checkpoint.context
+    );
+
+    // Dispatch via the core
+    let handle = core::AthenaCore::start(config, memory.clone()).await?;
+
+    let task = core::AutonomousTask {
+        goal: checkpoint.goal.clone(),
+        context: resume_context,
+        ghost: checkpoint.ghost.clone(),
+        target: crate::pulse::PulseTarget::Broadcast,
+        lane: "delivery".to_string(),
+        risk_tier: "medium".to_string(),
+        repo: String::new(),
+        task_id: Some(task_id.clone()),
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(wait_secs),
+        handle.dispatch_task(task),
+    )
+    .await
+    {
+        Ok(Ok(result)) => {
+            println!("Task resumed and completed:\n{}", result);
+            // Mark checkpoint as completed
+            if let Err(e) = memory.complete_checkpoint(&task_id) {
+                tracing::warn!("Failed to mark checkpoint completed: {}", e);
+            }
+        }
+        Ok(Err(e)) => {
+            eprintln!("Task failed: {}", e);
+        }
+        Err(_) => {
+            eprintln!(
+                "Timed out after {}s. Task may still be running in background.",
+                wait_secs
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_kpi(action: KpiAction, config: &Config) -> anyhow::Result<()> {

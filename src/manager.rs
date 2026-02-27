@@ -559,6 +559,20 @@ impl Manager {
 
         tracing::info!(ghost = %ghost.name, goal = %goal, "Autonomous task executing");
 
+        // Save checkpoint at task start
+        let task_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = self.memory.save_checkpoint(
+            &task_id,
+            goal,
+            context,
+            Some(ghost_name),
+            "executing",
+            &[],
+            "",
+        ) {
+            tracing::warn!("Failed to save task checkpoint: {}", e);
+        }
+
         // Enrich context with system metrics (Gap 3)
         let metrics_ctx = if self
             .knobs
@@ -645,6 +659,11 @@ impl Manager {
 
         // Save lesson from autonomous work too
         self.maybe_save_lesson(goal, &result).await;
+
+        // Mark checkpoint as completed
+        if let Err(e) = self.memory.complete_checkpoint(&task_id) {
+            tracing::warn!("Failed to complete task checkpoint: {}", e);
+        }
 
         Ok(result)
     }

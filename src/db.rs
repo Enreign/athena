@@ -121,6 +121,20 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_task_outcomes_lane_repo_risk_time
         ON autonomous_task_outcomes(lane, repo, risk_tier, started_at DESC);",
+    // v12: task checkpoints for session resumption
+    "CREATE TABLE IF NOT EXISTS task_checkpoints (
+        task_id TEXT PRIMARY KEY,
+        goal TEXT NOT NULL,
+        context TEXT NOT NULL DEFAULT '',
+        ghost TEXT,
+        phase TEXT NOT NULL DEFAULT 'pending',
+        completed_steps TEXT NOT NULL DEFAULT '[]',
+        context_summary TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_checkpoints_phase
+        ON task_checkpoints(phase, updated_at DESC);",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {
