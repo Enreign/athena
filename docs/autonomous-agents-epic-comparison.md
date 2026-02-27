@@ -1,447 +1,390 @@
-# The Autonomous Agent Arena: Athena vs The World
+# Autonomous Coding Agent Comparison (2026)
 
-**Date**: 2026-02-27
-**Scope**: Comprehensive comparison of Athena against every major autonomous/semi-autonomous coding agent
+A feature and capability comparison of autonomous and semi-autonomous coding agents.
+
+**Last updated**: 2026-02-27
+**Author**: [Stas](https://stas.vision) — Athena is a portfolio/learning project I built to explore autonomous agent architecture. This comparison documents what I learned about the landscape and where Athena fits relative to production tools backed by well-funded teams.
+**Corrections welcome**: Open a PR or issue if any rating is inaccurate or outdated.
+
+---
+
+## Methodology
+
+### Rating Scale
+
+| Rating | Definition |
+|--------|-----------|
+| **--** | Not present or not documented |
+| **Basic** | Exists but narrow — handles one or two use cases, may require workarounds |
+| **Good** | Solid — covers the main use case, production-usable |
+| **Strong** | Deep — well-architected, handles edge cases, competitive with peers |
+| **Best-in-class** | Leading implementation in this category across all surveyed tools |
+
+### Category Weights
+
+Categories are weighted by how much they affect a typical engineering team's adoption decision. Readers can re-score with their own priorities.
+
+| Category | Weight | Rationale |
+|----------|--------|-----------|
+| Ticket-to-PR Pipeline | 2.0x | Core value delivery for most teams |
+| Developer Experience | 1.5x | Determines adoption friction |
+| Integrations & Ecosystem | 1.5x | Fit into existing toolchains |
+| Autonomy & Self-Governance | 1.0x | Differentiator, widely valued |
+| Multi-Agent Architecture | 1.0x | Differentiator for complex workflows |
+| Memory & Learning | 1.0x | Cross-session quality improvement |
+| Execution & Sandboxing | 1.0x | Safety and reproducibility |
+| Planning & Orchestration | 1.0x | Quality of work product |
+| Observability & Diagnostics | 0.75x | Valued by platform teams |
+| Security & Compliance | 0.75x | Valued by enterprise buyers |
+| Experimental Features | 0.5x | Novel but not primary adoption drivers |
+
+### Limitations
+
+- Ratings are based on public documentation, source code inspection (where open-source), and hands-on use. They may be incomplete or outdated.
+- Proprietary products (Devin, Factory, Cursor) are assessed from public docs and demos only.
+- SWE-bench scores are included where published but are not the sole quality metric. Scores are not directly comparable across benchmark variants (Full, Verified, Lite, Pro).
+- Athena is one of the products being compared. Its ratings are based on source code inspection but readers should weight external validation more heavily.
 
 ---
 
 ## The Contenders
 
-| Agent | Creator | Type | Price | Open Source |
-|-------|---------|------|-------|-------------|
-| **Athena** | Enreign | Autonomous multi-agent system | Self-hosted | Source-available |
-| **Pilot** | Quantflow | Autonomous dev pipeline | Self-hosted (free) | BSL 1.1 |
-| **Devin** | Cognition AI | Autonomous SWE agent | $500/mo | No |
-| **OpenHands** | All Hands AI | Open agent platform | Free (self-host) | MIT |
-| **Factory** | Factory.ai | Droid-based dev platform | $40/team + $10/user/mo | No |
-| **Codegen** | ClickUp (acquired) | Code agent OS | Usage-based | No |
-| **Conductor** | Melty Labs | Agent orchestrator | License-based | No |
-| **Claude Code** | Anthropic | CLI coding agent | API/subscription | No |
-| **SWE-agent** | Princeton NLP | Research agent | Free (self-host) | MIT |
-| **Sweep** | Sweep AI | Ticket-to-PR agent | Freemium | Partial |
-| **AutoGPT** | Toran Richards | General autonomous agent | Free + API | MIT |
-| **Cline** | Community | VS Code agent | Free + API | MIT |
+| Agent | Creator | Type | SWE-Bench | Price | License |
+|-------|---------|------|-----------|-------|---------|
+| **Athena** | Enreign | Self-hosted multi-agent system | Not published | Self-hosted | Source-available |
+| **Pilot** | Quantflow | Autonomous dev pipeline | Not published | Self-hosted (free) | BSL 1.1 |
+| **Devin** | Cognition AI | Cloud autonomous SWE agent | Not published | $500/mo | Proprietary |
+| **OpenHands** | All Hands AI | Open agent platform | ~26% (varies) | Free (self-host) | MIT |
+| **Cursor** | Anysphere | AI IDE with background agents | Not published | $20-200/mo | Proprietary |
+| **GitHub Copilot** | Microsoft/GitHub | IDE agent + Actions-based agent | Not published | $0-39/user/mo | Proprietary |
+| **Amazon Q** | AWS | Cloud-native coding agent | 66% Verified | $0-19/user/mo | Proprietary |
+| **Augment Code** | Augment | Context-engine coding agent | 51.8% Pro | $20-200/mo | Proprietary |
+| **Google Jules** | Google | Async GitHub-native agent | Not published | $0-125/mo | Proprietary |
+| **Windsurf** | Cognition AI | AI IDE (Cascade engine) | Not published | $15-60/user/mo | Proprietary |
+| **Aider** | Paul Gauthier | CLI git-native agent | ~40-50% (varies) | Free (OSS + API costs) | Apache 2.0 |
+| **Factory** | Factory.ai | Droid-based dev platform | Not published | $40/team + $10/user/mo | Proprietary |
+| **Claude Code** | Anthropic | CLI coding agent | Not published | API/subscription | Proprietary |
+| **Cline** | Community | VS Code agent extension | Not published | Free + API costs | MIT |
+| **SWE-agent** | Princeton NLP | Research baseline agent | ~23% (GPT-4o) | Free (self-host) | MIT |
+| **Sweep** | Sweep AI | Ticket-to-PR agent | Not published | Freemium | Partial |
 
 ---
 
-## The Epic Comparison Matrix
+## Feature Comparison
 
-### Legend
-- **--** = Not present
-- **Basic** = Minimal/surface-level implementation
-- **Good** = Solid implementation covering main use cases
-- **Strong** = Deep, well-architected implementation
-- **Best-in-class** = Industry-leading implementation
+### 1. Autonomy & Self-Governance
+
+| Capability | Athena | Pilot | Devin | OpenHands | Cursor | Copilot | Claude Code | Aider |
+|------------|--------|-------|-------|-----------|--------|---------|-------------|-------|
+| Autonomous task execution | **Strong** | **Strong** | **Strong** | **Good** | **Good** (background agents) | **Good** (coding agent) | **Good** | **Good** (git loop) |
+| Bounded autonomy levels | **Strong** (5 levels) | -- | -- | -- | **Good** (adjustable) | **Basic** | **Good** (permission modes) | -- |
+| Self-healing on failure | **Basic** (2 error patterns) | **Good** (CI retry) | **Good** (error loop) | **Basic** | **Basic** (lint fix loop) | **Basic** (CI retry) | **Basic** (hooks) | **Good** (auto-retry with context) |
+| Self-improvement | **Good** (code health + refactoring detection) | -- | **Good** (learns over time) | -- | -- | -- | -- | -- |
+| Confidence-based escalation | **Good** (confirmation gates) | -- | **Good** (asks when unsure) | -- | **Good** | **Basic** | **Good** (permission prompts) | **Basic** |
+| Budget/resource controls | **Good** (token tracking) | **Good** (cost display) | -- | -- | **Good** (credit system) | **Good** (request limits) | **Good** (context limits) | **Good** (API cost display) |
+
+Athena and Pilot lead on autonomous execution depth. Athena's bounded autonomy levels are unique among self-hosted agents. Self-healing is an area where most agents remain basic — Aider's auto-retry approach and Pilot's CI retry loop are the most practical implementations.
 
 ---
 
-### 1. AUTONOMY & SELF-GOVERNANCE
+### 2. Ticket-to-PR Pipeline
+
+| Capability | Athena | Pilot | Devin | OpenHands | Copilot | Factory | Sweep | Jules |
+|------------|--------|-------|-------|-----------|---------|---------|-------|-------|
+| Ticket intake from trackers | **Basic** (gh CLI) | **Best-in-class** (8 platforms) | **Good** (Slack/issues) | **Good** (GitHub/GitLab) | **Strong** (native GitHub) | **Strong** (Jira, Linear) | **Good** (GitHub/Jira) | **Good** (GitHub issues) |
+| Auto-label monitoring | -- | **Best-in-class** (30s pickup) | -- | -- | **Strong** (@copilot mention) | **Good** | **Good** | **Good** (issue trigger) |
+| Plan before coding | **Strong** (feature contracts) | **Good** (context engine) | **Strong** (detailed plans) | **Basic** | **Good** (plan mode) | **Good** (Knowledge Droid) | -- | **Good** |
+| Code generation | **Strong** (multi-ghost) | **Strong** (Claude Code) | **Strong** | **Strong** (full-stack) | **Strong** | **Strong** (Code Droid) | **Good** | **Strong** |
+| Quality gates (test/lint) | **Strong** (verify phase) | **Strong** (CI loop) | **Good** (test execution) | **Good** (sandbox tests) | **Good** (Actions CI) | **Good** | **Basic** | **Good** |
+| Auto-PR creation | **Basic** (gh CLI) | **Best-in-class** (auto-merge) | **Good** | **Good** | **Strong** (draft PR) | **Strong** | **Best-in-class** | **Strong** (auto PR) |
+| CI monitoring & auto-fix | -- | **Best-in-class** (Autopilot CI) | -- | -- | **Good** (Actions-aware) | -- | -- | -- |
+| Self-review before submit | -- | **Strong** | **Strong** (Critic model) | -- | -- | **Good** (multi-agent) | -- | -- |
+
+Pilot leads the ticket-to-PR pipeline with Autopilot CI, 8-platform ticket intake, and auto-merge. GitHub Copilot's native `@copilot` issue assignment is the most frictionless entry point. Athena has strong planning (feature contracts with DAG ordering) but lacks automated ticket pickup and CI monitoring.
+
+---
+
+### 3. Multi-Agent Architecture
+
+| Capability | Athena | Pilot | Devin | OpenHands | Factory | Conductor | Claude Code | Cursor |
+|------------|--------|-------|-------|-----------|---------|-----------|-------------|--------|
+| Multiple agent personas | **Strong** (ghosts: coder, scout, custom) | -- | **Strong** (Planner, Coder, Critic) | **Good** (configurable) | **Strong** (4 Droids) | -- | **Good** (subagents) | -- |
+| Parallel agent execution | **Good** (async dispatch) | -- | **Good** (multi-instance) | -- | -- | **Best-in-class** (worktrees) | **Good** (7 subagents) | **Good** (background agents) |
+| Agent isolation | **Strong** (Docker containers) | -- | **Strong** (sandbox) | **Strong** (Docker) | **Good** | **Best-in-class** (git worktrees) | **Good** (worktrees) | -- |
+| Ghost/agent routing | **Strong** (classifier model) | -- | **Strong** (model routing) | -- | **Good** (Droid selection) | -- | -- | -- |
+| Multi-phase pipelines | **Strong** (EXPLORE, EXECUTE, VERIFY, HEAL) | **Good** (plan, code, gate) | **Good** (plan, code, review) | **Basic** | **Good** | -- | -- | -- |
+| Custom agent profiles | **Strong** (~/.athena/ghosts/) | -- | -- | -- | -- | -- | **Good** (markdown agents) | -- |
+
+Athena has the deepest multi-agent architecture among self-hosted tools with configurable ghost personas and classifier-based routing. Conductor leads on parallel isolation with git worktrees. Factory's specialized Droids are strong but less configurable.
+
+---
+
+### 4. Memory & Learning
+
+| Capability | Athena | Pilot | Devin | OpenHands | Augment | Aider | Claude Code | Cursor |
+|------------|--------|-------|-------|-----------|---------|-------|-------------|--------|
+| Semantic memory (embeddings) | **Strong** (ONNX 384-dim, cosine search) | -- | -- | -- | -- | -- | -- | -- |
+| Long-term memory | **Strong** (SQLite + FTS5 + vectors) | -- | **Good** (project learning) | **Good** (event log) | **Good** (Memories feature) | -- | **Good** (CLAUDE.md) | **Good** (codebase indexing) |
+| Recency decay | **Strong** (configurable half-life) | -- | -- | -- | -- | -- | -- | -- |
+| Deduplication | **Good** (cosine similarity threshold) | -- | -- | -- | -- | -- | -- | -- |
+| Cross-session learning | **Strong** (persistent memory DB) | **Good** (40% token savings) | **Good** | -- | **Good** (persistent context) | -- | **Good** (memory files) | **Good** |
+| Codebase indexing | -- | **Strong** (context engine) | **Strong** (Devin Wiki/Search) | -- | **Best-in-class** (500K files) | **Good** (repo-map AST) | -- | **Strong** (50K files) |
+| Relationship tracking | **Basic** (schema exists, partially implemented) | -- | -- | -- | -- | -- | -- | -- |
+
+Athena has the most sophisticated memory architecture among self-hosted agents (embedding search, FTS5, recency decay, deduplication). However, Augment Code's context engine indexes 500K+ files across multiple repos — an area where Athena has no equivalent. Relationship tracking exists in Athena's schema but sentiment computation is not yet fully implemented.
+
+---
+
+### 5. Execution & Sandboxing
+
+| Capability | Athena | Pilot | Devin | OpenHands | Copilot | Claude Code | Aider |
+|------------|--------|-------|-------|-----------|---------|-------------|-------|
+| Sandboxed execution | **Best-in-class** (hardened Docker) | **Good** (Docker/K8s) | **Strong** (cloud sandbox) | **Strong** (Docker) | **Strong** (Actions sandbox) | -- (host) | -- (host) |
+| Container hardening | **Best-in-class** (CAP_DROP ALL, readonly, no-net, PID limits) | -- | **Good** | **Good** | **Good** | -- | -- |
+| Tool safety validation | **Best-in-class** (path traversal, SSRF, sensitive patterns) | -- | -- | -- | -- | **Good** (permission system) | -- |
+| CLI tool integration | **Strong** (claude_code, codex, opencode) | **Strong** (Claude Code) | -- | -- | -- | N/A | -- |
+| Hot upgrade | -- | **Best-in-class** (binary self-replace) | -- | -- | -- | -- | -- |
+| Deployment options | **Good** (host, Docker) | **Best-in-class** (local, Docker, K8s, cloud) | Cloud only | **Good** (local, cloud) | Cloud only | Local CLI | Local CLI |
+
+Athena has the most hardened sandbox configuration (CAP_DROP ALL + SSRF + path traversal + PID limits + readonly rootfs). No other self-hosted agent combines all these measures. Pilot leads on deployment flexibility and hot-upgrade capability.
+
+---
+
+### 6. Observability & Diagnostics
 
 | Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
 |------------|--------|-------|-------|-----------|---------|-------------|
-| Autonomous task execution | **Strong** | **Strong** | **Strong** | **Good** | **Strong** | **Good** |
-| Bounded autonomy levels | **Best-in-class** (5 levels) | -- | -- | -- | **Good** (adjustable) | **Good** (permission modes) |
-| Self-healing on failure | **Best-in-class** (recursive fix) | **Good** (CI retry) | **Good** (error loop) | **Basic** | -- | **Basic** (hooks) |
-| Self-improvement | **Best-in-class** (4 funnels) | -- | **Good** (learns over time) | -- | -- | -- |
-| Proactive behavior | **Best-in-class** (heartbeat, idle musings, mood) | -- | -- | -- | -- | -- |
-| Confidence-based escalation | **Good** (confirmation gates) | -- | **Good** (asks when unsure) | -- | -- | **Good** (permission prompts) |
-| Budget/resource controls | **Good** (token tracking) | **Good** (cost display) | -- | -- | **Basic** (token billing) | **Good** (context limits) |
-
-**Verdict**: Athena dominates autonomy. No other agent has bounded autonomy levels, self-improvement funnels, proactive heartbeat behavior, or mood-driven personality. Pilot and Devin compete on autonomous execution but lack self-governance depth.
-
----
-
-### 2. TICKET-TO-PR PIPELINE
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Sweep |
-|------------|--------|-------|-------|-----------|---------|-------|
-| Pick up tickets from trackers | **Basic** (gh tool) | **Best-in-class** (8 platforms) | **Good** (Slack/issues) | **Good** (GitHub/GitLab) | **Strong** (Jira, Linear, Slack) | **Good** (GitHub/Jira) |
-| Auto-label monitoring | -- | **Best-in-class** (30s pickup) | -- | -- | **Good** | **Good** |
-| Plan before coding | **Strong** (feature contracts) | **Good** (context engine) | **Strong** (detailed plans) | **Basic** | **Good** (Knowledge Droid) | -- |
-| Code generation | **Strong** (multi-ghost) | **Strong** (Claude Code) | **Strong** (specialized coder) | **Strong** (full-stack) | **Strong** (Code Droid) | **Good** |
-| Quality gates (test/lint/build) | **Strong** (verify phase) | **Strong** (CI loop) | **Good** (test execution) | **Good** (sandbox tests) | **Good** (Droids test) | **Basic** |
-| Auto-PR creation | **Basic** (gh tool) | **Best-in-class** (auto-merge) | **Good** | **Good** | **Strong** | **Best-in-class** |
-| CI monitoring & auto-fix | -- | **Best-in-class** (Autopilot CI) | -- | -- | -- | -- |
-| Self-review before submit | -- | **Strong** (built-in) | **Strong** (Critic model) | -- | **Good** (multi-agent) | -- |
-| Epic/ticket decomposition | **Strong** (DAG tasks) | **Strong** (epic split) | **Good** | -- | **Good** (Product Droid) | -- |
-
-**Verdict**: Pilot leads the ticket-to-PR pipeline with its Autopilot CI loop, 8-platform ticket monitoring, and auto-merge. Athena has strong planning (feature contracts with DAGs) but lacks the automated ticket pickup and CI monitoring loop. This is a key adoption gap.
-
----
-
-### 3. MULTI-AGENT ARCHITECTURE
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Conductor | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-----------|-------------|
-| Multiple agent personas | **Best-in-class** (ghosts: coder, scout, custom) | -- | **Strong** (Planner, Coder, Critic, Browser) | **Good** (configurable) | **Strong** (4 Droids) | -- | **Good** (subagents) |
-| Parallel agent execution | **Good** (async dispatch) | -- | **Good** (multi-instance) | -- | -- | **Best-in-class** | **Good** (7 subagents) |
-| Agent isolation | **Strong** (Docker containers) | -- | **Strong** (sandbox) | **Strong** (Docker) | **Good** (isolated env) | **Best-in-class** (git worktrees) | **Good** (worktrees) |
-| Agent-to-agent handoff | -- | -- | -- | -- | -- | **Good** (plan handoff) | -- |
-| Ghost routing/classification | **Best-in-class** (classifier model) | -- | **Strong** (model routing) | -- | **Good** (Droid selection) | -- | -- |
-| Multi-phase pipelines | **Best-in-class** (EXPLORE→EXECUTE→VERIFY→HEAL) | **Good** (plan→code→gate) | **Good** (plan→code→review) | **Basic** | **Good** | -- | -- |
-| Custom ghost profiles | **Best-in-class** (~/.athena/ghosts/) | -- | -- | -- | -- | -- | **Good** (markdown agents) |
-
-**Verdict**: Athena has the deepest multi-agent architecture with ghost personas, classifier-based routing, and multi-phase pipelines. Conductor leads on parallel isolation with worktrees. Factory's specialized Droids are strong but less flexible than Athena's configurable ghosts.
-
----
-
-### 4. MEMORY & LEARNING
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-------------|
-| Semantic memory (embeddings) | **Best-in-class** (ONNX, 384-dim, cosine search) | -- | -- | -- | -- | -- |
-| Long-term memory | **Best-in-class** (SQLite + FTS5 + vectors) | -- | **Good** (project learning) | **Good** (event log) | **Good** (org-level) | **Good** (CLAUDE.md) |
-| Session memory | **Strong** (conversation history) | **Good** (session resume) | **Strong** | **Strong** (event stream) | **Good** | **Strong** (context) |
-| Memory categories | **Best-in-class** (heartbeat, code_structure, health_fix, musing, pattern...) | -- | -- | -- | -- | -- |
-| Recency decay | **Best-in-class** (configurable half-life) | -- | -- | -- | -- | -- |
-| Deduplication | **Strong** (cosine similarity threshold) | -- | -- | -- | -- | -- |
-| Cross-session learning | **Best-in-class** (persistent memory DB) | **Good** (40% token savings) | **Good** | -- | **Good** | **Good** (memory files) |
-| Relationship tracking | **Best-in-class** (per-user sentiment, warmth, topics) | -- | -- | -- | -- | -- |
-| Codebase indexing | -- | **Strong** (context engine) | **Strong** (Devin Wiki/Search) | -- | **Strong** (real-time indexing) | -- |
-
-**Verdict**: Athena's memory system is unmatched. No competitor has embedding-based semantic search, recency decay, memory categorization, deduplication, or relationship tracking. Devin's Wiki/Search and Pilot's context engine provide codebase indexing that Athena should adopt.
-
----
-
-### 5. EXECUTION & SANDBOXING
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-------------|
-| Sandboxed execution | **Best-in-class** (hardened Docker) | **Good** (Docker/K8s) | **Strong** (cloud sandbox) | **Strong** (Docker) | **Good** (isolated env) | -- (host) |
-| Container hardening | **Best-in-class** (CAP_DROP ALL, readonly, no-net, PID limits) | -- | **Good** | **Good** | -- | -- |
-| Tool safety validation | **Best-in-class** (path traversal, SSRF, sensitive patterns) | -- | -- | -- | -- | **Good** (permission system) |
-| Multi-strategy execution | **Best-in-class** (ReAct, Code with phases) | -- | **Good** (compound AI) | **Good** (event-stream) | -- | -- |
-| CLI tool integration | **Strong** (claude_code, codex, opencode) | **Strong** (Claude Code) | -- | -- | **Good** (multi-IDE) | N/A |
-| Hot upgrade | -- | **Best-in-class** (binary self-replace) | -- | -- | -- | -- |
-| Deployment options | **Good** (host, Docker) | **Best-in-class** (local, Docker, K8s, AWS, GCP, Azure) | Cloud only | **Good** (local, cloud) | SaaS | Local CLI |
-
-**Verdict**: Athena has the most hardened sandbox in the field. No other agent drops all capabilities, enforces PID limits, uses readonly filesystems, AND validates tool inputs for SSRF/path traversal. Pilot's deployment flexibility and hot-upgrade are notable advantages.
-
----
-
-### 6. OBSERVABILITY & DIAGNOSTICS
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-------------|
-| Real-time event stream | **Best-in-class** (Unix socket, 18 event types) | -- | -- | **Good** (event log) | -- | -- |
-| Langfuse integration | **Best-in-class** (traces, spans, generations) | -- | -- | -- | -- | -- |
-| KPI tracking | **Best-in-class** (lane/repo/risk segmentation) | -- | -- | -- | -- | -- |
-| Health diagnostics | **Best-in-class** (doctor command, 8 checkpoints) | -- | -- | -- | -- | -- |
-| Introspection (self-metrics) | **Best-in-class** (RSS, CPU, error rate, latency) | -- | -- | -- | -- | -- |
+| Real-time event stream | **Strong** (Unix socket, 18 event types) | -- | -- | **Good** (event log) | -- | -- |
+| Langfuse integration | **Strong** (traces, spans, generations) | -- | -- | -- | -- | -- |
+| KPI tracking | **Strong** (lane/repo/risk segmentation) | -- | -- | -- | -- | -- |
+| Health diagnostics | **Strong** (doctor command, 4 funnels) | -- | -- | -- | -- | -- |
+| Introspection (self-metrics) | **Strong** (RSS, CPU, error rate, latency) | -- | -- | -- | -- | -- |
 | Cost visibility | **Basic** (token counts) | **Strong** (TUI dashboard) | -- | -- | **Basic** (token billing) | **Good** (per-response) |
-| Tool usage statistics | **Best-in-class** (per-tool success/fail/duration) | -- | -- | -- | -- | -- |
-| Dashboard / TUI | -- | **Good** (terminal dashboard) | **Good** (cloud IDE) | **Good** (web UI) | **Good** (web dashboard) | -- |
+| Dashboard / UI | -- | **Good** (terminal dashboard) | **Good** (cloud IDE) | **Good** (web UI) | **Good** (web dashboard) | -- |
 
-**Verdict**: Athena's observability is best-in-class across the board. The combination of real-time observer socket, Langfuse tracing, KPI tracking, health diagnostics, introspection metrics, and per-tool statistics is unmatched. The gap is visual presentation - Athena lacks a dashboard while competitors offer web UIs or TUIs.
-
----
-
-### 7. PLANNING & ORCHESTRATION
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Conductor | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-----------|-------------|
-| Feature contracts (DAG) | **Best-in-class** | -- | -- | -- | -- | -- | -- |
-| Task dependency ordering | **Best-in-class** | -- | **Good** | -- | -- | -- | -- |
-| Interactive plan review | -- | -- | **Strong** (plan → approve) | -- | -- | **Strong** | **Strong** (plan mode) |
-| Acceptance criteria | **Best-in-class** (mapped to tasks) | -- | -- | -- | -- | -- | -- |
-| Verification profiles | **Strong** (fast/strict) | **Good** (quality gates) | -- | -- | -- | -- | -- |
-| Workspace from PR/issue | -- | -- | -- | -- | **Good** | **Best-in-class** | -- |
-| Checkpoints & rollback | -- | -- | -- | -- | -- | **Strong** | -- |
-| Diff review workflow | -- | -- | -- | -- | -- | **Best-in-class** | -- |
-
-**Verdict**: Athena has the strongest planning primitives (feature contracts with DAG ordering, acceptance criteria, verification profiles). However, it lacks the interactive plan-review cycle and diff review workflow that Conductor and Devin provide. The combination of Athena's contracts + Conductor's review UX would be formidable.
+Athena has the deepest observability stack among self-hosted agents (event streaming, Langfuse tracing, KPI tracking, health diagnostics, per-tool statistics). The gap is visual presentation — Athena lacks a dashboard while competitors offer web UIs or TUIs.
 
 ---
 
-### 8. INTEGRATIONS & ECOSYSTEM
+### 7. Planning & Orchestration
 
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Codegen | Conductor |
-|------------|--------|-------|-------|-----------|---------|---------|-----------|
-| GitHub | **Basic** (gh CLI tool) | **Strong** | **Strong** | **Strong** | **Strong** | **Strong** | **Best-in-class** |
-| GitLab | -- | **Strong** | -- | **Strong** | **Strong** | -- | -- |
-| Jira | -- | **Strong** | -- | -- | **Strong** | **Strong** | -- |
-| Linear | -- | **Strong** | -- | -- | **Strong** | **Strong** | **Strong** |
-| Slack | -- | **Strong** | **Good** | **Good** | **Strong** | **Strong** | -- |
-| Telegram | **Strong** (with planning) | **Good** | -- | -- | -- | -- | -- |
-| MCP servers | -- | -- | -- | -- | -- | **Strong** | **Strong** |
-| IDE plugins | -- | -- | **Strong** (cloud IDE) | **Good** (VS Code) | **Good** (multi-IDE) | -- | **Good** (VS Code, JetBrains) |
-| Webhooks | -- | **Strong** | -- | -- | **Good** | **Good** | **Good** (hooks) |
-| PagerDuty | -- | **Good** | -- | -- | **Strong** | -- | -- |
-| Figma | -- | -- | -- | -- | -- | **Good** | -- |
-| CI/CD | -- | **Best-in-class** | -- | **Good** | -- | -- | **Good** |
+| Capability | Athena | Pilot | Devin | Conductor | Copilot | Claude Code | Augment |
+|------------|--------|-------|-------|-----------|---------|-------------|---------|
+| Feature contracts (DAG) | **Strong** (topological ordering, cycle detection) | -- | -- | -- | -- | -- | -- |
+| Task dependency ordering | **Strong** | -- | **Good** | -- | -- | -- | -- |
+| Interactive plan review | -- | -- | **Strong** (plan, approve) | **Strong** | -- | **Strong** (plan mode) | -- |
+| Acceptance criteria | **Strong** (mapped to tasks) | -- | -- | -- | -- | -- | -- |
+| Verification profiles | **Good** (fast/strict) | **Good** (quality gates) | -- | -- | -- | -- | -- |
+| Workspace from PR/issue | -- | -- | -- | **Best-in-class** | **Strong** | -- | -- |
+| Checkpoints & rollback | -- | -- | -- | **Strong** | -- | -- | -- |
+| Diff review workflow | -- | -- | -- | **Best-in-class** | -- | -- | -- |
 
-**Verdict**: Athena's Telegram integration is unique (planning interviews with inline keyboards), but its broader integration story is thin. Pilot and Factory lead with 8+ platform support each. MCP support (Conductor, Codegen) would give Athena instant access to hundreds of integrations.
+Athena has the strongest planning primitives (feature contracts with DAG ordering, acceptance criteria, verification profiles). Conductor leads on interactive review workflows (diff review, checkpoints, workspace-from-PR). Combining structured planning with interactive review remains an open opportunity.
 
 ---
 
-### 9. DEVELOPER EXPERIENCE
+### 8. Integrations & Ecosystem
 
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Conductor | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-----------|-------------|
-| Setup complexity | **Good** (single binary + config) | **Best-in-class** (single Go binary) | Easy (cloud) | Moderate (Docker) | Easy (SaaS) | Easy (Mac app) | **Best-in-class** (npm install) |
-| Interactive chat | **Strong** (CLI + Telegram) | -- | **Strong** (web IDE) | **Strong** (web UI) | **Good** (Slack/web) | **Strong** (native app) | **Strong** (CLI) |
-| Streaming responses | **Strong** (real-time) | -- | **Good** | **Good** | -- | **Good** | **Best-in-class** |
-| Voice input | **Good** (Telegram voice → STT) | -- | -- | -- | -- | -- | -- |
-| Custom commands | -- | -- | -- | -- | -- | **Strong** (slash commands) | **Strong** (slash commands) |
-| Configuration depth | **Best-in-class** (50+ knobs) | **Good** | -- | **Good** | **Good** | **Good** | **Good** (settings.json) |
-| Documentation | **Good** | **Good** | **Good** | **Strong** (academic papers) | **Good** | **Good** | **Best-in-class** |
+| Capability | Athena | Pilot | Devin | Copilot | Factory | Cursor | Claude Code | Aider |
+|------------|--------|-------|-------|---------|---------|--------|-------------|-------|
+| GitHub | **Basic** (gh CLI) | **Strong** | **Strong** | **Best-in-class** | **Strong** | **Strong** | **Good** | **Strong** (git-native) |
+| GitLab | -- | **Strong** | -- | -- | **Strong** | -- | -- | **Good** (git-native) |
+| Jira / Linear | -- | **Strong** | -- | -- | **Strong** | -- | **Strong** (MCP) | -- |
+| Slack | -- | **Strong** | **Good** | -- | **Strong** | -- | -- | -- |
+| Telegram | **Strong** (planning interview) | **Good** | -- | -- | -- | -- | -- | -- |
+| MCP protocol | -- | -- | -- | -- | -- | **Strong** | **Strong** | -- |
+| IDE integration | -- | -- | **Strong** (cloud IDE) | **Best-in-class** (VS Code, JetBrains, Xcode) | **Good** (multi-IDE) | **Best-in-class** (native IDE) | **Good** (VS Code, JetBrains) | -- (CLI only) |
+| CI/CD | -- | **Best-in-class** | -- | **Strong** (Actions) | -- | -- | **Good** | -- |
 
-**Verdict**: Athena has the deepest configuration system (50+ runtime knobs) and unique voice input via Telegram. Pilot's single-binary approach and Claude Code's simple install lead on setup simplicity. Athena should add slash commands and improve onboarding.
-
----
-
-### 10. PERSONALITY & INTERACTION
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-------------|
-| Mood system | **Best-in-class** (energy + valence + modifiers) | -- | -- | -- | -- | -- |
-| Personality modifiers | **Best-in-class** (10 states: curious, playful, analytical...) | -- | -- | -- | -- | -- |
-| Time-of-day awareness | **Best-in-class** (energy curve peaks 9-11am) | -- | -- | -- | -- | -- |
-| Idle musings | **Best-in-class** (proactive follow-ups) | -- | -- | -- | -- | -- |
-| Conversation re-entry | **Best-in-class** | -- | -- | -- | -- | -- |
-| Soul files | **Best-in-class** (customizable persona) | -- | -- | -- | -- | **Good** (CLAUDE.md) |
-| Relationship tracking | **Best-in-class** (per-user warmth, sentiment) | -- | -- | -- | -- | -- |
-
-**Verdict**: Athena is the only agent with genuine personality. No competitor has mood systems, energy curves, idle musings, or relationship tracking. This is a unique differentiator that makes Athena feel alive rather than transactional.
+Athena's Telegram integration is unique (planning interviews with inline keyboards), but its broader integration surface is thin. Pilot and Factory lead with multi-platform support. GitHub Copilot and Cursor have the deepest IDE integration. MCP support (Cursor, Claude Code) provides access to a growing tool ecosystem.
 
 ---
 
-### 11. SCHEDULING & BACKGROUND WORK
+### 9. Developer Experience
 
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-------------|
-| Cron scheduling | **Best-in-class** (POSIX cron) | -- | -- | -- | -- | -- |
-| Interval scheduling | **Best-in-class** (with jitter) | -- | -- | -- | -- | -- |
-| One-shot scheduling | **Best-in-class** | -- | -- | -- | -- | -- |
-| Background task dispatch | **Strong** | **Strong** (ticket polling) | **Good** (multi-instance) | -- | -- | -- |
-| Quiet hours | **Best-in-class** (timezone-aware) | -- | -- | -- | -- | -- |
-| Rate limiting | **Best-in-class** (4/hr for non-urgent) | -- | -- | -- | -- | -- |
+| Capability | Athena | Pilot | Devin | Cursor | Copilot | Claude Code | Aider |
+|------------|--------|-------|-------|--------|---------|-------------|-------|
+| Setup complexity | **Good** (binary + config) | **Strong** (single Go binary) | Easy (cloud) | **Best-in-class** (IDE download) | **Best-in-class** (already in VS Code) | **Best-in-class** (npm install) | **Best-in-class** (pip install) |
+| Interactive chat | **Strong** (CLI + Telegram) | -- | **Strong** (web IDE) | **Strong** (inline + sidebar) | **Strong** (inline + sidebar) | **Strong** (CLI) | **Good** (CLI) |
+| Streaming responses | **Strong** | -- | **Good** | **Strong** | **Good** | **Best-in-class** | **Good** |
+| Voice input | **Good** (Telegram voice) | -- | -- | -- | -- | -- | -- |
+| Custom commands | -- | -- | -- | -- | -- | **Strong** (slash commands) | -- |
+| Configuration depth | **Strong** (50+ knobs) | **Good** | -- | **Good** | **Good** | **Good** (settings.json) | **Good** (yaml config) |
+| Documentation | **Good** | **Good** | **Good** | **Good** | **Strong** | **Best-in-class** | **Strong** (active community) |
 
-**Verdict**: Athena's scheduling is uncontested. No other agent offers cron/interval scheduling, quiet hours, or rate-limited pulse delivery.
-
----
-
-### 12. SECURITY & COMPLIANCE
-
-| Capability | Athena | Pilot | Devin | OpenHands | Factory | Claude Code |
-|------------|--------|-------|-------|-----------|---------|-------------|
-| Container hardening | **Best-in-class** | **Good** | **Strong** | **Strong** | **Good** | -- |
-| Path traversal protection | **Best-in-class** | -- | -- | -- | -- | **Good** |
-| SSRF protection | **Best-in-class** | -- | -- | -- | -- | -- |
-| Sensitive file blocking | **Best-in-class** | -- | -- | -- | -- | -- |
-| Secrets management | **Good** (.env, inline blocking) | **Good** | -- | -- | -- | -- |
-| SOC 2 / compliance | -- | -- | -- | -- | **Best-in-class** (SOC2, GDPR, ISO) | -- |
-| Self-hosted / data privacy | **Best-in-class** | **Best-in-class** | -- (cloud) | **Good** | **Good** (enterprise mode) | **Best-in-class** |
-
-**Verdict**: Athena has the deepest technical security (container hardening + input validation). Factory leads on compliance certifications. Both Athena and Pilot excel at self-hosting for data privacy.
+IDE-based tools (Cursor, Copilot) have the lowest adoption friction. CLI tools (Claude Code, Aider) are easy to install but require terminal comfort. Athena has the deepest configuration system (50+ runtime knobs) and unique voice input via Telegram.
 
 ---
 
-## The Scoreboard
+### 10. Security & Compliance
 
-Aggregate scores across all 12 categories (0-10 scale per category):
+| Capability | Athena | Pilot | Devin | Copilot | Amazon Q | Factory | Claude Code |
+|------------|--------|-------|-------|---------|----------|---------|-------------|
+| Container hardening | **Best-in-class** | **Good** | **Strong** | **Good** | **Good** | **Good** | -- |
+| Path traversal protection | **Best-in-class** | -- | -- | -- | -- | -- | **Good** |
+| SSRF protection | **Best-in-class** | -- | -- | -- | -- | -- | -- |
+| Sensitive file blocking | **Strong** | -- | -- | -- | -- | -- | -- |
+| SOC 2 / compliance certs | -- | -- | -- | **Strong** (Microsoft) | **Best-in-class** (HIPAA, SOC2) | **Best-in-class** (SOC2, GDPR, ISO) | -- |
+| Self-hosted / data privacy | **Best-in-class** | **Best-in-class** | -- (cloud) | -- (cloud) | -- (cloud) | **Good** (enterprise) | **Best-in-class** |
 
-| Agent | Autonomy | Pipeline | Multi-Agent | Memory | Execution | Observability | Planning | Integrations | DX | Personality | Scheduling | Security | **TOTAL** |
-|-------|----------|----------|-------------|--------|-----------|---------------|----------|-------------|-----|------------|-----------|----------|-----------|
-| **Athena** | 10 | 5 | 9 | 10 | 10 | 9 | 8 | 3 | 7 | 10 | 10 | 9 | **100** |
-| **Pilot** | 7 | 10 | 3 | 4 | 7 | 5 | 5 | 8 | 8 | 1 | 5 | 7 | **70** |
-| **Devin** | 7 | 7 | 7 | 5 | 7 | 3 | 7 | 5 | 7 | 1 | 3 | 6 | **65** |
-| **Factory** | 6 | 7 | 7 | 5 | 5 | 4 | 5 | 8 | 6 | 1 | 1 | 7 | **62** |
-| **OpenHands** | 5 | 5 | 5 | 5 | 8 | 4 | 3 | 6 | 6 | 1 | 1 | 7 | **56** |
-| **Conductor** | 2 | 2 | 8 | 2 | 2 | 3 | 7 | 7 | 8 | 1 | 1 | 3 | **46** |
-| **Claude Code** | 5 | 3 | 6 | 5 | 4 | 3 | 6 | 4 | 9 | 2 | 1 | 5 | **53** |
-| **SWE-agent** | 4 | 5 | 2 | 3 | 5 | 2 | 2 | 3 | 4 | 1 | 1 | 4 | **36** |
-| **Sweep** | 4 | 7 | 2 | 2 | 3 | 2 | 2 | 4 | 6 | 1 | 1 | 3 | **37** |
-| **AutoGPT** | 5 | 2 | 3 | 3 | 3 | 2 | 3 | 2 | 3 | 1 | 1 | 2 | **30** |
+Athena has the deepest technical security hardening (container + input validation). Amazon Q and Factory lead on compliance certifications. Self-hosted tools (Athena, Pilot, Claude Code) offer the strongest data privacy guarantees.
 
 ---
 
-## Strategic Gap Analysis: What Athena Should Steal
+### 11. Experimental Features
 
-### From Pilot (Priority: HIGH)
+This category covers capabilities that are novel but not primary adoption drivers for most teams.
 
-| Feature | Impact | Effort | ROI |
-|---------|--------|--------|-----|
-| **Autopilot CI loop** (monitor CI, auto-merge on pass, create fix issues on fail) | Critical | Medium | Massive |
-| **Multi-platform ticket monitoring** (GitHub, Linear, Jira, Asana, Plane, Discord) | High | High | High |
-| **Auto-label pickup** (label ticket "athena" → picked up in 30s) | High | Low | Very High |
-| **Context engine** (92% token reduction via smart context selection) | High | High | High |
-| **Model routing** (simple tasks → fast model, complex → reasoning model) | High | Medium | High |
-| **Hot upgrade** (self-update without downtime) | Medium | Medium | Medium |
-| **Session resume** (40% token savings via context continuation) | Medium | Low | High |
+| Capability | Athena | Others |
+|------------|--------|--------|
+| Mood system (energy + valence + modifiers) | **Implemented** (10 personality states, time-of-day curves) | No competitor has this |
+| Idle musings & conversation re-entry | **Implemented** (proactive follow-ups from memory) | No competitor has this |
+| Cron/interval scheduling | **Implemented** (POSIX cron + interval with jitter + one-shot) | No competitor has this |
+| Quiet hours & rate limiting | **Implemented** (timezone-aware, 4/hr for non-urgent) | No competitor has this |
+| Soul files (persona customization) | **Implemented** (~/.athena/souls/) | Claude Code has CLAUDE.md (simpler) |
+| Relationship tracking | **Partial** (schema exists, sentiment not computed) | No competitor has this |
 
-### From Conductor (Priority: HIGH)
-
-| Feature | Impact | Effort | ROI |
-|---------|--------|--------|-----|
-| **Git worktree workspaces** (isolated parallel execution) | Critical | Medium | Massive |
-| **Diff-first review workflow** | High | Medium | High |
-| **Checkpoints & rollback** | High | Low | Very High |
-| **Slash commands** | Medium | Low | High |
-| **Workspace lifecycle scripts** | Medium | Low | High |
-
-### From Devin (Priority: MEDIUM)
-
-| Feature | Impact | Effort | ROI |
-|---------|--------|--------|-----|
-| **Critic model** (adversarial review before submission) | High | Medium | High |
-| **Codebase wiki/search** (auto-indexed, architecture diagrams) | High | High | High |
-| **Browser agent** (documentation scraping) | Medium | Medium | Medium |
-| **Dynamic re-planning** (alter strategy on roadblock) | Medium | Medium | Medium |
-
-### From Factory (Priority: MEDIUM)
-
-| Feature | Impact | Effort | ROI |
-|---------|--------|--------|-----|
-| **Specialized Droids** (Reliability Droid for incident response) | High | Medium | High |
-| **Multi-agent code review** (layered security + quality) | Medium | Medium | Medium |
-| **Incident response workflow** (triage → RCA → fix) | Medium | High | Medium |
-
-### From Claude Code (Priority: MEDIUM)
-
-| Feature | Impact | Effort | ROI |
-|---------|--------|--------|-----|
-| **MCP protocol support** | High | High | High |
-| **Hook system** (PreToolUse/PostToolUse lifecycle) | Medium | Medium | High |
-| **Worktree isolation** (declarative `isolation: worktree`) | Medium | Low | High |
-
-### From Codegen (Priority: LOW-MEDIUM)
-
-| Feature | Impact | Effort | ROI |
-|---------|--------|--------|-----|
-| **Coding conventions enforcement** (rules in repo) | Medium | Low | High |
-| **Build snapshots & caching** | Medium | Medium | Medium |
-| **Python SDK** (programmatic agent control) | Medium | High | Medium |
+These features distinguish Athena from task-only agents. They are unique among all surveyed tools. Rated as "Implemented" rather than competitive grades since no other tool offers comparable features to compare against.
 
 ---
 
-## The Definitive Implementation Roadmap
+## Weighted Scoreboard
 
-### Phase 1: Ticket Pipeline (Weeks 1-3) — Steal from Pilot
-> *"Athena should eat tickets for breakfast"*
+Raw scores (0-10) multiplied by category weights. Maximum possible: 127.5.
 
-1. **Auto-label ticket monitoring** — Watch GitHub issues for `athena` label, pick up within 30s
-2. **Autopilot CI loop** — Monitor CI after PR creation, auto-merge on green, create fix issues on red
-3. **Model routing** — Route simple tasks to fast models, complex to reasoning models
-4. **Session resume** — Reuse context across related tasks for token savings
+| Agent | Pipeline (2x) | DX (1.5x) | Integrations (1.5x) | Autonomy (1x) | Multi-Agent (1x) | Memory (1x) | Execution (1x) | Planning (1x) | Observability (0.75x) | Security (0.75x) | Experimental (0.5x) | **Weighted Total** |
+|-------|--------------|-----------|---------------------|---------------|-----------------|-------------|----------------|--------------|----------------------|------------------|---------------------|-------------------|
+| **Athena** | 5 (10) | 7 (10.5) | 3 (4.5) | 7 | 8 | 8 | 9 | 7 | 9 (6.75) | 8 (6) | 9 (4.5) | **82.25** |
+| **Pilot** | 10 (20) | 6 (9) | 8 (12) | 7 | 3 | 4 | 7 | 5 | 5 (3.75) | 7 (5.25) | 1 (0.5) | **77.5** |
+| **Copilot** | 7 (14) | 9 (13.5) | 8 (12) | 4 | 2 | 4 | 6 | 5 | 3 (2.25) | 7 (5.25) | 1 (0.5) | **68.5** |
+| **Augment** | 5 (10) | 7 (10.5) | 6 (9) | 5 | 2 | 8 | 5 | 5 | 3 (2.25) | 5 (3.75) | 1 (0.5) | **62** |
+| **Cursor** | 4 (8) | 9 (13.5) | 7 (10.5) | 5 | 4 | 5 | 4 | 5 | 3 (2.25) | 5 (3.75) | 1 (0.5) | **62.5** |
+| **Devin** | 7 (14) | 7 (10.5) | 5 (7.5) | 7 | 7 | 5 | 7 | 7 | 3 (2.25) | 6 (4.5) | 1 (0.5) | **65.25** |
+| **Claude Code** | 3 (6) | 9 (13.5) | 5 (7.5) | 5 | 6 | 5 | 4 | 6 | 3 (2.25) | 5 (3.75) | 2 (1) | **60** |
+| **Factory** | 7 (14) | 6 (9) | 7 (10.5) | 6 | 7 | 5 | 5 | 5 | 4 (3) | 8 (6) | 1 (0.5) | **66** |
+| **OpenHands** | 5 (10) | 6 (9) | 5 (7.5) | 5 | 5 | 4 | 8 | 3 | 4 (3) | 7 (5.25) | 1 (0.5) | **60.25** |
+| **Aider** | 4 (8) | 8 (12) | 4 (6) | 5 | 1 | 4 | 3 | 2 | 2 (1.5) | 3 (2.25) | 1 (0.5) | **45.25** |
+| **Jules** | 6 (12) | 6 (9) | 4 (6) | 5 | 2 | 3 | 6 | 4 | 2 (1.5) | 5 (3.75) | 1 (0.5) | **52.75** |
+| **Windsurf** | 4 (8) | 8 (12) | 6 (9) | 4 | 3 | 5 | 4 | 4 | 3 (2.25) | 5 (3.75) | 1 (0.5) | **55.5** |
+| **SWE-agent** | 5 (10) | 4 (6) | 3 (4.5) | 4 | 2 | 3 | 5 | 2 | 2 (1.5) | 4 (3) | 1 (0.5) | **41.5** |
+| **Sweep** | 7 (14) | 5 (7.5) | 4 (6) | 4 | 2 | 2 | 3 | 2 | 2 (1.5) | 3 (2.25) | 1 (0.5) | **44.75** |
 
-### Phase 2: Workspace Isolation (Weeks 3-5) — Steal from Conductor
-> *"Every ghost gets its own room"*
-
-4. **Git worktree workspaces** — Each ghost/task gets an isolated worktree
-5. **Checkpoints** — Git commit at each phase, restore to any point
-6. **Workspace lifecycle scripts** — Setup/run/teardown automation
-7. **Diff review CLI** — `athena review <workspace>` with accept/reject
-
-### Phase 3: Review & Quality (Weeks 5-7) — Steal from Devin + Factory
-> *"Trust but verify"*
-
-8. **Critic ghost** — Adversarial reviewer that checks for security, logic, style
-9. **Codebase indexing** — Auto-index repos, answer codebase questions
-10. **Multi-agent review pipeline** — Scout → Coder → Reviewer → Merger
-11. **Agent-to-agent handoff** — Structured context passing between ghosts
-
-### Phase 4: Integrations (Weeks 7-9) — Steal from Codegen + Claude Code
-> *"Play well with others"*
-
-12. **MCP protocol support** — Access the MCP tool ecosystem
-13. **Deep GitHub integration** — PR comment sync, Actions monitoring, workspace-from-PR
-14. **Linear/Jira integration** — Create tasks from issues, sync status
-15. **Slash commands** — User-definable shortcuts (`.athena/commands/`)
-
-### Phase 5: Intelligence (Weeks 9-12) — Steal from Pilot + Devin
-> *"Get smarter with every ticket"*
-
-16. **Context engine** — Smart context selection to reduce token usage
-17. **Codebase wiki** — Auto-generated architecture documentation
-18. **Dynamic re-planning** — Alter strategy when hitting roadblocks
-19. **Coding conventions enforcement** — Rules defined in repo, auto-applied
-20. **Hot self-upgrade** — Binary self-replacement without downtime
+**Reading the scores**: Athena (82.25) and Pilot (77.5) lead overall but for different reasons — Athena through depth in autonomy, memory, execution, and observability; Pilot through the pipeline and integrations. Copilot (68.5), Factory (66), and Devin (65.25) form a competitive middle tier. The spread is much narrower than raw feature counts suggest — integration breadth and DX carry heavy weight.
 
 ---
 
-## Athena's Unfair Advantages (Things Nobody Else Has)
+## Unique Differentiators
 
-These are capabilities that NO competitor has. They should be preserved, highlighted, and expanded:
+What makes each product distinct — features that no or few competitors match.
 
-### 1. Living Memory (No competitor matches this)
-- 384-dimensional semantic embeddings with ONNX
-- Recency decay with configurable half-life
-- Cosine similarity deduplication
-- 10+ memory categories (heartbeat, code_structure, health_fix, musing, pattern...)
-- Per-user relationship tracking (warmth, sentiment, topics)
-- Full-text search via FTS5
-
-### 2. Personality System (Completely unique)
-- Energy/valence mood model with time-of-day curves
-- 10 personality modifiers (curious, focused, playful, contemplative...)
-- Idle musings and conversation re-entry
-- Heartbeat reflections from soul files
-- Stochastic pulse delivery with urgency levels
-
-### 3. Four Self-Improvement Funnels (Nobody else does this)
-- Code health monitoring
-- Refactoring opportunity detection
-- Pattern recognition from memory
-- Autonomous task generation from observations
-
-### 4. Hardened Execution (Most secure sandbox)
-- CAP_DROP ALL + no new privileges
-- Read-only root filesystem
-- PID limits (256) + memory limits
-- Network isolation
-- SSRF + path traversal + sensitive file protection
-- tmpfs with noexec
-
-### 5. Deep Observability Stack (Unmatched telemetry)
-- 18 observer event types via Unix socket
-- Langfuse tracing (traces, spans, generations)
-- KPI tracking with lane/repo/risk segmentation
-- Doctor diagnostics with 8 checkpoints
-- Per-tool usage statistics (invocation, success, failure, duration)
-- Process-level introspection (RSS, CPU, error rate)
-
-### 6. Scheduling & Proactive Autonomy (Nobody else schedules)
-- POSIX cron + interval + one-shot jobs
-- Timezone-aware quiet hours
-- Rate-limited pulse delivery (4/hr for non-urgent)
-- Stochastic spontaneity gates
+| Agent | Key Differentiators |
+|-------|-------------------|
+| **Athena** | Semantic memory with ONNX embeddings + recency decay; hardened Docker sandbox (CAP_DROP ALL, SSRF/path-traversal protection); Langfuse observability; cron scheduling with quiet hours; mood/personality system |
+| **Pilot** | Autopilot CI loop (monitor, fix, merge); 8-platform ticket intake with 30s pickup; hot self-upgrade; session resume with 40% token savings |
+| **Devin** | Cloud-hosted zero-setup; Devin Wiki/Search for codebase indexing; Critic model for adversarial review; browser agent |
+| **OpenHands** | MIT licensed; broadest model support; academic research foundation; strong Docker sandbox |
+| **Cursor** | Tightest editor integration of any AI IDE; background agents; repo indexing up to 50K files; proprietary autocomplete model |
+| **Copilot** | Native GitHub Actions integration; `@copilot` issue-to-PR; Microsoft enterprise trust; broadest IDE support (VS Code, JetBrains, Xcode, Eclipse) |
+| **Amazon Q** | 66% SWE-Bench Verified; built-in security scanning; AWS-native cost optimization; HIPAA/SOC2 compliance |
+| **Augment Code** | 51.8% SWE-Bench Pro (leading); 500K+ file context engine across multiple repos; ISO 42001 AI compliance |
+| **Jules** | Fully async fire-and-forget; Gemini-powered; environment snapshots for fast re-runs |
+| **Windsurf** | Cascade engine for long multi-step edits; MCP ecosystem; live preview with one-click deploy; now Cognition-backed |
+| **Aider** | 100% open source (Apache 2.0); git-native (auto-commit, auto-stage); repo-map AST; works with any LLM provider; free |
+| **Factory** | Specialized Droids (Reliability, Security, Product, Code); SOC2/GDPR/ISO certified; incident response workflow |
+| **Claude Code** | Direct Anthropic model access; hook system (PreToolUse/PostToolUse); plan mode; worktree isolation; strong documentation |
+| **SWE-agent** | Most-cited academic agent; reproducible benchmarks; research baseline for the field |
 
 ---
 
-## Final Verdict
+## Known Limitations
 
-**Athena is the deepest autonomous agent in existence**, but it's playing a different game than most competitors. While Pilot, Devin, and Factory optimize for **ticket velocity** (issue → PR → merge), Athena optimizes for **autonomous intelligence** (memory, learning, personality, self-improvement).
+Honest gaps per product, based on public information and source inspection.
 
-The strategic play is clear: **graft Pilot's ticket pipeline and Conductor's workspace isolation onto Athena's unmatched autonomy core**. This creates an agent that is simultaneously:
+**Athena**
+- Ticket intake is manual (no polling of GitHub issues, Jira, or Linear)
+- GitHub integration wraps the `gh` CLI rather than using the API directly
+- Self-heal covers 2 error patterns (web_fetch timeout, file_edit not-found); most failures use generic retry
+- Relationship tracking schema exists but sentiment computation is not implemented
+- No dashboard or web UI — observability requires the CLI or Unix socket
+- No published SWE-bench scores
 
-- **As productive as Pilot** (ticket pickup → CI → auto-merge)
-- **As safe as Athena** (hardened sandbox, bounded autonomy, security validation)
-- **As observable as Athena** (Langfuse traces, KPI tracking, health diagnostics)
-- **As intelligent as Athena** (semantic memory, self-improvement, personality)
-- **As parallel as Conductor** (git worktree isolation, diff review, checkpoints)
+**Pilot**
+- No semantic memory or cross-session learning beyond token savings
+- No multi-agent architecture — single agent per task
+- No published SWE-bench scores
+- BSL license is not true open-source
 
-No other agent in the market would combine all five of these dimensions.
+**Devin**
+- Cloud-only with no self-hosting option — data leaves your environment
+- $500/mo makes it the most expensive option
+- No open-source component
+
+**OpenHands**
+- No long-term memory beyond event logs
+- Limited multi-agent orchestration
+- No ticket intake integrations
+
+**Cursor**
+- Proprietary, closed-source IDE fork
+- Credit-based pricing can exceed subscription cost with heavy use
+- No self-hosting option
+- Background agents require paid plan
+
+**GitHub Copilot**
+- Cloud-only — code processed by GitHub infrastructure
+- Coding agent limited to GitHub Actions environments
+- No semantic memory or learning across sessions
+
+**Augment Code**
+- No self-hosting option
+- Credit-based pricing is opaque for heavy use
+- Limited public documentation on agent architecture
+
+**Aider**
+- Single-agent only — no multi-agent orchestration
+- No sandboxing — runs directly on host
+- No ticket intake or CI integration
+- Quality depends entirely on the underlying LLM
+
+**Claude Code**
+- No sandboxing by default — runs on host
+- No long-term semantic memory (file-based memory only)
+- No scheduled or proactive behavior
+
+---
+
+## Landscape Summary
+
+The autonomous coding agent market is segmented: cloud SaaS products (Devin, Jules, Factory) optimize for zero-setup ticket velocity; IDE-native tools (Cursor, Copilot, Windsurf, Augment) optimize for developer flow; self-hosted open tools (Athena, Pilot, OpenHands, Aider) optimize for control, customization, and data privacy. SWE-bench scores favor agents with dedicated infrastructure and context engines (Amazon Q at 66% Verified, Augment at 51.8% Pro), but these measure narrow task completion, not system-level autonomy or observability. Teams choosing between these tools should weight their own priorities — pipeline depth, integration breadth, compliance requirements, self-hosting necessity, and cost — against the feature matrix above.
+
+## Why Athena Exists
+
+Athena is not a startup or a product — it's a portfolio project and personal learning ground. Building it from scratch was the fastest way to deeply understand the architecture behind autonomous agents: memory systems, sandboxed execution, multi-agent routing, LLM orchestration, and observability. Many of the subsystems (ONNX embeddings, Langfuse tracing, Docker hardening, cron scheduling) were built to answer "how would I implement this?" rather than "does the market need this?" The comparison above is the output of that learning process — mapping what exists, what's hard, and where the interesting unsolved problems are.
 
 ---
 
 ## Sources
 
+- [Athena](https://github.com/Enreign/athena) — source code inspection
 - [Pilot by Quantflow](https://pilot.quantflow.studio)
-- [Conductor](https://www.conductor.build)
 - [Devin by Cognition AI](https://cognition.ai/blog/devin-2)
 - [OpenHands](https://openhands.dev)
+- [Cursor](https://cursor.com)
+- [GitHub Copilot](https://github.com/features/copilot)
+- [GitHub Copilot Coding Agent](https://github.blog/news-insights/product-news/github-copilot-meet-the-new-coding-agent/)
+- [Amazon Q Developer](https://aws.amazon.com/q/developer/)
+- [Augment Code](https://www.augmentcode.com)
+- [Augment SWE-Bench Pro Results](https://www.augmentcode.com/blog/auggie-tops-swe-bench-pro)
+- [Google Jules](https://blog.google/technology/google-labs/jules-now-available/)
+- [Windsurf](https://windsurf.com)
+- [Aider](https://aider.chat)
 - [Factory AI](https://www.factory.ai)
+- [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview)
 - [Codegen](https://codegen.com)
-- [Claude Code](https://code.claude.com)
 - [SWE-agent](https://github.com/SWE-agent/SWE-agent)
 - [Sweep AI](https://sweep.dev)
-- [AutoGPT](https://github.com/Significant-Gravitas/AutoGPT)
 - [Cline](https://github.com/cline/cline)
+- [Conductor](https://www.conductor.build)
+- [SWE-bench Leaderboard](https://www.swebench.com)
+- [SWE-Bench Pro Leaderboard](https://scale.com/leaderboard/swe_bench_pro_public)
 - [Self-Evolving Agents Survey](https://github.com/EvoAgentX/Awesome-Self-Evolving-Agents)
-- [Anthropic Agentic Coding Trends Report 2026](https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf)
-- [Conductor Docs](https://docs.conductor.build)
-- [The New Stack: Conductor Review](https://thenewstack.io/a-hands-on-review-of-conductor-an-ai-parallel-runner-app/)
-- [OpenHands Agent SDK Paper](https://arxiv.org/abs/2511.03690)
-- [Devin AI Guide 2026](https://aitoolsdevpro.com/ai-tools/devin-guide/)
-- [Factory GA Launch](https://www.factory.ai/news/ga)
