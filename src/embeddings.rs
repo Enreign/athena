@@ -267,7 +267,8 @@ mod tests {
         for case in &cases {
             let q_emb = embedder.embed(case.query).unwrap();
             let hybrid = store.search_hybrid(case.query, Some(&q_emb), 5).unwrap();
-            let semantic = store.search_semantic(&q_emb, 5).unwrap();
+            let semantic: Vec<(String, f32)> = store.search_semantic(&q_emb, 5).unwrap()
+                .into_iter().map(|(m, s)| (m.content, s)).collect();
             results.push(evaluate_bench_query(case, &hybrid, &semantic, &memory_contents));
         }
 
@@ -841,6 +842,10 @@ mod tests {
             .filter(|i| case.forbidden.contains(i))
             .count();
 
+        let prec_1 = precision_at(&retrieved_1, 1);
+        let prec_3 = precision_at(&retrieved_3, 3);
+        let prec_5 = precision_at(&retrieved_5, 5);
+
         QueryResult {
             query: case.query.to_string(),
             category: case.category.to_string(),
@@ -854,9 +859,9 @@ mod tests {
             hit_3,
             hit_5,
             rr,
-            prec_1: precision_at(&retrieved_1, 1),
-            prec_3: precision_at(&retrieved_3, 3),
-            prec_5: precision_at(&retrieved_5, 5),
+            prec_1,
+            prec_3,
+            prec_5,
             distractor_count,
         }
     }
