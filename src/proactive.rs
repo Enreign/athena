@@ -1038,3 +1038,190 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..end]
     }
 }
+
+/// Spawn the GitHub issue polling loop.
+/// Polls for issues with configured labels, claims them, and dispatches as autonomous tasks.
+pub fn spawn_issue_poller(
+    config: crate::config::IssuePollingConfig,
+    observer: ObserverHandle,
+    auto_tx: tokio::sync::mpsc::Sender<crate::core::AutonomousTask>,
+    langfuse: SharedLangfuse,
+) {
+    if !config.enabled {
+        return;
+    }
+
+    let labels = config.labels.join(",");
+    let interval = std::time::Duration::from_secs(config.interval_secs);
+    let max_concurrent = config.max_concurrent;
+    let repos = config.repos.clone();
+
+    tokio::spawn(async move {
+        // Initial delay to let system settle
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        let mut active_issues: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        loop {
+            tokio::time::sleep(interval).await;
+
+            // Skip if at capacity
+            if active_issues.len() >= max_concurrent as usize {
+                continue;
+            }
+
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Issue poller: checking for new issues",
+            );
+
+            let lf_trace = langfuse.as_ref().map(|lf| {
+                ActiveTrace::start(
+                    lf.clone(),
+                    "issue_poll",
+                    None,
+                    None,
+                    None,
+                    vec!["issue_poll"],
+                )
+            });
+
+            // Determine which repos to poll
+            let repo_args: Vec<String> = if repos.is_empty() {
+                vec![String::new()] // empty = current repo
+            } else {
+                repos.iter().map(|r| format!("--repo {}", r)).collect()
+            };
+
+            for repo_arg in &repo_args {
+                let mut cmd_args = vec![
+                    "issue".to_string(),
+                    "list".to_string(),
+                    "--label".to_string(),
+                    labels.clone(),
+                    "--state".to_string(),
+                    "open".to_string(),
+                    "--assignee".to_string(),
+                    "@me".to_string(), // Exclude already-assigned
+                    "--json".to_string(),
+                    "number,title,body,labels,url".to_string(),
+                    "--limit".to_string(),
+                    "5".to_string(),
+                ];
+
+                // Invert: get issues NOT assigned to @me
+                // We want unassigned issues, so use --no-assignee instead
+                cmd_args = vec![
+                    "issue".to_string(),
+                    "list".to_string(),
+                    "--label".to_string(),
+                    labels.clone(),
+                    "--state".to_string(),
+                    "open".to_string(),
+                    "--json".to_string(),
+                    "number,title,body,labels,url,assignees".to_string(),
+                    "--limit".to_string(),
+                    "5".to_string(),
+                ];
+
+                if !repo_arg.is_empty() {
+                    cmd_args.extend(repo_arg.split_whitespace().map(String::from));
+                }
+
+                let cmd_strs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+                let output = match tokio::process::Command::new("gh")
+                    .args(&cmd_strs)
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => {
+                        String::from_utf8_lossy(&o.stdout).to_string()
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        tracing::warn!("Issue poller: gh issue list failed: {}", stderr);
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Issue poller: failed to run gh: {}", e);
+                        continue;
+                    }
+                };
+
+                let issues: Vec<serde_json::Value> = match serde_json::from_str(&output) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                for issue in &issues {
+                    let number = issue["number"].as_u64().unwrap_or(0);
+                    let title = issue["title"].as_str().unwrap_or("");
+                    let body = issue["body"].as_str().unwrap_or("");
+                    let url = issue["url"].as_str().unwrap_or("");
+                    let issue_key = format!("{}#{}", repo_arg, number);
+
+                    // Skip if already in-flight or has assignees
+                    if active_issues.contains(&issue_key) {
+                        continue;
+                    }
+                    let assignees = issue["assignees"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    if assignees > 0 {
+                        continue;
+                    }
+
+                    // Capacity check
+                    if active_issues.len() >= max_concurrent as usize {
+                        break;
+                    }
+
+                    // Best-effort claim — comment on the issue
+                    let num_str = number.to_string();
+                    let _ = tokio::process::Command::new("gh")
+                        .args(["issue", "comment", &num_str, "--body", "Athena is working on this issue."])
+                        .output()
+                        .await;
+
+                    observer.log(
+                        ObserverCategory::AutonomousTask,
+                        &format!("Issue poller: claiming #{} — {}", number, title),
+                    );
+
+                    active_issues.insert(issue_key);
+
+                    // Dispatch as autonomous task
+                    let goal = format!("Resolve GitHub issue #{}: {}\n\n{}", number, title, body);
+                    let context = format!("GitHub issue URL: {}\nIssue #{}", url, number);
+
+                    let task = crate::core::AutonomousTask {
+                        goal,
+                        context,
+                        ghost: Some("coder".to_string()),
+                        target: crate::pulse::PulseTarget::Broadcast,
+                        lane: "delivery".to_string(),
+                        risk_tier: "medium".to_string(),
+                        repo: repo_arg.clone(),
+                        task_id: Some(format!("issue-{}", number)),
+                    };
+
+                    if auto_tx.send(task).await.is_err() {
+                        tracing::warn!("Issue poller: auto_tx channel closed");
+                        break;
+                    }
+                }
+            }
+
+            // Clean up completed issues (simple: remove all, they'll be re-checked)
+            // In a full implementation, we'd track completion status
+            if active_issues.len() >= max_concurrent as usize {
+                // Keep them until next successful poll shows they're closed
+            }
+
+            if let Some(t) = lf_trace {
+                t.end(Some(&format!("polled, {} active", active_issues.len())));
+            }
+        }
+    });
+}

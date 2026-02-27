@@ -128,6 +128,14 @@ enabled = false
 # auto_merge = false          # auto-merge on success (low-risk tier only)
 # timeout_secs = 600          # max wait per CI cycle
 
+# Issue polling — automatically discover and work on labeled GitHub issues
+[issue_polling]
+enabled = false
+# interval_secs = 300          # polling frequency (default: 5 minutes)
+# labels = ["athena"]          # only pick up issues with these labels
+# max_concurrent = 1           # max parallel issue tasks
+# repos = []                   # repos to poll (empty = current repo)
+
 [github]
 # token = "ghp_..."  # discouraged; prefer GH_TOKEN env var or .env
 

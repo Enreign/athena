@@ -50,6 +50,8 @@ pub struct Config {
     pub langfuse: LangfuseConfig,
     #[serde(default)]
     pub ci: CiConfig,
+    #[serde(default)]
+    pub issue_polling: IssuePollingConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -572,6 +574,48 @@ fn default_ci_timeout() -> u64 {
     600
 }
 
+/// Issue polling configuration — automatically discover and work on GitHub issues.
+#[derive(Debug, Deserialize, Clone)]
+pub struct IssuePollingConfig {
+    /// Enable automatic issue polling. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Polling interval in seconds (default: 300 = 5 minutes).
+    #[serde(default = "default_issue_poll_interval")]
+    pub interval_secs: u64,
+    /// Only pick up issues with these labels (default: ["athena"]).
+    #[serde(default = "default_issue_labels")]
+    pub labels: Vec<String>,
+    /// Maximum concurrent issue tasks (default: 1).
+    #[serde(default = "default_issue_max_concurrent")]
+    pub max_concurrent: u32,
+    /// Repos to poll (owner/repo format). Empty = current repo only.
+    #[serde(default)]
+    pub repos: Vec<String>,
+}
+
+impl Default for IssuePollingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_issue_poll_interval(),
+            labels: default_issue_labels(),
+            max_concurrent: default_issue_max_concurrent(),
+            repos: Vec::new(),
+        }
+    }
+}
+
+fn default_issue_poll_interval() -> u64 {
+    300
+}
+fn default_issue_labels() -> Vec<String> {
+    vec!["athena".to_string()]
+}
+fn default_issue_max_concurrent() -> u32 {
+    1
+}
+
 fn default_metrics_interval() -> u64 {
     30
 }
@@ -843,6 +887,7 @@ impl Default for Config {
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
             ci: CiConfig::default(),
+            issue_polling: IssuePollingConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }

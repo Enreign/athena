@@ -485,6 +485,12 @@ fn spawn_housekeeping_loops(
         auto_tx.clone(),
         langfuse.clone(),
     );
+    proactive::spawn_issue_poller(
+        config.issue_polling.clone(),
+        observer.clone(),
+        auto_tx.clone(),
+        langfuse.clone(),
+    );
 }
 
 fn spawn_stale_started_sweeper(outcome_store: Arc<TaskOutcomeStore>, observer: ObserverHandle) {
