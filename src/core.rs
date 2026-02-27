@@ -498,7 +498,7 @@ fn spawn_housekeeping_loops(
                 );
             }
             Err(e) => {
-                tracing::warn!(\"Ticket intake store unavailable: {}\", e);
+                tracing::warn!("Ticket intake store unavailable: {}", e);
             }
         }
     }
