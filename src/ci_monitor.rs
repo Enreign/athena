@@ -149,94 +149,20 @@ pub async fn monitor_pr_ci(
 
     let mut polls = Vec::new();
     let mut heal_attempts = Vec::new();
-    let mut merged_after_ci = false;
     let start = Instant::now();
     let poll_wait = poll_interval.max(5);
-    let mut final_status = "timeout".to_string();
 
-    loop {
-        if start.elapsed() >= Duration::from_secs(timeout) {
-            ctx.log("ci monitor timeout");
-            final_status = "timeout".to_string();
-            break;
-        }
+    let final_status = monitor_poll_loop(
+        pr_url, repo_root, config, heal, max_heal, timeout, poll_wait,
+        &branch_name, &mut polls, &mut heal_attempts, &start, &mut ctx,
+    )
+    .await;
 
-        let poll = poll_pr_ci_status_internal(pr_url, repo_root, &mut ctx).await;
-        let overall = poll.overall.clone();
-        polls.push(poll.clone());
-
-        match overall.as_str() {
-            "passing" => {
-                final_status = if heal_attempts.is_empty() {
-                    "ci_passed"
-                } else {
-                    "heal_succeeded"
-                }
-                .to_string();
-                ctx.log(format!("ci monitor success status={}", final_status));
-                break;
-            }
-            "failing" => {
-                ctx.log("ci monitor detected failing checks");
-                let can_heal = heal && max_heal > 0 && branch_name.is_some();
-                if !can_heal {
-                    final_status = "ci_failed".to_string();
-                    ctx.log("ci monitor failing without heal capability");
-                    break;
-                }
-                if heal_attempts.len() >= max_heal as usize {
-                    final_status = "heal_exhausted".to_string();
-                    ctx.log("ci monitor heal attempts exhausted");
-                    break;
-                }
-                let attempt_num = heal_attempts.len() as u8 + 1;
-                let failure_logs =
-                    extract_failed_ci_logs_internal(pr_url, repo_root, &mut ctx).await;
-                let mut attempt = heal_ci_failure_internal(
-                    repo_root,
-                    branch_name.as_deref().unwrap_or(""),
-                    &failure_logs,
-                    attempt_num,
-                    config,
-                    &mut ctx,
-                )
-                .await;
-                attempt.ci_result = Some(poll.clone());
-                heal_attempts.push(attempt);
-                ctx.log(format!("ci monitor heal attempt {} dispatched", attempt_num));
-                tokio::time::sleep(Duration::from_secs(poll_wait)).await;
-            }
-            _ => {
-                ctx.log("ci monitor pending checks");
-                tokio::time::sleep(Duration::from_secs(poll_wait)).await;
-            }
-        }
-    }
-
-    if auto_merge
-        && (final_status == "ci_passed" || final_status == "heal_succeeded")
-    {
-        let merge_run = run_command_capture(
-            repo_root,
-            "gh",
-            &[
-                "pr".to_string(),
-                "merge".to_string(),
-                pr_url.to_string(),
-                "--squash".to_string(),
-                "--delete-branch".to_string(),
-            ],
-            240,
-        )
-        .await;
-        ctx.record("gh_pr_merge", &merge_run);
-        if command_succeeded(&merge_run) {
-            merged_after_ci = true;
-            ctx.log("ci monitor auto-merge succeeded");
-        } else {
-            ctx.log("ci monitor auto-merge failed");
-        }
-    }
+    let merged_after_ci = if auto_merge && (final_status == "ci_passed" || final_status == "heal_succeeded") {
+        try_auto_merge(pr_url, repo_root, &mut ctx).await
+    } else {
+        false
+    };
 
     let finished_utc = chrono::Utc::now().to_rfc3339();
     CiMonitorReport {
@@ -249,6 +175,107 @@ pub async fn monitor_pr_ci(
         heal_attempts,
         merged_after_ci,
         commands: ctx.commands,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn monitor_poll_loop(
+    pr_url: &str,
+    repo_root: &Path,
+    config: &Config,
+    heal: bool,
+    max_heal: u8,
+    timeout: u64,
+    poll_wait: u64,
+    branch_name: &Option<String>,
+    polls: &mut Vec<CiPollResult>,
+    heal_attempts: &mut Vec<CiHealAttempt>,
+    start: &Instant,
+    ctx: &mut CiMonitorContext,
+) -> String {
+    loop {
+        if start.elapsed() >= Duration::from_secs(timeout) {
+            ctx.log("ci monitor timeout");
+            return "timeout".to_string();
+        }
+
+        let poll = poll_pr_ci_status_internal(pr_url, repo_root, ctx).await;
+        let overall = poll.overall.clone();
+        polls.push(poll.clone());
+
+        match overall.as_str() {
+            "passing" => {
+                let s = if heal_attempts.is_empty() { "ci_passed" } else { "heal_succeeded" };
+                ctx.log(format!("ci monitor success status={}", s));
+                return s.to_string();
+            }
+            "failing" => {
+                if let Some(status) = handle_failing_poll(
+                    repo_root, config, heal, max_heal, branch_name,
+                    pr_url, &poll, heal_attempts, ctx,
+                ).await {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_secs(poll_wait)).await;
+            }
+            _ => {
+                ctx.log("ci monitor pending checks");
+                tokio::time::sleep(Duration::from_secs(poll_wait)).await;
+            }
+        }
+    }
+}
+
+async fn handle_failing_poll(
+    repo_root: &Path,
+    config: &Config,
+    heal: bool,
+    max_heal: u8,
+    branch_name: &Option<String>,
+    pr_url: &str,
+    poll: &CiPollResult,
+    heal_attempts: &mut Vec<CiHealAttempt>,
+    ctx: &mut CiMonitorContext,
+) -> Option<String> {
+    ctx.log("ci monitor detected failing checks");
+    let can_heal = heal && max_heal > 0 && branch_name.is_some();
+    if !can_heal {
+        ctx.log("ci monitor failing without heal capability");
+        return Some("ci_failed".to_string());
+    }
+    if heal_attempts.len() >= max_heal as usize {
+        ctx.log("ci monitor heal attempts exhausted");
+        return Some("heal_exhausted".to_string());
+    }
+    let attempt_num = heal_attempts.len() as u8 + 1;
+    let failure_logs = extract_failed_ci_logs_internal(pr_url, repo_root, ctx).await;
+    let mut attempt = heal_ci_failure_internal(
+        repo_root, branch_name.as_deref().unwrap_or(""),
+        &failure_logs, attempt_num, config, ctx,
+    ).await;
+    attempt.ci_result = Some(poll.clone());
+    heal_attempts.push(attempt);
+    ctx.log(format!("ci monitor heal attempt {} dispatched", attempt_num));
+    None
+}
+
+async fn try_auto_merge(pr_url: &str, repo_root: &Path, ctx: &mut CiMonitorContext) -> bool {
+    let merge_run = run_command_capture(
+        repo_root,
+        "gh",
+        &[
+            "pr".to_string(), "merge".to_string(), pr_url.to_string(),
+            "--squash".to_string(), "--delete-branch".to_string(),
+        ],
+        240,
+    ).await;
+    ctx.record("gh_pr_merge", &merge_run);
+    if command_succeeded(&merge_run) {
+        ctx.log("ci monitor auto-merge succeeded");
+        true
+    } else {
+        ctx.log("ci monitor auto-merge failed");
+        false
     }
 }
 
@@ -415,7 +442,7 @@ async fn heal_ci_failure_internal(
     ctx: &mut CiMonitorContext,
 ) -> CiHealAttempt {
     let trimmed_logs = tail_text(failure_logs, CI_LOG_TAIL_CHARS);
-    let mut attempt_record = CiHealAttempt {
+    let mut rec = CiHealAttempt {
         attempt,
         failure_logs: trimmed_logs.clone(),
         dispatch_task_id: None,
@@ -425,21 +452,32 @@ async fn heal_ci_failure_internal(
     };
 
     if branch.trim().is_empty() {
-        attempt_record.dispatch_status = "failed: missing branch".to_string();
-        return attempt_record;
+        rec.dispatch_status = "failed: missing branch".to_string();
+        return rec;
     }
 
+    let worktree_path = match setup_heal_worktree(repo_root, branch, ctx).await {
+        Ok(p) => p,
+        Err(reason) => { rec.dispatch_status = reason; return rec; }
+    };
+
+    let result = run_heal_dispatch(&worktree_path, repo_root, branch, &trimmed_logs, attempt, config, ctx, &mut rec).await;
+    cleanup_ci_worktree(repo_root, &worktree_path, ctx).await;
+    rec.dispatch_status = result;
+    rec
+}
+
+async fn setup_heal_worktree(
+    repo_root: &Path,
+    branch: &str,
+    ctx: &mut CiMonitorContext,
+) -> Result<std::path::PathBuf, String> {
     let fetch = run_command_capture(
-        repo_root,
-        "git",
-        &args(&["fetch", "origin", branch]),
-        CI_COMMAND_TIMEOUT_SECS,
-    )
-    .await;
+        repo_root, "git", &args(&["fetch", "origin", branch]), CI_COMMAND_TIMEOUT_SECS,
+    ).await;
     ctx.record("git_fetch", &fetch);
     if !command_succeeded(&fetch) {
-        attempt_record.dispatch_status = "failed: git fetch".to_string();
-        return attempt_record;
+        return Err("failed: git fetch".to_string());
     }
 
     let worktree_root = repo_root.join(".worktrees");
@@ -450,52 +488,46 @@ async fn heal_ci_failure_internal(
 
     if worktree_path.exists() {
         let remove = run_command_capture(
-            repo_root,
-            "git",
+            repo_root, "git",
             &args(&["worktree", "remove", "--force", &worktree_path_s]),
             CI_COMMAND_TIMEOUT_SECS,
-        )
-        .await;
+        ).await;
         ctx.record("git_worktree_remove", &remove);
     }
 
     let add = run_command_capture(
-        repo_root,
-        "git",
-        &args(&[
-            "worktree",
-            "add",
-            &worktree_path_s,
-            &format!("origin/{}", branch),
-        ]),
+        repo_root, "git",
+        &args(&["worktree", "add", &worktree_path_s, &format!("origin/{}", branch)]),
         CI_COMMAND_TIMEOUT_SECS,
-    )
-    .await;
+    ).await;
     ctx.record("git_worktree_add", &add);
     if !command_succeeded(&add) {
-        attempt_record.dispatch_status = "failed: git worktree add".to_string();
-        return attempt_record;
+        return Err("failed: git worktree add".to_string());
     }
+    Ok(worktree_path)
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn run_heal_dispatch(
+    worktree_path: &Path,
+    repo_root: &Path,
+    branch: &str,
+    trimmed_logs: &str,
+    attempt: u8,
+    config: &Config,
+    ctx: &mut CiMonitorContext,
+    rec: &mut CiHealAttempt,
+) -> String {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(e) => {
-            attempt_record.dispatch_status = format!("failed: current_exe {}", e);
-            cleanup_ci_worktree(repo_root, &worktree_path, ctx).await;
-            return attempt_record;
-        }
+        Err(e) => return format!("failed: current_exe {}", e),
     };
 
     let mut dispatch_args = vec![
-        "dispatch".to_string(),
-        "--goal".to_string(),
-        "Fix CI failure".to_string(),
-        "--context".to_string(),
-        trimmed_logs.clone(),
-        "--ghost".to_string(),
-        "coder".to_string(),
-        "--wait-secs".to_string(),
-        CI_DISPATCH_WAIT_SECS.to_string(),
+        "dispatch".to_string(), "--goal".to_string(), "Fix CI failure".to_string(),
+        "--context".to_string(), trimmed_logs.to_string(),
+        "--ghost".to_string(), "coder".to_string(),
+        "--wait-secs".to_string(), CI_DISPATCH_WAIT_SECS.to_string(),
     ];
     if let Some(config_path) = resolve_child_dispatch_config_path(repo_root) {
         dispatch_args.insert(0, config_path.to_string_lossy().to_string());
@@ -504,19 +536,15 @@ async fn heal_ci_failure_internal(
 
     let exe_s = exe.to_string_lossy().to_string();
     let dispatch_run = run_command_capture(
-        &worktree_path,
-        &exe_s,
-        &dispatch_args,
-        CI_DISPATCH_WAIT_SECS.saturating_add(180),
-    )
-    .await;
+        worktree_path, &exe_s, &dispatch_args, CI_DISPATCH_WAIT_SECS.saturating_add(180),
+    ).await;
     ctx.record("athena_dispatch_ci_heal", &dispatch_run);
 
     let dispatch_output = command_combined_output(&dispatch_run);
     let dispatch_task_id = parse_dispatch_task_id(&dispatch_output);
-    attempt_record.dispatch_task_id = dispatch_task_id.clone();
+    rec.dispatch_task_id = dispatch_task_id.clone();
 
-    let mut dispatch_status = if dispatch_run.timed_out {
+    let mut status = if dispatch_run.timed_out {
         "timeout".to_string()
     } else if dispatch_run.exit_code == Some(0) {
         "succeeded".to_string()
@@ -525,85 +553,73 @@ async fn heal_ci_failure_internal(
     };
     if let Some(task_id) = dispatch_task_id.as_deref() {
         let _ = wait_for_terminal_outcome_status(config, task_id, 30).await;
-        if let Ok(Some(status)) = read_task_outcome_status(config, task_id) {
-            dispatch_status = status;
+        if let Ok(Some(s)) = read_task_outcome_status(config, task_id) {
+            status = s;
         }
     }
 
+    commit_and_push_heal(worktree_path, branch, attempt, ctx, rec, &mut status).await;
+    status
+}
+
+async fn commit_and_push_heal(
+    worktree_path: &Path,
+    branch: &str,
+    attempt: u8,
+    ctx: &mut CiMonitorContext,
+    rec: &mut CiHealAttempt,
+    status: &mut String,
+) {
     let status_run = run_command_capture(
-        &worktree_path,
-        "git",
-        &args(&["status", "--porcelain"]),
-        CI_COMMAND_TIMEOUT_SECS,
-    )
-    .await;
+        worktree_path, "git", &args(&["status", "--porcelain"]), CI_COMMAND_TIMEOUT_SECS,
+    ).await;
     ctx.record("git_status", &status_run);
-    let has_changes = !status_run.stdout.trim().is_empty();
-
-    if has_changes {
-        let add_run = run_command_capture(
-            &worktree_path,
-            "git",
-            &args(&["add", "-A"]),
-            CI_COMMAND_TIMEOUT_SECS,
-        )
-        .await;
-        ctx.record("git_add", &add_run);
-        if command_succeeded(&add_run) {
-            let commit_msg = format!("ci-heal: attempt {}", attempt);
-            let commit_run = run_command_capture(
-                &worktree_path,
-                "git",
-                &[
-                    "commit".to_string(),
-                    "-m".to_string(),
-                    commit_msg,
-                ],
-                CI_COMMAND_TIMEOUT_SECS,
-            )
-            .await;
-            ctx.record("git_commit", &commit_run);
-            if command_succeeded(&commit_run) {
-                let rev_run = run_command_capture(
-                    &worktree_path,
-                    "git",
-                    &args(&["rev-parse", "HEAD"]),
-                    CI_COMMAND_TIMEOUT_SECS,
-                )
-                .await;
-                ctx.record("git_rev_parse", &rev_run);
-                if command_succeeded(&rev_run) {
-                    let sha = rev_run.stdout.trim();
-                    if !sha.is_empty() {
-                        attempt_record.commit_sha = Some(sha.to_string());
-                    }
-                }
-
-                let push_run = run_command_capture(
-                    &worktree_path,
-                    "git",
-                    &args(&["push", "origin", &format!("HEAD:{}", branch)]),
-                    CI_COMMAND_TIMEOUT_SECS,
-                )
-                .await;
-                ctx.record("git_push", &push_run);
-                if !command_succeeded(&push_run) {
-                    dispatch_status.push_str(" (push_failed)");
-                }
-            } else {
-                dispatch_status.push_str(" (commit_failed)");
-            }
-        } else {
-            dispatch_status.push_str(" (add_failed)");
-        }
-    } else {
-        dispatch_status.push_str(" (no_changes)");
+    if status_run.stdout.trim().is_empty() {
+        status.push_str(" (no_changes)");
+        return;
     }
 
-    attempt_record.dispatch_status = dispatch_status;
+    let add_run = run_command_capture(
+        worktree_path, "git", &args(&["add", "-A"]), CI_COMMAND_TIMEOUT_SECS,
+    ).await;
+    ctx.record("git_add", &add_run);
+    if !command_succeeded(&add_run) {
+        status.push_str(" (add_failed)");
+        return;
+    }
 
-    cleanup_ci_worktree(repo_root, &worktree_path, ctx).await;
-    attempt_record
+    let commit_msg = format!("ci-heal: attempt {}", attempt);
+    let commit_run = run_command_capture(
+        worktree_path, "git",
+        &["commit".to_string(), "-m".to_string(), commit_msg],
+        CI_COMMAND_TIMEOUT_SECS,
+    ).await;
+    ctx.record("git_commit", &commit_run);
+    if !command_succeeded(&commit_run) {
+        status.push_str(" (commit_failed)");
+        return;
+    }
+
+    let rev_run = run_command_capture(
+        worktree_path, "git", &args(&["rev-parse", "HEAD"]), CI_COMMAND_TIMEOUT_SECS,
+    ).await;
+    ctx.record("git_rev_parse", &rev_run);
+    if command_succeeded(&rev_run) {
+        let sha = rev_run.stdout.trim();
+        if !sha.is_empty() {
+            rec.commit_sha = Some(sha.to_string());
+        }
+    }
+
+    let push_run = run_command_capture(
+        worktree_path, "git",
+        &args(&["push", "origin", &format!("HEAD:{}", branch)]),
+        CI_COMMAND_TIMEOUT_SECS,
+    ).await;
+    ctx.record("git_push", &push_run);
+    if !command_succeeded(&push_run) {
+        status.push_str(" (push_failed)");
+    }
 }
 
 async fn cleanup_ci_worktree(repo_root: &Path, worktree_path: &Path, ctx: &mut CiMonitorContext) {
