@@ -6,6 +6,7 @@ use tokio::time::{Duration, MissedTickBehavior};
 use crate::knobs::SharedKnobs;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::ticket_intake::provider::ExternalTicket;
+use crate::ticket_intake::store::TicketSyncRecord;
 use crate::ticket_intake::{TicketIntakeStore, TicketProvider};
 
 const SYNC_INTERVAL_SECS: u64 = 30;
@@ -37,83 +38,108 @@ pub fn spawn_ticket_status_sync(
         loop {
             tick.tick().await;
 
-            let poll_enabled = {
-                let k = knobs.read().unwrap();
-                k.ticket_intake_enabled
-            };
-            if !poll_enabled && !webhook_enabled {
+            if !should_run_sync(&knobs, webhook_enabled) {
                 continue;
             }
 
-            let pending = match store.get_pending_syncs(25) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    observer.log(
-                        ObserverCategory::TicketIntake,
-                        format!("Ticket sync query failed: {}", e),
-                    );
-                    continue;
-                }
-            };
-
-            if pending.is_empty() {
-                continue;
-            }
-
-            for item in pending {
-                let Some(provider) = providers.get(&item.provider) else {
-                    observer.log(
-                        ObserverCategory::TicketIntake,
-                        format!("Ticket sync skipped: missing provider {}", item.provider),
-                    );
-                    let _ = store.update_status(&item.dedup_key, "sync_skipped");
-                    continue;
-                };
-
-                if !provider.supports_writeback() {
-                    let _ = store.update_status(&item.dedup_key, "sync_skipped");
-                    continue;
-                }
-
-                let ticket = ExternalTicket {
-                    external_id: item.external_id.clone(),
-                    number: item.issue_number.clone(),
-                    provider: item.provider.clone(),
-                    title: item.title.clone(),
-                    body: String::new(),
-                    labels: Vec::new(),
-                    priority: None,
-                    repo: repo_from_provider(&item.provider),
-                    url: String::new(),
-                    author: None,
-                };
-
-                let message = format_sync_comment(&item);
-
-                let comment_result = provider.post_comment(&ticket, &message).await;
-                if let Err(e) = &comment_result {
-                    observer.log(
-                        ObserverCategory::TicketIntake,
-                        format!("Ticket sync comment failed: {}", e),
-                    );
-                }
-                let status_result = provider.update_status(&ticket, &item.task_status).await;
-                if let Err(e) = &status_result {
-                    observer.log(
-                        ObserverCategory::TicketIntake,
-                        format!("Ticket sync status update failed: {}", e),
-                    );
-                }
-
-                let new_status = if comment_result.is_ok() && status_result.is_ok() {
-                    "synced"
-                } else {
-                    "sync_failed"
-                };
-                let _ = store.update_status(&item.dedup_key, new_status);
-            }
+            process_pending_syncs(&observer, store.as_ref(), &providers).await;
         }
     });
+}
+
+fn should_run_sync(knobs: &SharedKnobs, webhook_enabled: bool) -> bool {
+    let poll_enabled = {
+        let k = knobs.read().unwrap();
+        k.ticket_intake_enabled
+    };
+    poll_enabled || webhook_enabled
+}
+
+async fn process_pending_syncs(
+    observer: &ObserverHandle,
+    store: &TicketIntakeStore,
+    providers: &HashMap<String, Arc<dyn TicketProvider>>,
+) {
+    let pending = match store.get_pending_syncs(25) {
+        Ok(rows) => rows,
+        Err(e) => {
+            observer.log(
+                ObserverCategory::TicketIntake,
+                format!("Ticket sync query failed: {}", e),
+            );
+            return;
+        }
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    for item in pending {
+        sync_record(observer, store, providers, item).await;
+    }
+}
+
+async fn sync_record(
+    observer: &ObserverHandle,
+    store: &TicketIntakeStore,
+    providers: &HashMap<String, Arc<dyn TicketProvider>>,
+    item: TicketSyncRecord,
+) {
+    let Some(provider) = providers.get(&item.provider) else {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!("Ticket sync skipped: missing provider {}", item.provider),
+        );
+        let _ = store.update_status(&item.dedup_key, "sync_skipped");
+        return;
+    };
+
+    if !provider.supports_writeback() {
+        let _ = store.update_status(&item.dedup_key, "sync_skipped");
+        return;
+    }
+
+    let ticket = build_sync_ticket(&item);
+    let message = format_sync_comment(&item);
+
+    let comment_result = provider.post_comment(&ticket, &message).await;
+    if let Err(e) = &comment_result {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!("Ticket sync comment failed: {}", e),
+        );
+    }
+
+    let status_result = provider.update_status(&ticket, &item.task_status).await;
+    if let Err(e) = &status_result {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!("Ticket sync status update failed: {}", e),
+        );
+    }
+
+    let new_status = if comment_result.is_ok() && status_result.is_ok() {
+        "synced"
+    } else {
+        "sync_failed"
+    };
+    let _ = store.update_status(&item.dedup_key, new_status);
+}
+
+fn build_sync_ticket(item: &TicketSyncRecord) -> ExternalTicket {
+    ExternalTicket {
+        external_id: item.external_id.clone(),
+        number: item.issue_number.clone(),
+        provider: item.provider.clone(),
+        title: item.title.clone(),
+        body: String::new(),
+        labels: Vec::new(),
+        priority: None,
+        repo: repo_from_provider(&item.provider),
+        url: String::new(),
+        author: None,
+    }
 }
 
 fn format_sync_comment(item: &crate::ticket_intake::store::TicketSyncRecord) -> String {

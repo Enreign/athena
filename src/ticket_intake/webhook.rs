@@ -233,33 +233,69 @@ async fn handle_linear(
         }
     };
 
-    if payload.r#type.as_deref() != Some("Issue") {
+    let Some(ticket) = build_linear_ticket(&state, payload) else {
         return StatusCode::OK;
-    }
-
-    let data = match payload.data {
-        Some(d) => d,
-        None => return StatusCode::OK,
     };
 
-    let team_key = data
-        .get("team")
+    dispatch_ticket(&state, ticket).await
+}
+
+async fn handle_jira(
+    State(state): State<WebhookState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    if !verify_token(&state.secrets.jira, &headers, "X-Atlassian-Webhook-Token") {
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    let payload: JiraWebhookPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            state.observer.log(
+                ObserverCategory::TicketIntake,
+                format!("Jira webhook parse error: {}", e),
+            );
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
+    let Some(ticket) = build_jira_ticket(&state, payload) else {
+        return StatusCode::OK;
+    };
+
+    dispatch_ticket(&state, ticket).await
+}
+
+fn build_linear_ticket(state: &WebhookState, payload: LinearWebhookPayload) -> Option<ExternalTicket> {
+    if payload.r#type.as_deref() != Some("Issue") {
+        return None;
+    }
+    let data = payload.data?;
+    let team_key = linear_team_key(&data);
+    let source = match_source(&state.sources, "linear", &team_key)?;
+    let labels = extract_linear_labels(&data);
+    if !labels.is_empty() && !labels_match(&labels, &source.filter_label) {
+        return None;
+    }
+    Some(linear_ticket_from_data(&source, &data, labels))
+}
+
+fn linear_team_key(data: &Value) -> String {
+    data.get("team")
         .and_then(|t| t.get("key"))
         .and_then(|k| k.as_str())
         .map(|s| s.to_string())
         .or_else(|| data.get("teamId").and_then(|t| t.as_str()).map(|s| s.to_string()))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    let Some(source) = match_source(&state.sources, "linear", &team_key) else {
-        return StatusCode::OK;
-    };
-
-    let labels = extract_linear_labels(&data);
-    if !labels.is_empty() && !labels_match(&labels, &source.filter_label) {
-        return StatusCode::OK;
-    }
-
-    let ticket = ExternalTicket {
+fn linear_ticket_from_data(
+    source: &TicketIntakeSourceConfig,
+    data: &Value,
+    labels: Vec<String>,
+) -> ExternalTicket {
+    ExternalTicket {
         external_id: data
             .get("id")
             .and_then(|v| v.as_str())
@@ -296,46 +332,13 @@ async fn handle_linear(
             .and_then(|c| c.get("name"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-    };
-
-    dispatch_ticket(&state, ticket).await
+    }
 }
 
-async fn handle_jira(
-    State(state): State<WebhookState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> StatusCode {
-    if !verify_token(&state.secrets.jira, &headers, "X-Atlassian-Webhook-Token") {
-        return StatusCode::UNAUTHORIZED;
-    }
-
-    let payload: JiraWebhookPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => {
-            state.observer.log(
-                ObserverCategory::TicketIntake,
-                format!("Jira webhook parse error: {}", e),
-            );
-            return StatusCode::BAD_REQUEST;
-        }
-    };
-
-    let issue = match payload.issue {
-        Some(i) => i,
-        None => return StatusCode::OK,
-    };
-
-    let project_key = issue
-        .fields
-        .as_ref()
-        .and_then(|f| f.project.as_ref())
-        .and_then(|p| p.key.clone())
-        .unwrap_or_else(|| issue.key.clone());
-
-    let Some(source) = match_source(&state.sources, "jira", &project_key) else {
-        return StatusCode::OK;
-    };
+fn build_jira_ticket(state: &WebhookState, payload: JiraWebhookPayload) -> Option<ExternalTicket> {
+    let issue = payload.issue?;
+    let project_key = jira_project_key(&issue);
+    let source = match_source(&state.sources, "jira", &project_key)?;
 
     let labels = issue
         .fields
@@ -343,7 +346,7 @@ async fn handle_jira(
         .map(|f| f.labels.clone().unwrap_or_default())
         .unwrap_or_default();
     if !labels_match(&labels, &source.filter_label) {
-        return StatusCode::OK;
+        return None;
     }
 
     let description = issue
@@ -365,7 +368,7 @@ async fn handle_jira(
         .and_then(|f| f.reporter.as_ref())
         .and_then(|r| r.display_name.clone().or(r.email_address.clone()));
 
-    let ticket = ExternalTicket {
+    Some(ExternalTicket {
         external_id: issue.key.clone(),
         number: Some(issue.key.clone()),
         provider: provider_key("jira", &source.repo),
@@ -387,9 +390,16 @@ async fn handle_jira(
             issue.key
         ),
         author,
-    };
+    })
+}
 
-    dispatch_ticket(&state, ticket).await
+fn jira_project_key(issue: &JiraIssue) -> String {
+    issue
+        .fields
+        .as_ref()
+        .and_then(|f| f.project.as_ref())
+        .and_then(|p| p.key.clone())
+        .unwrap_or_else(|| issue.key.clone())
 }
 
 async fn dispatch_ticket(state: &WebhookState, ticket: ExternalTicket) -> StatusCode {
