@@ -74,6 +74,7 @@ Before opening a PR or submitting a patch:
 3. Run `athena doctor --ci` for safety and system checks.
 4. Run `scripts/maintainability_check.py` if you changed core architecture or tool behavior.
 5. After each bigger change, run the relevant tests and report results without using the phrase "Tests not run." If tests fail, fix the issues and iterate until they pass.
+6. If there is a suggestion to run a command, run it.
 
 Review expectations:
 - No hardcoded credentials or tokens.
