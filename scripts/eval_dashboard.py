@@ -100,17 +100,28 @@ def format_mttf(seconds: float | None) -> str:
     return f"{(minutes / 60.0):.2f}h"
 
 
-def compute_mttf_by_lane_risk(conn: sqlite3.Connection, repo_name: str) -> dict[tuple[str, str], float]:
-    rows = conn.execute(
-        """
+def compute_mttf_by_lane_risk(
+    conn: sqlite3.Connection,
+    repo_name: str,
+    lane_filter: str | None = None,
+    risk_filter: str | None = None,
+) -> dict[tuple[str, str], float]:
+    sql = """
         SELECT lane, risk_tier, status, COALESCE(finished_at, started_at) AS event_time
         FROM autonomous_task_outcomes
         WHERE repo = ?
           AND status IN ('failed', 'succeeded')
-        ORDER BY lane, risk_tier, event_time
-        """,
-        (repo_name,),
-    ).fetchall()
+    """
+    params: list[str] = [repo_name]
+    if lane_filter:
+        sql += " AND lane = ?"
+        params.append(lane_filter)
+    if risk_filter:
+        sql += " AND risk_tier = ?"
+        params.append(risk_filter)
+    sql += " ORDER BY lane, risk_tier, event_time"
+
+    rows = conn.execute(sql, tuple(params)).fetchall()
 
     pending_failure: dict[tuple[str, str], dt.datetime] = {}
     deltas: dict[tuple[str, str], list[float]] = {}
@@ -138,10 +149,14 @@ def compute_mttf_by_lane_risk(conn: sqlite3.Connection, repo_name: str) -> dict[
     return out
 
 
-def query_kpis(conn: sqlite3.Connection, repo_name: str) -> list[dict]:
-    mttf_by_key = compute_mttf_by_lane_risk(conn, repo_name)
-    rows = conn.execute(
-        """
+def query_kpis(
+    conn: sqlite3.Connection,
+    repo_name: str,
+    lane_filter: str | None = None,
+    risk_filter: str | None = None,
+) -> list[dict]:
+    mttf_by_key = compute_mttf_by_lane_risk(conn, repo_name, lane_filter, risk_filter)
+    sql = """
         SELECT lane, risk_tier,
                COALESCE(SUM(CASE WHEN status IN ('succeeded','failed','rolled_back') THEN 1 ELSE 0 END), 0) started,
                COALESCE(SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END), 0) succeeded,
@@ -151,11 +166,17 @@ def query_kpis(conn: sqlite3.Connection, repo_name: str) -> list[dict]:
                COALESCE(SUM(rolled_back), 0) rollbacks
         FROM autonomous_task_outcomes
         WHERE repo = ?
-        GROUP BY lane, risk_tier
-        ORDER BY lane, risk_tier
-        """,
-        (repo_name,),
-    ).fetchall()
+    """
+    params: list[str] = [repo_name]
+    if lane_filter:
+        sql += " AND lane = ?"
+        params.append(lane_filter)
+    if risk_filter:
+        sql += " AND risk_tier = ?"
+        params.append(risk_filter)
+    sql += " GROUP BY lane, risk_tier ORDER BY lane, risk_tier"
+
+    rows = conn.execute(sql, tuple(params)).fetchall()
     out: list[dict] = []
     for r in rows:
         lane = r[0]
@@ -187,13 +208,93 @@ def query_kpis(conn: sqlite3.Connection, repo_name: str) -> list[dict]:
     return out
 
 
-def render_dashboard(history: list[dict], kpis: list[dict], repo_name: str) -> str:
+def query_kpi_snapshot_trend(
+    conn: sqlite3.Connection,
+    repo_name: str,
+    lane_filter: str | None = None,
+    risk_filter: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    clamped_limit = max(1, min(limit, 200))
+    where = "repo = ?"
+    params: list[str | int] = [repo_name]
+    if lane_filter:
+        where += " AND lane = ?"
+        params.append(lane_filter)
+    if risk_filter:
+        where += " AND risk_tier = ?"
+        params.append(risk_filter)
+    params.append(clamped_limit)
+
+    rows = conn.execute(
+        f"""
+        SELECT captured_at, lane, risk_tier,
+               task_success_rate, verification_pass_rate, rollback_rate,
+               tasks_started, tasks_succeeded, tasks_failed
+        FROM (
+            SELECT captured_at, lane, risk_tier,
+                   task_success_rate, verification_pass_rate, rollback_rate,
+                   tasks_started, tasks_succeeded, tasks_failed
+            FROM kpi_snapshots
+            WHERE {where}
+            ORDER BY datetime(replace(replace(captured_at, 'T', ' '), 'Z', '')) DESC, captured_at DESC
+            LIMIT ?
+        ) recent
+        ORDER BY datetime(replace(replace(captured_at, 'T', ' '), 'Z', '')) ASC, captured_at ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    return [
+        {
+            "captured_at": str(r[0]),
+            "lane": str(r[1]),
+            "risk": str(r[2]),
+            "task_success_rate": float(r[3] or 0.0),
+            "verification_pass_rate": float(r[4] or 0.0),
+            "rollback_rate": float(r[5] or 0.0),
+            "tasks_started": int(r[6] or 0),
+            "tasks_succeeded": int(r[7] or 0),
+            "tasks_failed": int(r[8] or 0),
+        }
+        for r in rows
+    ]
+
+
+def summarize_rate_trend(rows: list[dict], key: str) -> str:
+    if not rows:
+        return "n/a (no data)"
+    values = [float(r.get(key, 0.0)) for r in rows]
+    if len(values) == 1:
+        return f"{values[0] * 100.0:.1f}% (single point)"
+    first = values[0]
+    last = values[-1]
+    delta = last - first
+    if delta > 0.001:
+        direction = "up"
+    elif delta < -0.001:
+        direction = "down"
+    else:
+        direction = "flat"
+    return f"{first * 100.0:.1f}% -> {last * 100.0:.1f}% ({direction}, delta={delta * 100.0:+.1f}pp)"
+
+
+def render_dashboard(
+    history: list[dict],
+    kpis: list[dict],
+    kpi_trend: list[dict],
+    repo_name: str,
+    lane_filter: str | None = None,
+    risk_filter: str | None = None,
+) -> str:
     now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = []
     lines.append("# Athena KPI + Eval Dashboard")
     lines.append("")
     lines.append(f"- generated_utc: {now}")
     lines.append(f"- repo: `{repo_name}`")
+    lines.append(f"- lane_filter: `{lane_filter or 'all'}`")
+    lines.append(f"- risk_filter: `{risk_filter or 'all'}`")
     lines.append("")
 
     lines.append("## Latest Smoke Eval (Health)")
@@ -241,6 +342,27 @@ def render_dashboard(history: list[dict], kpis: list[dict], repo_name: str) -> s
         lines.append("| - | - | - | - | - | - |")
     lines.append("")
 
+    lines.append("## KPI Trend (Snapshot History)")
+    lines.append("")
+    lines.append("- task_success_trend: `" + summarize_rate_trend(kpi_trend, "task_success_rate") + "`")
+    lines.append("- verification_trend: `" + summarize_rate_trend(kpi_trend, "verification_pass_rate") + "`")
+    lines.append("- rollback_trend: `" + summarize_rate_trend(kpi_trend, "rollback_rate") + "`")
+    lines.append("")
+    lines.append("| captured_at | lane | risk | task_success | verification | rollback | started |")
+    lines.append("|---|---|---|---:|---:|---:|---:|")
+    if kpi_trend:
+        for r in kpi_trend:
+            lines.append(
+                f"| `{r['captured_at']}` | `{r['lane']}` | `{r['risk']}` | "
+                f"{r['task_success_rate'] * 100.0:.1f}% | {r['verification_pass_rate'] * 100.0:.1f}% | "
+                f"{r['rollback_rate'] * 100.0:.1f}% | {r['tasks_started']} |"
+            )
+    else:
+        lines.append("| - | - | - | n/a | n/a | n/a | 0 |")
+        lines.append("")
+        lines.append("- no KPI snapshot trend found for current filters")
+    lines.append("")
+
     lines.append("## Current KPI Snapshot (from outcomes)")
     lines.append("")
     lines.append("| lane | risk | started | succeeded | failed | task_success | verification | rollback | mttf |")
@@ -261,8 +383,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Render combined KPI + eval dashboard.")
     p.add_argument("--config", default="config.toml")
     p.add_argument("--repo", default="athena")
+    p.add_argument("--lane", default=None, help="Optional lane filter for KPI sections.")
+    p.add_argument("--risk", default=None, help="Optional risk tier filter for KPI sections.")
     p.add_argument("--history-file", default="eval/results/history.jsonl")
     p.add_argument("--history-limit", type=int, default=20)
+    p.add_argument("--kpi-trend-limit", type=int, default=20)
     p.add_argument("--out-file", default="eval/results/dashboard.md")
     return p.parse_args()
 
@@ -282,10 +407,24 @@ def main() -> int:
     db_path = parse_db_path(config_path)
     conn = sqlite3.connect(str(db_path))
     history = load_history(history_path, args.history_limit)
-    kpis = query_kpis(conn, args.repo)
+    kpis = query_kpis(conn, args.repo, lane_filter=args.lane, risk_filter=args.risk)
+    kpi_trend = query_kpi_snapshot_trend(
+        conn,
+        args.repo,
+        lane_filter=args.lane,
+        risk_filter=args.risk,
+        limit=args.kpi_trend_limit,
+    )
     conn.close()
 
-    content = render_dashboard(history, kpis, args.repo)
+    content = render_dashboard(
+        history,
+        kpis,
+        kpi_trend,
+        args.repo,
+        lane_filter=args.lane,
+        risk_filter=args.risk,
+    )
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(content)
     print(f"dashboard={out_file}")
