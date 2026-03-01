@@ -2200,6 +2200,13 @@ fn render_self_build_md_ci_monitor(out: &mut String, monitor: &ci_monitor::CiMon
         monitor.final_status, monitor.merged_after_ci
     ));
     out.push_str(&format!(
+        "- post_merge_status: `{}`\n",
+        monitor.post_merge_status
+    ));
+    if let Some(url) = &monitor.revert_pr_url {
+        out.push_str(&format!("- revert_pr_url: `{}`\n", url));
+    }
+    out.push_str(&format!(
         "- started_utc: `{}` finished_utc: `{}`\n",
         monitor.started_utc, monitor.finished_utc
     ));
@@ -2338,6 +2345,10 @@ async fn run_ci_monitor(
     println!("ci_monitor_report={}", json_path.display());
     println!("ci_monitor_status={}", report.final_status);
     println!("ci_monitor_merged={}", report.merged_after_ci);
+    println!("ci_monitor_post_merge_status={}", report.post_merge_status);
+    if let Some(url) = &report.revert_pr_url {
+        println!("ci_monitor_revert_pr_url={}", url);
+    }
     println!("ci_monitor_polls={}", report.polls.len());
     println!("ci_monitor_heal_attempts={}", report.heal_attempts.len());
     Ok(())
