@@ -5920,6 +5920,51 @@ index 1111111..2222222 100644
     }
 
     #[test]
+    fn feature_task_context_includes_only_direct_predecessor_summaries() {
+        let mut contract = sample_contract();
+        contract.tasks.push(FeatureTask {
+            id: "T3".to_string(),
+            goal: "task3".to_string(),
+            context: None,
+            ghost: None,
+            lane: None,
+            risk: None,
+            repo: None,
+            auto_store: None,
+            wait_secs: None,
+            cli_tool: None,
+            cli_model: None,
+            mapped_acceptance: vec!["AC-2".to_string()],
+            depends_on: vec!["T2".to_string()],
+            enabled: true,
+        });
+        let task = contract.task_by_id("T3").expect("T3 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "summary from T1".to_string());
+        predecessor_summaries.insert("T2".to_string(), "summary from T2".to_string());
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(context.contains("Previous task results:"));
+        assert!(context.contains("- T2: summary from T2"));
+        assert!(!context.contains("- T1: summary from T1"));
+    }
+
+    #[test]
+    fn feature_task_context_omits_previous_results_when_summary_missing_or_empty() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+
+        let context_without_summary = build_feature_task_context(&contract, task, &HashMap::new());
+        assert!(!context_without_summary.contains("Previous task results:"));
+
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "   \n\t".to_string());
+        let context_with_empty_summary =
+            build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(!context_with_empty_summary.contains("Previous task results:"));
+    }
+
+    #[test]
     fn outcome_grace_override_takes_precedence() {
         let task = sample_contract().tasks[0].clone();
         let secs = compute_feature_outcome_grace_secs(&task, "delivery", "low", 30, Some(42));
