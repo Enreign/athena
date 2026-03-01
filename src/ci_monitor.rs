@@ -15,6 +15,7 @@ pub const CI_HEAL_MAX_ATTEMPTS: u8 = 2;
 const CI_LOG_TAIL_CHARS: usize = 4000;
 const CI_COMMAND_TIMEOUT_SECS: u64 = 120;
 const CI_DISPATCH_WAIT_SECS: u64 = 300;
+const CI_POST_MERGE_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiCheckStatus {
@@ -61,10 +62,18 @@ pub struct CiMonitorReport {
     pub started_utc: String,
     pub finished_utc: String,
     pub final_status: String,
+    #[serde(default = "default_post_merge_status")]
+    pub post_merge_status: String,
+    #[serde(default)]
+    pub revert_pr_url: Option<String>,
     pub polls: Vec<CiPollResult>,
     pub heal_attempts: Vec<CiHealAttempt>,
     pub merged_after_ci: bool,
     pub commands: Vec<CiMonitorCommand>,
+}
+
+fn default_post_merge_status() -> String {
+    "not_checked".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +102,37 @@ struct PrCheckEntry {
     name: Option<String>,
     state: Option<String>,
     link: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrMergeInfoResponse {
+    number: Option<u64>,
+    #[serde(rename = "mergedAt")]
+    merged_at: Option<String>,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: Option<String>,
+    #[serde(rename = "mergeCommit")]
+    merge_commit: Option<PrMergeCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrMergeCommit {
+    oid: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitCheckRunsResponse {
+    #[serde(default)]
+    check_runs: Vec<CommitCheckRunEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitCheckRunEntry {
+    name: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    #[serde(rename = "html_url")]
+    html_url: Option<String>,
 }
 
 struct CiMonitorContext {
@@ -164,6 +204,9 @@ pub async fn monitor_pr_ci(
         false
     };
 
+    let (post_merge_status, revert_pr_url) =
+        monitor_post_merge_health(pr_url, repo_root, poll_wait, &mut ctx).await;
+
     let finished_utc = chrono::Utc::now().to_rfc3339();
     CiMonitorReport {
         pr_url: pr_url.to_string(),
@@ -171,6 +214,8 @@ pub async fn monitor_pr_ci(
         started_utc,
         finished_utc,
         final_status,
+        post_merge_status,
+        revert_pr_url,
         polls,
         heal_attempts,
         merged_after_ci,
@@ -675,6 +720,501 @@ async fn resolve_pr_branch(
     })
 }
 
+#[derive(Debug, Clone)]
+struct ParsedPrUrl {
+    owner: String,
+    repo: String,
+    number: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPrMergeInfo {
+    owner: String,
+    repo: String,
+    number: u64,
+    base_branch: String,
+    merged: bool,
+    merge_commit_sha: Option<String>,
+}
+
+async fn monitor_post_merge_health(
+    pr_url: &str,
+    repo_root: &Path,
+    poll_wait: u64,
+    ctx: &mut CiMonitorContext,
+) -> (String, Option<String>) {
+    let Some(info) = resolve_pr_merge_info(pr_url, repo_root, ctx).await else {
+        return ("post_merge_info_unavailable".to_string(), None);
+    };
+    if !info.merged {
+        return ("not_merged".to_string(), None);
+    }
+    let Some(merge_sha) = info.merge_commit_sha.as_deref() else {
+        return ("merge_commit_unavailable".to_string(), None);
+    };
+
+    let start = Instant::now();
+    loop {
+        if start.elapsed() >= Duration::from_secs(CI_POST_MERGE_TIMEOUT_SECS) {
+            ctx.log("ci monitor post-merge timeout");
+            return ("post_merge_timeout".to_string(), None);
+        }
+
+        let checks = poll_merge_commit_checks(&info.owner, &info.repo, merge_sha, repo_root, ctx).await;
+        let overall = compute_post_merge_overall(checks.as_deref().unwrap_or(&[]));
+        match overall.as_str() {
+            "passing" => {
+                ctx.log("ci monitor post-merge checks passing");
+                return ("post_merge_passed".to_string(), None);
+            }
+            "failing" => {
+                ctx.log("ci monitor post-merge checks failing; opening revert pr");
+                let revert_pr_url = ensure_revert_pr_for_failed_merge(
+                    &info.owner,
+                    &info.repo,
+                    info.number,
+                    &info.base_branch,
+                    merge_sha,
+                    pr_url,
+                    repo_root,
+                    ctx,
+                )
+                .await;
+                let status = if revert_pr_url.is_some() {
+                    "post_merge_failed_revert_pr_opened"
+                } else {
+                    "post_merge_failed_revert_pr_error"
+                };
+                return (status.to_string(), revert_pr_url);
+            }
+            _ => {
+                ctx.log("ci monitor post-merge checks pending");
+                tokio::time::sleep(Duration::from_secs(poll_wait.max(5))).await;
+            }
+        }
+    }
+}
+
+async fn resolve_pr_merge_info(
+    pr_url: &str,
+    repo_root: &Path,
+    ctx: &mut CiMonitorContext,
+) -> Option<ResolvedPrMergeInfo> {
+    let parsed_url = parse_pr_url(pr_url)?;
+    let run = run_command_capture(
+        repo_root,
+        "gh",
+        &[
+            "pr".to_string(),
+            "view".to_string(),
+            pr_url.to_string(),
+            "--json".to_string(),
+            "number,mergedAt,baseRefName,mergeCommit".to_string(),
+        ],
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("gh_pr_view_merge_info", &run);
+    if !command_succeeded(&run) {
+        return None;
+    }
+
+    let raw_json = if !run.stdout.trim().is_empty() {
+        run.stdout.clone()
+    } else {
+        command_combined_output(&run)
+    };
+    let response: PrMergeInfoResponse = serde_json::from_str(raw_json.trim()).ok()?;
+    let merged = response
+        .merged_at
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let merge_commit_sha = response
+        .merge_commit
+        .and_then(|c| c.oid)
+        .and_then(|oid| {
+            let trimmed = oid.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+    Some(ResolvedPrMergeInfo {
+        owner: parsed_url.owner,
+        repo: parsed_url.repo,
+        number: response.number.unwrap_or(parsed_url.number),
+        base_branch: response
+            .base_ref_name
+            .unwrap_or_else(|| "main".to_string()),
+        merged,
+        merge_commit_sha,
+    })
+}
+
+async fn poll_merge_commit_checks(
+    owner: &str,
+    repo: &str,
+    merge_sha: &str,
+    repo_root: &Path,
+    ctx: &mut CiMonitorContext,
+) -> Option<Vec<CiCheckStatus>> {
+    let run = run_command_capture(
+        repo_root,
+        "gh",
+        &[
+            "api".to_string(),
+            format!("repos/{}/{}/commits/{}/check-runs", owner, repo, merge_sha),
+        ],
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("gh_api_commit_check_runs", &run);
+    if !command_succeeded(&run) {
+        return None;
+    }
+    parse_commit_check_runs(run.stdout.trim())
+}
+
+async fn ensure_revert_pr_for_failed_merge(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    base_branch: &str,
+    merge_sha: &str,
+    source_pr_url: &str,
+    repo_root: &Path,
+    ctx: &mut CiMonitorContext,
+) -> Option<String> {
+    let branch = ci_auto_revert_branch(merge_sha);
+    if let Some(url) = lookup_revert_pr_url(owner, repo, &branch, "open", repo_root, ctx).await {
+        ctx.log(format!("ci monitor reusing existing revert pr {}", url));
+        return Some(url);
+    }
+
+    let worktree_root = repo_root.join(".worktrees");
+    let _ = std::fs::create_dir_all(&worktree_root);
+    let worktree_path = worktree_root.join(format!("ci-revert-{}", branch));
+    remove_existing_revert_worktree(repo_root, &worktree_path, ctx).await;
+
+    let (worktree_added, mut created_pr_url) = create_revert_pr_candidate(
+        owner,
+        repo,
+        pr_number,
+        base_branch,
+        merge_sha,
+        source_pr_url,
+        &branch,
+        repo_root,
+        &worktree_path,
+        ctx,
+    )
+    .await;
+
+    if worktree_added {
+        cleanup_ci_worktree(repo_root, &worktree_path, ctx).await;
+    }
+
+    if created_pr_url.is_none() {
+        created_pr_url = lookup_revert_pr_url(owner, repo, &branch, "open", repo_root, ctx).await;
+    }
+    if created_pr_url.is_none() {
+        created_pr_url = lookup_revert_pr_url(owner, repo, &branch, "all", repo_root, ctx).await;
+    }
+    created_pr_url
+}
+
+async fn remove_existing_revert_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    ctx: &mut CiMonitorContext,
+) {
+    if !worktree_path.exists() {
+        return;
+    }
+    let worktree_path_s = worktree_path.to_string_lossy().to_string();
+    let remove = run_command_capture(
+        repo_root,
+        "git",
+        &args(&["worktree", "remove", "--force", &worktree_path_s]),
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("git_worktree_remove_revert", &remove);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_revert_pr_candidate(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    base_branch: &str,
+    merge_sha: &str,
+    source_pr_url: &str,
+    branch: &str,
+    repo_root: &Path,
+    worktree_path: &Path,
+    ctx: &mut CiMonitorContext,
+) -> (bool, Option<String>) {
+    if !fetch_and_add_revert_worktree(repo_root, base_branch, worktree_path, ctx).await {
+        return (false, None);
+    }
+    if !checkout_revert_branch(worktree_path, branch, ctx).await {
+        return (true, None);
+    }
+    if !revert_and_push_merge_commit(worktree_path, merge_sha, branch, ctx).await {
+        return (true, None);
+    }
+
+    let url = create_revert_pull_request(
+        owner,
+        repo,
+        pr_number,
+        base_branch,
+        merge_sha,
+        source_pr_url,
+        branch,
+        worktree_path,
+        ctx,
+    )
+    .await;
+    (true, url)
+}
+
+async fn fetch_and_add_revert_worktree(
+    repo_root: &Path,
+    base_branch: &str,
+    worktree_path: &Path,
+    ctx: &mut CiMonitorContext,
+) -> bool {
+    let fetch = run_command_capture(
+        repo_root,
+        "git",
+        &args(&["fetch", "origin", base_branch]),
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("git_fetch_revert_base", &fetch);
+    if !command_succeeded(&fetch) {
+        return false;
+    }
+
+    let worktree_path_s = worktree_path.to_string_lossy().to_string();
+    let add = run_command_capture(
+        repo_root,
+        "git",
+        &args(&[
+            "worktree",
+            "add",
+            &worktree_path_s,
+            &format!("origin/{}", base_branch),
+        ]),
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("git_worktree_add_revert", &add);
+    command_succeeded(&add)
+}
+
+async fn checkout_revert_branch(
+    worktree_path: &Path,
+    branch: &str,
+    ctx: &mut CiMonitorContext,
+) -> bool {
+    let checkout = run_command_capture(
+        worktree_path,
+        "git",
+        &args(&["checkout", "-B", branch]),
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("git_checkout_revert_branch", &checkout);
+    command_succeeded(&checkout)
+}
+
+async fn revert_and_push_merge_commit(
+    worktree_path: &Path,
+    merge_sha: &str,
+    branch: &str,
+    ctx: &mut CiMonitorContext,
+) -> bool {
+    let revert = run_command_capture(
+        worktree_path,
+        "git",
+        &args(&["revert", "-m", "1", "--no-edit", merge_sha]),
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("git_revert_merge_commit", &revert);
+    if !command_succeeded(&revert) {
+        return false;
+    }
+
+    let push = run_command_capture(
+        worktree_path,
+        "git",
+        &args(&["push", "origin", &format!("HEAD:{}", branch)]),
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record("git_push_revert_branch", &push);
+    command_succeeded(&push)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_revert_pull_request(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    base_branch: &str,
+    merge_sha: &str,
+    source_pr_url: &str,
+    branch: &str,
+    worktree_path: &Path,
+    ctx: &mut CiMonitorContext,
+) -> Option<String> {
+    let title = format!(
+        "revert: merge {} after post-merge CI failure",
+        &merge_sha[..merge_sha.len().min(12)]
+    );
+    let body = format!(
+        "Automated revert for failed post-merge checks.\n\n- source_pr: {}\n- source_pr_number: {}\n- merge_commit: {}\n",
+        source_pr_url, pr_number, merge_sha
+    );
+    let create = run_command_capture(
+        worktree_path,
+        "gh",
+        &[
+            "pr".to_string(),
+            "create".to_string(),
+            "--repo".to_string(),
+            format!("{}/{}", owner, repo),
+            "--base".to_string(),
+            base_branch.to_string(),
+            "--head".to_string(),
+            branch.to_string(),
+            "--title".to_string(),
+            title,
+            "--body".to_string(),
+            body,
+        ],
+        240,
+    )
+    .await;
+    ctx.record("gh_pr_create_revert", &create);
+    if !command_succeeded(&create) {
+        return None;
+    }
+    extract_pull_request_url(&create.stdout)
+        .or_else(|| extract_pull_request_url(&command_combined_output(&create)))
+}
+
+async fn lookup_revert_pr_url(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    state: &str,
+    repo_root: &Path,
+    ctx: &mut CiMonitorContext,
+) -> Option<String> {
+    let run = run_command_capture(
+        repo_root,
+        "gh",
+        &[
+            "pr".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            format!("{}/{}", owner, repo),
+            "--state".to_string(),
+            state.to_string(),
+            "--head".to_string(),
+            format!("{}:{}", owner, branch),
+            "--json".to_string(),
+            "url".to_string(),
+        ],
+        CI_COMMAND_TIMEOUT_SECS,
+    )
+    .await;
+    ctx.record(&format!("gh_pr_list_revert_{}", state), &run);
+    if !command_succeeded(&run) {
+        return None;
+    }
+    parse_pr_list_first_url(&run.stdout)
+}
+
+fn parse_pr_url(pr_url: &str) -> Option<ParsedPrUrl> {
+    let trimmed = pr_url.trim().trim_end_matches('/');
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    if parts.len() < 7 {
+        return None;
+    }
+    if parts[0] != "https:" && parts[0] != "http:" {
+        return None;
+    }
+    if parts[2] != "github.com" || parts[5] != "pull" {
+        return None;
+    }
+    let owner = parts[3].trim();
+    let repo = parts[4].trim();
+    let number = parts[6].trim().parse::<u64>().ok()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(ParsedPrUrl {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number,
+    })
+}
+
+fn ci_auto_revert_branch(merge_sha: &str) -> String {
+    format!(
+        "ci-auto-revert-{}",
+        merge_sha
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(12)
+            .collect::<String>()
+            .to_lowercase()
+    )
+}
+
+fn parse_commit_check_runs(raw_json: &str) -> Option<Vec<CiCheckStatus>> {
+    let response: CommitCheckRunsResponse = serde_json::from_str(raw_json.trim()).ok()?;
+    let checks = response
+        .check_runs
+        .into_iter()
+        .map(|run| CiCheckStatus {
+            name: run.name.unwrap_or_else(|| "unknown".to_string()),
+            status: run.status.unwrap_or_else(|| "unknown".to_string()),
+            conclusion: run.conclusion.unwrap_or_default(),
+            details_url: run.html_url,
+        })
+        .collect::<Vec<_>>();
+    Some(checks)
+}
+
+fn compute_post_merge_overall(checks: &[CiCheckStatus]) -> String {
+    if checks.is_empty() {
+        return "pending".to_string();
+    }
+    compute_overall(checks)
+}
+
+fn parse_pr_list_first_url(raw_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw_json.trim()).ok()?;
+    let arr = value.as_array()?;
+    arr.iter()
+        .find_map(|item| item.get("url").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+}
+
+fn extract_pull_request_url(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+").ok()?;
+    re.find(text).map(|m| m.as_str().to_string())
+}
+
 fn parse_status_check_rollup(raw_json: &str) -> Option<Vec<CiCheckStatus>> {
     let response: StatusCheckResponse = serde_json::from_str(raw_json.trim()).ok()?;
     let checks = response
@@ -844,5 +1384,68 @@ mod tests {
         let raw = r#"{"statusCheckRollup":[{"name":"docs","status":"COMPLETED","conclusion":"SKIPPED"}]}"#;
         let checks = parse_status_check_rollup(raw).expect("parse");
         assert_eq!(compute_overall(&checks), "passing");
+    }
+
+    #[test]
+    fn parse_pr_url_extracts_owner_repo_and_number() {
+        let parsed = parse_pr_url("https://github.com/Enreign/athena/pull/48")
+            .expect("parse pr url");
+        assert_eq!(parsed.owner, "Enreign");
+        assert_eq!(parsed.repo, "athena");
+        assert_eq!(parsed.number, 48);
+    }
+
+    #[test]
+    fn parse_pr_url_rejects_invalid_url() {
+        assert!(parse_pr_url("https://example.com/Enreign/athena/pull/48").is_none());
+        assert!(parse_pr_url("https://github.com/Enreign/athena/issues/48").is_none());
+    }
+
+    #[test]
+    fn parse_commit_check_runs_maps_payload() {
+        let raw = r#"{"check_runs":[{"name":"ci","status":"completed","conclusion":"success","html_url":"https://x"}]}"#;
+        let checks = parse_commit_check_runs(raw).expect("parse check runs");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "ci");
+        assert_eq!(checks[0].status, "completed");
+        assert_eq!(checks[0].conclusion, "success");
+        assert_eq!(checks[0].details_url.as_deref(), Some("https://x"));
+    }
+
+    #[test]
+    fn parse_commit_check_runs_invalid_json_returns_none() {
+        assert!(parse_commit_check_runs("{not_json").is_none());
+    }
+
+    #[test]
+    fn compute_post_merge_overall_treats_empty_as_pending() {
+        assert_eq!(compute_post_merge_overall(&[]), "pending");
+    }
+
+    #[test]
+    fn parse_pr_list_first_url_returns_first_entry() {
+        let raw = r#"[{"url":"https://github.com/Enreign/athena/pull/100"},{"url":"https://github.com/Enreign/athena/pull/101"}]"#;
+        assert_eq!(
+            parse_pr_list_first_url(raw).as_deref(),
+            Some("https://github.com/Enreign/athena/pull/100")
+        );
+    }
+
+    #[test]
+    fn ci_auto_revert_branch_is_stable_for_same_sha() {
+        let sha = "ABCDEF1234567890ABCDEF1234567890ABCDEF12";
+        assert_eq!(
+            ci_auto_revert_branch(sha),
+            "ci-auto-revert-abcdef123456".to_string()
+        );
+    }
+
+    #[test]
+    fn extract_pull_request_url_finds_url_in_output() {
+        let out = "Created pull request:\nhttps://github.com/Enreign/athena/pull/55\n";
+        assert_eq!(
+            extract_pull_request_url(out).as_deref(),
+            Some("https://github.com/Enreign/athena/pull/55")
+        );
     }
 }
