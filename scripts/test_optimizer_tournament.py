@@ -174,6 +174,53 @@ class OptimizerTournamentTests(unittest.TestCase):
         self.assertEqual(len(profiles), 1)
         self.assertEqual(profiles[0]["source_candidate_id"], "candidate_good")
 
+    def test_adaptive_guardrail_policy_relaxes_on_clean_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            payload = {
+                "candidates": [
+                    {"candidate_id": "baseline", "exit_code": 0, "gate_ok": True},
+                    {"candidate_id": "m1", "exit_code": 0, "gate_ok": True},
+                ]
+            }
+            for i in range(10):
+                (out_dir / f"optimizer-tournament-20260301T00000{i}Z.json").write_text(
+                    json.dumps(payload)
+                )
+            policy = opt.derive_adaptive_guardrail_policy(
+                out_dir=out_dir,
+                history_window=10,
+                base_min_improvement=0.01,
+                base_max_regression=0.02,
+                strict_promotion=True,
+            )
+        self.assertEqual(policy["band"], "relaxed_noncritical")
+        self.assertFalse(policy["strict_promotion"])
+        self.assertTrue(policy["safety_floor"]["require_gate_ok"])
+
+    def test_adaptive_guardrail_policy_tightens_on_poor_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            payload = {
+                "candidates": [
+                    {"candidate_id": "baseline", "exit_code": 1, "gate_ok": False},
+                ]
+            }
+            for i in range(6):
+                (out_dir / f"optimizer-tournament-20260301T01000{i}Z.json").write_text(
+                    json.dumps(payload)
+                )
+            policy = opt.derive_adaptive_guardrail_policy(
+                out_dir=out_dir,
+                history_window=10,
+                base_min_improvement=0.01,
+                base_max_regression=0.02,
+                strict_promotion=False,
+            )
+        self.assertEqual(policy["band"], "tightened")
+        self.assertTrue(policy["strict_promotion"])
+        self.assertGreater(policy["min_improvement"], 0.01)
+
 
 if __name__ == "__main__":
     unittest.main()
