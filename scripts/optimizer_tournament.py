@@ -82,6 +82,18 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Require non-negative exec/task deltas in addition to score delta for promotion.",
     )
+    p.add_argument(
+        "--adaptive-guardrails",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Adapt non-critical promotion thresholds from recent safety record.",
+    )
+    p.add_argument(
+        "--guardrail-history-window",
+        type=int,
+        default=10,
+        help="How many recent tournament runs to use for adaptive guardrail policy.",
+    )
     p.add_argument("--active-profile-json", default="eval/results/optimizer-profile.json")
     p.add_argument(
         "--promote-profile",
@@ -509,6 +521,79 @@ def run_candidate(repo: Path, args: argparse.Namespace, candidate: CandidateSpec
     )
 
 
+def recent_tournament_payloads(out_dir: Path, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    files = sorted(out_dir.glob("optimizer-tournament-*.json"), reverse=True)
+    out: list[dict[str, Any]] = []
+    for path in files[:limit]:
+        payload = load_json(path)
+        if payload:
+            out.append(payload)
+    return out
+
+
+def run_is_safety_clean(payload: dict[str, Any]) -> bool:
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        return False
+    for c in candidates:
+        if int(c.get("exit_code", 1)) != 0:
+            return False
+        if not bool(c.get("gate_ok", False)):
+            return False
+    return True
+
+
+def derive_adaptive_guardrail_policy(
+    out_dir: Path,
+    history_window: int,
+    base_min_improvement: float,
+    base_max_regression: float,
+    strict_promotion: bool,
+) -> dict[str, Any]:
+    payloads = recent_tournament_payloads(out_dir, history_window)
+    total = len(payloads)
+    clean = sum(1 for p in payloads if run_is_safety_clean(p))
+    clean_rate = (clean / total) if total > 0 else 0.0
+
+    band = "strict"
+    min_improvement = base_min_improvement
+    max_regression = base_max_regression
+    strict_mode = strict_promotion
+
+    if total >= 10 and clean_rate >= 0.8:
+        band = "relaxed_noncritical"
+        min_improvement = max(0.0, base_min_improvement * 0.5)
+        max_regression = min(0.03, base_max_regression + 0.01)
+        strict_mode = False
+    elif total >= 5 and clean_rate >= 0.6:
+        band = "balanced"
+        min_improvement = max(0.0, base_min_improvement * 0.75)
+        max_regression = min(0.025, base_max_regression + 0.005)
+    elif total >= 5 and clean_rate < 0.4:
+        band = "tightened"
+        min_improvement = min(0.05, base_min_improvement + 0.01)
+        max_regression = max(0.0, base_max_regression - 0.005)
+        strict_mode = True
+
+    return {
+        "band": band,
+        "history_window": history_window,
+        "total_runs": total,
+        "clean_runs": clean,
+        "clean_rate": round(clean_rate, 4),
+        "min_improvement": round(min_improvement, 4),
+        "max_regression": round(max_regression, 4),
+        "strict_promotion": strict_mode,
+        "safety_floor": {
+            "require_exit_zero": True,
+            "require_gate_ok": True,
+            "never_relax_destructive_or_sensitive_guardrails": True,
+        },
+    }
+
+
 def pick_winner(
     results: list[CandidateResult],
     min_improvement: float,
@@ -718,6 +803,22 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"avg_task_delta={gate['avg_task_delta_vs_baseline']}"
         )
     lines.append("")
+    lines.append("## Adaptive Guardrail Policy")
+    gp = payload.get("guardrail_policy", {})
+    lines.append(f"- band: `{gp.get('band', 'n/a')}`")
+    lines.append(
+        f"- clean_runs/total_runs: `{gp.get('clean_runs', 0)}/{gp.get('total_runs', 0)}` "
+        f"(clean_rate={gp.get('clean_rate', 0.0)})"
+    )
+    lines.append(
+        f"- min_improvement: `{gp.get('min_improvement', '-')}` "
+        f"max_regression: `{gp.get('max_regression', '-')}` "
+        f"strict_promotion: `{gp.get('strict_promotion', '-')}`"
+    )
+    lines.append(
+        f"- safety_floor: `{gp.get('safety_floor', {})}`"
+    )
+    lines.append("")
     lines.append("## Promotion Execution")
     lines.append(f"- enabled: `{payload['promotion_execution']['enabled']}`")
     lines.append(f"- status: `{payload['promotion_execution']['status']}`")
@@ -783,11 +884,36 @@ def main() -> int:
             flush=True,
         )
 
+    if args.adaptive_guardrails:
+        guardrail_policy = derive_adaptive_guardrail_policy(
+            out_dir=out_dir,
+            history_window=args.guardrail_history_window,
+            base_min_improvement=args.min_improvement,
+            base_max_regression=args.max_regression,
+            strict_promotion=args.strict_promotion,
+        )
+    else:
+        guardrail_policy = {
+            "band": "manual",
+            "history_window": 0,
+            "total_runs": 0,
+            "clean_runs": 0,
+            "clean_rate": 0.0,
+            "min_improvement": args.min_improvement,
+            "max_regression": args.max_regression,
+            "strict_promotion": args.strict_promotion,
+            "safety_floor": {
+                "require_exit_zero": True,
+                "require_gate_ok": True,
+                "never_relax_destructive_or_sensitive_guardrails": True,
+            },
+        }
+
     winner, promote, reasons, gates = pick_winner(
         results,
-        min_improvement=args.min_improvement,
-        max_regression=args.max_regression,
-        strict_promotion=args.strict_promotion,
+        min_improvement=float(guardrail_policy["min_improvement"]),
+        max_regression=float(guardrail_policy["max_regression"]),
+        strict_promotion=bool(guardrail_policy["strict_promotion"]),
     )
     baseline_result = next((r for r in results if r.candidate_id == "baseline"), results[0])
 
@@ -848,6 +974,7 @@ def main() -> int:
         "min_improvement": args.min_improvement,
         "max_regression": args.max_regression,
         "strict_promotion": args.strict_promotion,
+        "guardrail_policy": guardrail_policy,
         "dry_run": args.dry_run,
         "candidates": [asdict(r) for r in results],
         "selection": {
