@@ -816,6 +816,66 @@ fn default_dashboard_out_file(output_format: DashboardOutputFormat) -> PathBuf {
     }
 }
 
+fn build_dashboard_script_args(
+    script_path: &Path,
+    config_path: &Path,
+    repo: String,
+    lane: Option<String>,
+    risk: Option<String>,
+    history_file: &Path,
+    history_limit: usize,
+    kpi_trend_limit: usize,
+    pricing_version: String,
+    task_cost_limit: usize,
+    ghost_min_samples: usize,
+    output_format: DashboardOutputFormat,
+    out_file: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        script_path.to_string_lossy().to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().to_string(),
+        "--repo".to_string(),
+        repo,
+        "--history-file".to_string(),
+        history_file.to_string_lossy().to_string(),
+        "--history-limit".to_string(),
+        history_limit.to_string(),
+        "--kpi-trend-limit".to_string(),
+        kpi_trend_limit.to_string(),
+        "--pricing-version".to_string(),
+        pricing_version,
+        "--task-cost-limit".to_string(),
+        task_cost_limit.to_string(),
+        "--ghost-min-samples".to_string(),
+        ghost_min_samples.to_string(),
+        "--output-format".to_string(),
+        dashboard_output_format_label(output_format).to_string(),
+        "--out-file".to_string(),
+        out_file.to_string_lossy().to_string(),
+    ];
+    if let Some(lane_value) = lane {
+        args.push("--lane".to_string());
+        args.push(lane_value);
+    }
+    if let Some(risk_value) = risk {
+        args.push("--risk".to_string());
+        args.push(risk_value);
+    }
+    args
+}
+
+async fn run_dashboard_script(cwd: &Path, dashboard_args: &[String]) -> CommandRunResult {
+    let mut run = run_command_capture(cwd, "python3", dashboard_args, 300).await;
+    if run.exit_code.is_none() && !run.timed_out {
+        let stderr = command_combined_output(&run).to_lowercase();
+        if stderr.contains("no such file") || stderr.contains("not found") {
+            run = run_command_capture(cwd, "python", dashboard_args, 300).await;
+        }
+    }
+    run
+}
+
 async fn run_dashboard_command(
     config_path: PathBuf,
     repo: String,
@@ -845,45 +905,22 @@ async fn run_dashboard_command(
 
     let cwd = std::env::current_dir()?;
     let out_file = out_file.unwrap_or_else(|| default_dashboard_out_file(output_format));
-    let mut dashboard_args = vec![
-        script_path.to_string_lossy().to_string(),
-        "--config".to_string(),
-        config_path.to_string_lossy().to_string(),
-        "--repo".to_string(),
+    let dashboard_args = build_dashboard_script_args(
+        &script_path,
+        &config_path,
         repo,
-        "--history-file".to_string(),
-        history_file.to_string_lossy().to_string(),
-        "--history-limit".to_string(),
-        history_limit.to_string(),
-        "--kpi-trend-limit".to_string(),
-        kpi_trend_limit.to_string(),
-        "--pricing-version".to_string(),
+        lane,
+        risk,
+        &history_file,
+        history_limit,
+        kpi_trend_limit,
         pricing_version,
-        "--task-cost-limit".to_string(),
-        task_cost_limit.to_string(),
-        "--ghost-min-samples".to_string(),
-        ghost_min_samples.to_string(),
-        "--output-format".to_string(),
-        dashboard_output_format_label(output_format).to_string(),
-        "--out-file".to_string(),
-        out_file.to_string_lossy().to_string(),
-    ];
-    if let Some(lane_value) = lane {
-        dashboard_args.push("--lane".to_string());
-        dashboard_args.push(lane_value);
-    }
-    if let Some(risk_value) = risk {
-        dashboard_args.push("--risk".to_string());
-        dashboard_args.push(risk_value);
-    }
-
-    let mut run = run_command_capture(&cwd, "python3", &dashboard_args, 300).await;
-    if run.exit_code.is_none() && !run.timed_out {
-        let stderr = command_combined_output(&run).to_lowercase();
-        if stderr.contains("no such file") || stderr.contains("not found") {
-            run = run_command_capture(&cwd, "python", &dashboard_args, 300).await;
-        }
-    }
+        task_cost_limit,
+        ghost_min_samples,
+        output_format,
+        &out_file,
+    );
+    let run = run_dashboard_script(&cwd, &dashboard_args).await;
     if !command_succeeded(&run) {
         anyhow::bail!(
             "dashboard generation failed: {}",
