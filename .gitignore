@@ -14,3 +14,4 @@ eval/.worktrees/
 hello.txt
 __pycache__/
 *.pyc
+.context/

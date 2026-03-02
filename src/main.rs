@@ -5946,6 +5946,7 @@ mod tests {
         run_git(repo, &["init"]);
         run_git(repo, &["config", "user.email", "athena-test@example.com"]);
         run_git(repo, &["config", "user.name", "Athena Test"]);
+        run_git(repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("README.md"), "base\n").expect("write base file");
         run_git(repo, &["add", "README.md"]);
         run_git(repo, &["commit", "-m", "init"]);
