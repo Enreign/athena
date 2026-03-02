@@ -27,6 +27,8 @@ pub struct FeatureContract {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcceptanceCriterion {
     pub id: String,
+    // Set from YAML/JSON contract; not currently read by Rust code
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -278,6 +280,7 @@ impl FeatureContract {
         self.tasks.iter().find(|t| t.id == id)
     }
 
+    #[cfg(test)]
     pub fn execution_order(&self) -> anyhow::Result<Vec<String>> {
         let batches = self.execution_batches()?;
         Ok(batches.into_iter().flatten().collect())
@@ -299,9 +302,13 @@ impl FeatureContract {
         for task in &enabled {
             for dep in &task.depends_on {
                 if indegree.contains_key(dep) {
-                    *indegree
-                        .get_mut(&task.id)
-                        .expect("enabled node must have indegree") += 1;
+                    let Some(degree) = indegree.get_mut(&task.id) else {
+                        anyhow::bail!(
+                            "internal error: enabled node '{}' missing indegree",
+                            task.id
+                        );
+                    };
+                    *degree += 1;
                     adjacency
                         .entry(dep.clone())
                         .or_default()

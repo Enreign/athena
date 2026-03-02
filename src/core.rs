@@ -59,8 +59,6 @@ pub enum CoreEvent {
     Response(String),
     /// Error during execution
     Error(String),
-    /// Proactive pulse from background tasks
-    Pulse(String),
 }
 
 /// An autonomous task submitted by a background process (cron, heartbeat, etc.).
@@ -98,7 +96,6 @@ pub struct GhostInfo {
     pub name: String,
     pub description: String,
     pub tools: Vec<String>,
-    pub strategy: String,
 }
 
 /// Info about a stored memory (returned by list_memories).
@@ -119,6 +116,8 @@ pub struct CoreHandle {
     pub knobs: SharedKnobs,
     pub observer: ObserverHandle,
     pub pulse_bus: PulseBus,
+    // activity is read by the telegram feature
+    #[cfg_attr(not(feature = "telegram"), allow(dead_code))]
     pub activity: Arc<ActivityTracker>,
     pub mood: Arc<MoodState>,
     pub cron_engine: Option<Arc<CronEngine>>,
@@ -293,7 +292,10 @@ fn init_core_channel() -> (mpsc::Sender<CoreRequest>, mpsc::Receiver<CoreRequest
     mpsc::channel::<CoreRequest>(32)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_core_loops(
     rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
@@ -429,7 +431,10 @@ fn init_pulse_bus(
     (pulse_bus, delivered_rx)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_housekeeping_loops(
     config: &Config,
     memory: Arc<MemoryStore>,
@@ -608,7 +613,10 @@ fn init_metrics_collector(
     metrics
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn build_manager(
     config: &Config,
     merged_ghosts: Vec<GhostConfig>,
@@ -638,6 +646,7 @@ fn build_manager(
         usage_store,
         metrics,
         langfuse,
+        observer.clone(),
     ));
     if let Some(dt_path) = manager.dynamic_tools_path() {
         crate::dynamic_tools::spawn_hot_reload(
@@ -650,7 +659,10 @@ fn build_manager(
     manager
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_core_event_loop(
     mut rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
@@ -680,7 +692,10 @@ fn spawn_core_event_loop(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn handle_core_request(
     req: CoreRequest,
     manager: Arc<Manager>,
@@ -881,7 +896,10 @@ async fn run_manager_autonomous_task(
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn maybe_handle_mock_ticket_intake_dispatch(
     mock_ticket_intake_dispatch: bool,
     task: &AutonomousTask,
@@ -949,7 +967,10 @@ fn log_autonomous_dispatch(observer: &ObserverHandle, task: &AutonomousTask, gho
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn handle_autonomous_task_success(
     task: &AutonomousTask,
     task_id: &str,
@@ -1050,7 +1071,10 @@ async fn handle_autonomous_task_success(
     pulse_bus.send(pulse);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn handle_autonomous_task_failure(
     task: &AutonomousTask,
     task_id: &str,
@@ -1390,14 +1414,13 @@ fn load_ghost_profiles(config: &Config) -> Result<(Vec<GhostConfig>, Vec<GhostIn
             name: g.name.clone(),
             description: g.description.clone(),
             tools: g.tools.clone(),
-            strategy: g.strategy.clone(),
         })
         .collect();
     Ok((merged_ghosts, ghosts))
 }
 
 fn init_langfuse_client(config: &Config, knobs: &SharedKnobs) -> SharedLangfuse {
-    let k = knobs.read().unwrap();
+    let k = knobs.read().unwrap_or_else(|e| e.into_inner());
     if !k.langfuse_enabled {
         return None;
     }
@@ -1450,7 +1473,7 @@ fn spawn_mood_drift_loop(
     tokio::spawn(async move {
         loop {
             let (interval, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (k.mood_drift_interval_secs, k.mood_enabled, k.all_proactive)
             };
             if !all || !enabled {
@@ -1460,7 +1483,7 @@ fn spawn_mood_drift_loop(
             let dur = randomness::jitter_interval(interval, 0.2);
             tokio::time::sleep(dur).await;
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.mood_enabled {
                     continue;
                 }

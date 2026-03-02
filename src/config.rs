@@ -4,7 +4,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::error::{AthenaError, Result};
-use crate::llm::{LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig, OuathClient};
+use crate::llm::{
+    LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig, OuathClient,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -590,6 +592,8 @@ fn default_ticket_intake_webhook_bind() -> String {
     "127.0.0.1:8765".to_string()
 }
 
+// Fields are read by the webhook feature (ticket_intake/webhook.rs)
+#[cfg_attr(not(feature = "webhook"), allow(dead_code))]
 #[derive(Debug, Deserialize, Clone)]
 pub struct TicketIntakeWebhookConfig {
     #[serde(default)]
@@ -652,8 +656,6 @@ pub struct DockerConfig {
     pub image: String,
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
-    #[serde(default = "default_runtime")]
-    pub runtime: String,
     #[serde(default = "default_memory_limit")]
     pub memory_limit: i64,
     #[serde(default = "default_cpu_quota")]
@@ -743,9 +745,6 @@ fn default_image() -> String {
 fn default_socket_path() -> String {
     "/var/run/docker.sock".into()
 }
-fn default_runtime() -> String {
-    "runc".into()
-}
 fn default_memory_limit() -> i64 {
     268_435_456
 } // 256MB
@@ -804,7 +803,6 @@ impl Default for DockerConfig {
         Self {
             image: default_image(),
             socket_path: default_socket_path(),
-            runtime: default_runtime(),
             memory_limit: default_memory_limit(),
             cpu_quota: default_cpu_quota(),
             timeout_secs: default_timeout_secs(),
@@ -977,9 +975,7 @@ impl Config {
         if self.telegram.token.is_some() && std::env::var("ATHENA_TELEGRAM_TOKEN").is_err() {
             labels.push("telegram.token".to_string());
         }
-        if self.telegram.stt_api_key.is_some()
-            && std::env::var("ATHENA_STT_API_KEY").is_err()
-        {
+        if self.telegram.stt_api_key.is_some() && std::env::var("ATHENA_STT_API_KEY").is_err() {
             labels.push("telegram.stt_api_key".to_string());
         }
         if self
@@ -996,8 +992,7 @@ impl Config {
         {
             labels.push("zen.api_key".to_string());
         }
-        if self.langfuse.public_key.is_some() && std::env::var("LANGFUSE_PUBLIC_KEY").is_err()
-        {
+        if self.langfuse.public_key.is_some() && std::env::var("LANGFUSE_PUBLIC_KEY").is_err() {
             labels.push("langfuse.public_key".to_string());
         }
         if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
@@ -1107,7 +1102,6 @@ impl Config {
                 }
             }
         }
-
     }
 
     /// Ordered provider candidates: configured provider first, then common fallbacks.
@@ -1188,11 +1182,6 @@ impl Config {
                 other
             ))),
         }
-    }
-
-    /// Build the configured LLM provider
-    pub fn build_llm_provider(&self) -> Result<Arc<dyn LlmProvider>> {
-        self.build_llm_provider_for(self.llm.provider.as_str())
     }
 
     /// Build the orchestrator provider for an explicit provider name.
@@ -1287,14 +1276,6 @@ impl Config {
             }
             _ => Ok(fallback.clone()),
         }
-    }
-
-    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_orchestrator_provider(
-        &self,
-        fallback: &Arc<dyn LlmProvider>,
-    ) -> Result<Arc<dyn LlmProvider>> {
-        self.build_orchestrator_provider_for(self.llm.provider.as_str(), fallback)
     }
 
     /// Resolve the db path, expanding ~ to home dir
