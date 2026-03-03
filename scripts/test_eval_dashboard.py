@@ -55,6 +55,33 @@ def _setup_conn() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            content TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            embedding BLOB
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE ticket_intake_log (
+            dedup_key TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'dispatched',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            issue_number TEXT,
+            ci_monitor_status TEXT
+        )
+        """
+    )
     return conn
 
 
@@ -162,6 +189,178 @@ class EvalDashboardTests(unittest.TestCase):
         self.assertIn("sparse data: no ghosts meet the stable-sample threshold yet", content)
         self.assertIn("`low-sample(<3)`", content)
 
+    def test_routing_cohort_trend_computation(self) -> None:
+        route_adapter = {
+            "rows": [
+                {"timestamp_utc": "2026-03-01T01:00:00Z", "bucket": "2026-03-01", "success": True},
+                {"timestamp_utc": "2026-03-01T02:00:00Z", "bucket": "2026-03-01", "success": False},
+                {"timestamp_utc": "2026-03-02T01:00:00Z", "bucket": "2026-03-02", "success": True},
+                {"timestamp_utc": "2026-03-02T02:00:00Z", "bucket": "2026-03-02", "success": True},
+            ],
+            "source_missing": False,
+            "schema_warnings": [],
+        }
+        outcomes_adapter = {"rows": [], "source_missing": True, "schema_warnings": []}
+        trend = eval_dashboard.compute_routing_quality_trend(
+            route_adapter=route_adapter,
+            outcomes_adapter=outcomes_adapter,
+            cohort_split=0.5,
+        )
+        self.assertFalse(trend["no_data"])
+        self.assertAlmostEqual(trend["summary"]["early_rate"], 0.5)
+        self.assertAlmostEqual(trend["summary"]["late_rate"], 1.0)
+        self.assertAlmostEqual(trend["summary"]["delta"], 0.5)
+
+    def test_autonomous_completion_and_first_pass_verify_metrics(self) -> None:
+        outcomes_adapter = {
+            "source": "sqlite.autonomous_task_outcomes",
+            "source_missing": False,
+            "schema_warnings": [],
+            "rows": [
+                {"bucket": "2026-03-01", "status": "succeeded", "verification_total": 1, "verification_passed": 1},
+                {"bucket": "2026-03-01", "status": "failed", "verification_total": 1, "verification_passed": 0},
+                {"bucket": "2026-03-02", "status": "succeeded", "verification_total": 2, "verification_passed": 2},
+                {"bucket": "2026-03-02", "status": "succeeded", "verification_total": 0, "verification_passed": 0},
+            ],
+        }
+        trend = eval_dashboard.compute_autonomous_completion_trend(outcomes_adapter)
+        self.assertFalse(trend["no_data"])
+        self.assertAlmostEqual(trend["summary"]["latest_completion_rate"], 0.75)
+        self.assertAlmostEqual(trend["summary"]["latest_first_pass_verify_rate"], 2.0 / 3.0)
+
+    def test_ci_self_heal_rollback_aggregation(self) -> None:
+        self_heal = {
+            "rows": [
+                {"bucket": "2026-03-01", "success": True},
+                {"bucket": "2026-03-02", "success": False},
+            ],
+            "source_missing": False,
+            "schema_warnings": [],
+        }
+        outcomes = {
+            "rows": [
+                {"bucket": "2026-03-01", "status": "succeeded", "rolled_back": 0},
+                {"bucket": "2026-03-01", "status": "failed", "rolled_back": 1},
+                {"bucket": "2026-03-02", "status": "succeeded", "rolled_back": 0},
+            ],
+            "source_missing": False,
+            "schema_warnings": [],
+        }
+        ci = {
+            "rows": [
+                {"bucket": "2026-03-01", "timestamp_utc": "2026-03-01T05:00:00Z", "status": "pass", "status_class": "pass"},
+                {"bucket": "2026-03-02", "timestamp_utc": "2026-03-02T05:00:00Z", "status": "failed", "status_class": "fail"},
+            ],
+            "source_missing": False,
+            "schema_warnings": [],
+        }
+        trend = eval_dashboard.compute_ci_self_heal_rollbacks(self_heal, outcomes, ci)
+        self.assertFalse(trend["no_data"])
+        self.assertEqual(trend["summary"]["self_heal_attempts"], 2)
+        self.assertEqual(trend["summary"]["self_heal_successes"], 1)
+        self.assertEqual(trend["summary"]["rollbacks"], 1)
+        self.assertEqual(trend["summary"]["ci_pass"], 1)
+        self.assertEqual(trend["summary"]["ci_fail"], 1)
+
+    def test_build_observability_bundle_and_lineage_presence(self) -> None:
+        conn = _setup_conn()
+        conn.executemany(
+            """
+            INSERT INTO autonomous_task_outcomes (
+                task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at,
+                verification_total, verification_passed, rolled_back, error
+            ) VALUES (?, 'delivery', 'athena', 'low', 'coder', 'goal', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("o1", "succeeded", "2026-03-01 01:00:00", "2026-03-01 01:05:00", 1, 1, 0, ""),
+                ("o2", "failed", "2026-03-01 02:00:00", "2026-03-01 02:05:00", 1, 0, 1, "safety policy denied"),
+                ("o3", "succeeded", "2026-03-02 01:00:00", "2026-03-02 01:05:00", 2, 2, 0, ""),
+                ("o4", "succeeded", "2026-03-02 02:00:00", "2026-03-02 02:05:00", 0, 0, 0, ""),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO memories (id, category, content, active, created_at, updated_at)
+            VALUES (?, ?, ?, 1, ?, ?)
+            """,
+            [
+                ("m1", "route_outcome", "route_id=r1 route_type=direct ghost=coder status=succeeded elapsed_ms=100", "2026-03-01 01:00:00", "2026-03-01 01:00:00"),
+                ("m2", "route_outcome", "route_id=r2 route_type=direct ghost=coder status=failed elapsed_ms=120", "2026-03-01 02:00:00", "2026-03-01 02:00:00"),
+                ("m3", "route_outcome", "route_id=r3 route_type=complex ghost=coder status=succeeded elapsed_ms=130", "2026-03-02 01:00:00", "2026-03-02 01:00:00"),
+                ("m4", "route_outcome", "route_id=r4 route_type=complex ghost=coder status=succeeded elapsed_ms=140", "2026-03-02 02:00:00", "2026-03-02 02:00:00"),
+                ("m5", "self_heal_outcome", json.dumps({"error_category": "type_error", "success": True}), "2026-03-01 03:00:00", "2026-03-01 03:00:00"),
+                ("m6", "self_heal_outcome", json.dumps({"error_category": "import_error", "success": False}), "2026-03-02 03:00:00", "2026-03-02 03:00:00"),
+                ("m7", "health_alert", "alert_kinds=error_rate", "2026-03-01 04:00:00", "2026-03-01 04:00:00"),
+                ("m8", "health_fix", "fixed alert_kinds=error_rate", "2026-03-02 04:00:00", "2026-03-02 04:00:00"),
+                ("m9", "pattern", "memory pattern", "2026-03-02 05:00:00", "2026-03-02 05:00:00"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO ticket_intake_log (
+                dedup_key, provider, external_id, title, status, created_at, ci_monitor_status
+            ) VALUES (?, 'linear', ?, ?, 'dispatched', ?, ?)
+            """,
+            [
+                ("d1", "ext1", "Issue 1", "2026-03-01 06:00:00", "ci_pass"),
+                ("d2", "ext2", "Issue 2", "2026-03-02 06:00:00", "ci_fail"),
+            ],
+        )
+        conn.commit()
+
+        observability = eval_dashboard.build_observability_bundle(
+            conn=conn,
+            history=[],
+            history_source_exists=False,
+            kpi_trend=[],
+            repo_name="athena",
+            lane_filter="delivery",
+            risk_filter="low",
+            routing_cohort_split=0.5,
+        )
+        self.assertFalse(observability["routing_quality"]["no_data"])
+        self.assertFalse(observability["autonomous_completion"]["no_data"])
+        self.assertFalse(observability["ci_self_heal"]["no_data"])
+        self.assertFalse(observability["safety_events"]["no_data"])
+        self.assertFalse(observability["memory_health"]["no_data"])
+        self.assertGreaterEqual(len(observability["data_lineage"]), 5)
+
+        md = eval_dashboard.render_dashboard(
+            history=[],
+            kpis=[],
+            kpi_trend=[],
+            ghost_breakdown=[],
+            repo_name="athena",
+            observability=observability,
+        )
+        self.assertIn("Routing Quality Trend (Early vs Late Cohorts)", md)
+        self.assertIn("Data Lineage", md)
+
+    def test_missing_source_behavior_renders_no_data_explicitly(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        observability = eval_dashboard.build_observability_bundle(
+            conn=conn,
+            history=[],
+            history_source_exists=False,
+            kpi_trend=[],
+            repo_name="athena",
+            lane_filter=None,
+            risk_filter=None,
+            routing_cohort_split=0.5,
+        )
+        content = eval_dashboard.render_dashboard(
+            history=[],
+            kpis=[],
+            kpi_trend=[],
+            ghost_breakdown=[],
+            repo_name="athena",
+            observability=observability,
+        )
+        self.assertIn("Source Adapter Status", content)
+        self.assertIn("no routing quality data available", content)
+        self.assertIn("no autonomous completion trend data available", content)
+        self.assertIn("Data Lineage", content)
+
     def test_lookup_pricing_unknown_provider_and_version_fallback(self) -> None:
         in_price, out_price, used_version, known = eval_dashboard.lookup_pricing(
             provider="unknown",
@@ -257,6 +456,12 @@ class EvalDashboardTests(unittest.TestCase):
         self.assertIn("KPI Trend (Snapshot History)", html_text)
         self.assertIn("Per-Ghost Performance", html_text)
         self.assertIn("Token Cost (Estimated)", html_text)
+        self.assertIn("Routing Quality Trend (Early vs Late Cohorts)", html_text)
+        self.assertIn("Autonomous Completion &amp; First-pass Verify", html_text)
+        self.assertIn("CI Self-heal / Rollback Outcomes", html_text)
+        self.assertIn("Safety Events", html_text)
+        self.assertIn("Memory Health Signals", html_text)
+        self.assertIn("Data Lineage", html_text)
 
 
 if __name__ == "__main__":

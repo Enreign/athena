@@ -41,9 +41,12 @@ Documentation index for the Athena multi-agent orchestration system.
 | File | Description |
 |---|---|
 | [maintainability-map.md](maintainability-map.md) | Maintainability scoring map — module-level metrics and targets |
+| [local-only-deployment.md](local-only-deployment.md) | Fully local runtime profile (`local_only`) setup and red-team verification checklist |
+| [observability-dashboard.md](observability-dashboard.md) | Static observability dashboard generation, lineage mapping, and CI/release artifacts |
 | [hygiene-baseline.json](hygiene-baseline.json) | Hygiene check baseline (machine-generated, updated by `hygiene_check.py`) |
 | [maintainability-baseline.json](maintainability-baseline.json) | Maintainability baseline (machine-generated) |
 | [rust-audit-2026-03-02.md](rust-audit-2026-03-02.md) | Rust dependency security audit — 2026-03-02 |
+| [security-attestation.md](security-attestation.md) | `athena doctor --security` attestation schema, samples, and CI interpretation guide |
 | [lane-test-note.md](lane-test-note.md) | Notes on KPI lane test coverage |
 | [parsing-hardening-plan.md](parsing-hardening-plan.md) | Plan for hardening LLM-output parsing |
 

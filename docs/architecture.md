@@ -3,6 +3,9 @@
 System-level diagrams kept in sync with the codebase via `scripts/wiring_check.py`.
 Wiring violations are caught on every CI run — any variant not wired will fail the gate.
 
+Memory retrieval hot-path design and benchmark contract:
+- `docs/memory-hot-path-lru.md`
+
 ---
 
 ## Component Overview

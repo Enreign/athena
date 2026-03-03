@@ -1,64 +1,64 @@
 # examples/feature-contract.toml
 #
-# Annotated feature contract example.
-# See docs/feature-contract-v1.md for the full schema reference.
-# See docs/feature-contract-workflow.md for the end-to-end dispatch workflow.
-#
-# Usage:
-#   cp examples/feature-contract.toml my-feature.toml
-#   # Edit to describe your feature
-#   cargo run -- feature dispatch --contract my-feature.toml
+# Fan-out / fan-in feature contract template (TOML).
+# This file is directly consumable by:
+#   athena feature validate --file examples/feature-contract.toml
+#   athena feature plan --file examples/feature-contract.toml
 
-[contract]
-# Unique identifier for this contract (snake_case).
-id = "add_rate_limit_header_logging"
+feature_id = "athena-contract-report-hardening"
+lane = "delivery"
+risk = "medium"
+repo = "athena"
 
-# Human-readable title shown in logs and Telegram.
-title = "Log rate-limit response headers for all LLM providers"
+[[acceptance_criteria]]
+id = "AC-1"
+description = "Contract diagnostics are actionable and deterministic."
 
-# Version of the contract schema.
-schema_version = "v1"
+[[acceptance_criteria]]
+id = "AC-2"
+description = "Execution report captures per-task status and blockers."
 
-# Who or what generated this contract (optional).
-author = "maintainer"
+[[acceptance_criteria]]
+id = "AC-3"
+description = "CLI authoring UX reduces manual edits."
 
-[feature]
-# One-sentence statement of the change.
-goal = "Capture X-RateLimit-* headers from LLM HTTP responses and emit them as an observer event."
+[[acceptance_criteria]]
+id = "AC-4"
+description = "Docs and examples are updated for migration."
 
-# Why this feature matters.
-motivation = """
-When the LLM provider rate-limits Athena, there is currently no structured record
-of the limit, remaining, and reset values. Adding this logging enables the KPI
-pipeline to track quota consumption over time.
-"""
+[[verification_checks]]
+id = "VC-fast"
+profile = "fast"
+command = "cargo check --quiet"
+mapped_acceptance = ["AC-1", "AC-3"]
+required = true
 
-# Which ghost should handle the implementation task.
-ghost = "coder"
+[[verification_checks]]
+id = "VC-strict"
+profile = "strict"
+command = "cargo test --quiet feature_contract -- --nocapture"
+mapped_acceptance = ["AC-1", "AC-2", "AC-4"]
+required = true
 
-# Execution strategy: "code" | "react" | "plan-act"
-strategy = "code"
+[[tasks]]
+id = "T1"
+goal = "Define diagnostics and report schema updates"
+mapped_acceptance = ["AC-1"]
 
-[acceptance]
-# Shell commands that must exit 0 for the feature to be accepted.
-# Each command is run inside the Docker container after the patch is applied.
-commands = [
-  "cargo check -q",
-  "cargo test -q",
-  "python3 scripts/dead_code_check.py --telegram",
-  "python3 scripts/wiring_check.py",
-]
+[[tasks]]
+id = "T2"
+depends_on = ["T1"]
+goal = "Implement CLI UX hardening and init template flow"
+mapped_acceptance = ["AC-3"]
 
-# Optional: regex patterns that must appear in the final diff.
-diff_must_contain = [
-  "RateLimit",
-  "ObserverCategory",
-]
+[[tasks]]
+id = "T3"
+depends_on = ["T1"]
+goal = "Implement report artifact generation for dispatch and gate flows"
+mapped_acceptance = ["AC-2"]
 
-[meta]
-# Linked Linear / GitHub issue IDs for writeback (optional).
-linear_issue_id = ""
-github_issue_number = 0
-
-# Tags used for KPI lane routing.
-tags = ["observability", "llm"]
+[[tasks]]
+id = "T4"
+depends_on = ["T2", "T3"]
+goal = "Update docs, examples, and migration notes"
+mapped_acceptance = ["AC-4"]

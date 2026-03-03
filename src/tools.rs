@@ -14,6 +14,8 @@ use crate::llm::ToolSchema;
 const MAX_OUTPUT_LEN: usize = 2000;
 const SEARCH_OUTPUT_LEN: usize = 8000;
 const GLOB_OUTPUT_LEN: usize = 4000;
+pub const TOOL_ALLOWLIST_GUARD_ENABLED: bool = true;
+pub const PATH_GUARD_ENABLED: bool = true;
 
 #[derive(Debug)]
 pub struct ToolResult {

@@ -5,7 +5,8 @@ Runnable examples demonstrating common Athena workflows.
 | File | Description |
 |---|---|
 | [basic-dispatch.sh](basic-dispatch.sh) | Copy config, run a health check, and dispatch a task from the command line |
-| [feature-contract.toml](feature-contract.toml) | Annotated feature contract — the primary unit of planned work |
+| [feature-contract.toml](feature-contract.toml) | Fan-out/fan-in feature contract template (TOML) |
+| [feature-contract-linear.toml](feature-contract-linear.toml) | Linear-chain feature contract template (TOML) |
 | [custom-ghost.toml](custom-ghost.toml) | Minimal ghost configuration snippet showing personality and tool customization |
 
 ---
@@ -37,13 +38,14 @@ This will:
 
 ## Using a Feature Contract
 
-Feature contracts are TOML files that describe a planned capability improvement.
+Feature contracts can be YAML, JSON, or TOML.
 See [docs/feature-contract-workflow.md](../docs/feature-contract-workflow.md) for the full workflow.
 
 ```bash
 cp examples/feature-contract.toml my-feature.toml
 # Edit my-feature.toml to describe your feature
-cargo run -- feature dispatch --contract my-feature.toml
+athena feature validate --file my-feature.toml
+athena feature plan --file my-feature.toml
 ```
 
 ---

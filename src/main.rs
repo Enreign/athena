@@ -25,6 +25,7 @@ mod proactive;
 mod profiles;
 mod pulse;
 mod randomness;
+mod reason_codes;
 mod scheduler;
 mod secrets;
 mod self_heal;
