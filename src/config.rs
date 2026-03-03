@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,17 +6,19 @@ use serde::Deserialize;
 
 use crate::error::{AthenaError, Result};
 use crate::llm::{
-    LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig, OuathClient,
+    LlmProvider, OllamaClient, OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleConfig,
 };
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
     pub ollama: OllamaConfig,
-    #[serde(default)]
-    pub ouath: Option<OuathConfig>,
+    #[serde(default, alias = "ouath")]
+    pub openai: Option<OpenAiConfig>,
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
     #[serde(default)]
@@ -56,6 +59,28 @@ pub struct Config {
     inline_secret_labels: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProfile {
+    #[default]
+    Standard,
+    LocalOnly,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub profile: RuntimeProfile,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            profile: RuntimeProfile::Standard,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct LlmConfig {
     #[serde(default = "default_provider")]
@@ -71,16 +96,16 @@ impl Default for LlmConfig {
 }
 
 fn default_provider() -> String {
-    "ouath".into()
+    "openai".into()
 }
 
 #[derive(Deserialize, Clone)]
-pub struct OuathConfig {
-    #[serde(default = "default_ouath_url")]
+pub struct OpenAiConfig {
+    #[serde(default = "default_openai_url")]
     pub url: String,
     /// Optional API style override: "responses" or "chat_completions".
     pub api_style: Option<String>,
-    #[serde(default = "default_ouath_model")]
+    #[serde(default = "default_openai_model")]
     pub model: String,
     pub classifier_model: Option<String>,
     #[serde(default = "default_temperature")]
@@ -89,7 +114,7 @@ pub struct OuathConfig {
     pub max_tokens: u32,
     #[serde(default = "default_context_window")]
     pub context_window: u64,
-    #[serde(default = "default_ouath_auth_file")]
+    #[serde(default = "default_openai_auth_file")]
     pub auth_file: String,
     /// Override the OAuth redirect URI (default: http://localhost:1455/auth/callback)
     pub redirect_uri: Option<String>,
@@ -102,9 +127,9 @@ pub struct OuathConfig {
     pub include: Vec<String>,
 }
 
-impl std::fmt::Debug for OuathConfig {
+impl std::fmt::Debug for OpenAiConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OuathConfig")
+        f.debug_struct("OpenAiConfig")
             .field("url", &self.url)
             .field("api_style", &self.api_style)
             .field("model", &self.model)
@@ -121,29 +146,29 @@ impl std::fmt::Debug for OuathConfig {
     }
 }
 
-fn default_ouath_url() -> String {
+fn default_openai_url() -> String {
     "https://chatgpt.com/backend-api/codex".into()
 }
 
-fn default_ouath_model() -> String {
+fn default_openai_model() -> String {
     "gpt-5.3-codex".into()
 }
 
-fn default_ouath_auth_file() -> String {
-    "~/.athena/ouath.json".into()
+fn default_openai_auth_file() -> String {
+    "~/.athena/openai.json".into()
 }
 
-impl Default for OuathConfig {
+impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
-            url: default_ouath_url(),
+            url: default_openai_url(),
             api_style: None,
-            model: default_ouath_model(),
+            model: default_openai_model(),
             classifier_model: None,
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
             context_window: default_context_window(),
-            auth_file: default_ouath_auth_file(),
+            auth_file: default_openai_auth_file(),
             redirect_uri: None,
             reasoning_effort: None,
             reasoning_summary: None,
@@ -225,7 +250,7 @@ fn default_zen_url() -> String {
 pub struct TelegramConfig {
     /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
     pub token: Option<String>,
-    /// Optional LLM provider override for Telegram (default: "ouath")
+    /// Optional LLM provider override for Telegram (default: "openai")
     pub provider: Option<String>,
     /// Allowed chat IDs (empty = deny all unless allow_all = true)
     #[serde(default)]
@@ -335,6 +360,8 @@ pub struct MemoryConfig {
     pub recency_half_life_days: f32,
     #[serde(default = "default_dedup_threshold")]
     pub dedup_threshold: f32,
+    #[serde(default = "default_retrieval_cache_capacity")]
+    pub retrieval_cache_capacity: usize,
 }
 
 impl Default for MemoryConfig {
@@ -342,6 +369,7 @@ impl Default for MemoryConfig {
         Self {
             recency_half_life_days: default_half_life(),
             dedup_threshold: default_dedup_threshold(),
+            retrieval_cache_capacity: default_retrieval_cache_capacity(),
         }
     }
 }
@@ -351,6 +379,9 @@ fn default_half_life() -> f32 {
 }
 fn default_dedup_threshold() -> f32 {
     0.95
+}
+fn default_retrieval_cache_capacity() -> usize {
+    256
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -901,9 +932,10 @@ impl ManagerConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime: RuntimeConfig::default(),
             llm: LlmConfig::default(),
             ollama: OllamaConfig::default(),
-            ouath: Some(OuathConfig::default()),
+            openai: Some(OpenAiConfig::default()),
             openrouter: None,
             zen: None,
             docker: DockerConfig::default(),
@@ -1141,24 +1173,41 @@ impl Config {
         // M3: Warn on non-loopback HTTP URLs
         let url = &self.ollama.url;
         if url.starts_with("http://") {
-            if let Some(host) = url
-                .strip_prefix("http://")
-                .and_then(|s| s.split(':').next())
-            {
-                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
-                    tracing::warn!(
-                        url = %url,
-                        "Ollama URL uses unencrypted HTTP to a non-loopback address — traffic may be intercepted"
-                    );
-                }
+            if !self.ollama_url_is_loopback() {
+                tracing::warn!(
+                    url = %url,
+                    "Ollama URL uses unencrypted HTTP to a non-loopback address — traffic may be intercepted"
+                );
             }
         }
+    }
+
+    pub fn runtime_profile_name(&self) -> &'static str {
+        match self.runtime.profile {
+            RuntimeProfile::Standard => "standard",
+            RuntimeProfile::LocalOnly => "local_only",
+        }
+    }
+
+    pub fn local_only_enabled(&self) -> bool {
+        matches!(self.runtime.profile, RuntimeProfile::LocalOnly)
+    }
+
+    pub fn ollama_url_host(&self) -> Option<String> {
+        parse_url_host(&self.ollama.url)
+    }
+
+    pub fn ollama_url_is_loopback(&self) -> bool {
+        self.ollama_url_host()
+            .as_deref()
+            .map(is_loopback_host)
+            .unwrap_or(false)
     }
 
     /// Ordered provider candidates: configured provider first, then common fallbacks.
     pub fn provider_candidates(&self) -> Vec<String> {
         let mut out = vec![self.llm.provider.clone()];
-        for p in ["ouath", "ollama", "openrouter", "zen"] {
+        for p in ["openai", "ollama", "openrouter", "zen", "ouath"] {
             if !out.iter().any(|x| x == p) {
                 out.push(p.to_string());
             }
@@ -1170,9 +1219,9 @@ impl Config {
     pub fn build_llm_provider_for(&self, provider: &str) -> Result<Arc<dyn LlmProvider>> {
         match provider {
             "ollama" => Ok(Arc::new(OllamaClient::new(self.ollama.clone()))),
-            "ouath" => {
-                let cfg = self.ouath.clone().unwrap_or_default();
-                Ok(Arc::new(OuathClient::new(cfg)))
+            "openai" | "ouath" => {
+                let cfg = self.openai.clone().unwrap_or_default();
+                Ok(Arc::new(OpenAiClient::new(cfg)))
             }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
@@ -1250,13 +1299,13 @@ impl Config {
                 }
                 None => Ok(fallback.clone()),
             },
-            "ouath" => {
-                let cfg = self.ouath.clone().unwrap_or_default();
+            "openai" | "ouath" => {
+                let cfg = self.openai.clone().unwrap_or_default();
                 match &cfg.classifier_model {
                     Some(model) => {
                         let mut cloned = cfg.clone();
                         cloned.model = model.clone();
-                        Ok(Arc::new(OuathClient::new(cloned)))
+                        Ok(Arc::new(OpenAiClient::new(cloned)))
                     }
                     None => Ok(fallback.clone()),
                 }
@@ -1388,4 +1437,24 @@ pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
         PathBuf::from(path)
     };
     std::fs::read_to_string(&resolved).map_err(|e| format!("{}: {}", resolved.display(), e))
+}
+
+fn parse_url_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed
+        .host_str()?
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
 }

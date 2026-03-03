@@ -1,18 +1,44 @@
-# LLM provider: "ouath" (default), "ollama", "openrouter", or "zen"
+# LLM provider: "openai" (default), "ollama", "openrouter", or "zen"
 # Inline secrets in config.toml are blocked by default. Use env vars, a .env file (gitignored),
 # or `athena secrets set <key>` to store credentials in the OS keyring.
 # Set ATHENA_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
-[llm]
-provider = "ouath"
+[runtime]
+# Runtime security/deployment profile: "standard" (default) or "local_only"
+profile = "standard"
 
-# OpenAI subscription (Ouath) via OAuth (used by Telegram by default).
-# Run `athena ouath login` to store tokens in auth_file (default: ~/.athena/ouath.json).
-# [ouath]
+[llm]
+provider = "openai"
+
+# Fully local profile (copy into your active config):
+# [runtime]
+# profile = "local_only"
+# [llm]
+# provider = "ollama"
+# [ollama]
+# url = "http://127.0.0.1:11434"
+# model = "qwen2.5:7b"
+# classifier_model = "qwen2.5:3b"
+# [db]
+# path = "~/.athena/athena.db"
+# [embedding]
+# enabled = true
+# model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+# [ticket_intake]
+# enabled = false
+# sources = []
+# [ticket_intake.webhook]
+# enabled = false
+# [langfuse]
+# enabled = false
+
+# OpenAI subscription via OAuth (used by Telegram by default).
+# Run `athena openai login` to store tokens in auth_file (default: ~/.athena/openai.json).
+# [openai]
 # url = "https://chatgpt.com/backend-api/codex"
 # api_style = "responses"             # or "chat_completions"
 # model = "gpt-5.3-codex"
 # classifier_model = "gpt-5.3-codex"  # optional, defaults to model
-# auth_file = "~/.athena/ouath.json"
+# auth_file = "~/.athena/openai.json"
 # redirect_uri = "http://localhost:1455/auth/callback"
 # reasoning_effort = "medium"
 # reasoning_summary = "auto"
@@ -105,10 +131,12 @@ enabled = true
 # recency_half_life_days = 30.0
 # Cosine similarity threshold for deduplication. Memories above this are merged.
 # dedup_threshold = 0.95
+# In-process LRU capacity for hybrid retrieval results (0 disables cache).
+# retrieval_cache_capacity = 256
 
 [telegram]
 # token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var, .env, or `athena secrets set telegram.token`
-# provider = "ouath"          # optional, defaults to "ouath"
+# provider = "openai"         # optional, defaults to "openai" ("ouath" alias still works)
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
 confirm_timeout_secs = 300
@@ -127,7 +155,8 @@ poll_interval_secs = 300
 mock_dispatch = false
 
 [ticket_intake.ci_autopilot]
-# End-to-end bridge: dispatch -> PR -> CI poll -> self-heal -> auto-merge -> post-merge checks -> revert PR on failure
+# End-to-end bridge used by ticket intake and feature-contract dispatch:
+# dispatch -> PR -> CI poll -> self-heal -> auto-merge -> post-merge checks -> revert PR on failure
 enabled = true
 auto_merge = true
 heal = true

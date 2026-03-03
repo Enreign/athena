@@ -209,7 +209,7 @@
       "fn_over_80": 1,
       "fn_over_120": 1
     },
-    "src/ouath.rs": {
+    "src/openai_auth.rs": {
       "loc": 509,
       "fn_count": 24,
       "max_fn_len": 77,

@@ -20,7 +20,7 @@ mod manager;
 mod memory;
 mod mood;
 mod observer;
-mod ouath;
+mod openai_auth;
 mod proactive;
 mod profiles;
 mod pulse;
@@ -87,10 +87,11 @@ enum Commands {
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
-    /// Authenticate with OpenAI subscription (Ouath)
-    Ouath {
+    /// Authenticate with OpenAI subscription (OAuth flow)
+    #[command(alias = "ouath")]
+    Openai {
         #[command(subcommand)]
-        action: OuathAction,
+        action: OpenaiAction,
     },
     /// Watch internal observer events in real time
     Observe,
@@ -167,6 +168,12 @@ enum Commands {
         /// Exit non-zero on WARN as well (implies stricter CI gate)
         #[arg(long)]
         fail_on_warn: bool,
+        /// Run security attestation checks (container hardening + guard posture)
+        #[arg(long)]
+        security: bool,
+        /// Emit machine-readable JSON output (requires --security)
+        #[arg(long, requires = "security")]
+        json: bool,
     },
     /// Mission KPI tracking (status, snapshot, history)
     Kpi {
@@ -222,7 +229,7 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum OuathAction {
+enum OpenaiAction {
     /// Start OAuth login flow
     Login,
     /// Show current authentication status
@@ -355,22 +362,38 @@ enum KpiAction {
 
 #[derive(Subcommand)]
 enum FeatureAction {
-    /// Validate a feature contract file (YAML or JSON)
+    /// Initialize a TOML feature contract template with sane defaults
+    Init {
+        /// Output path for generated feature contract
+        #[arg(long, default_value = "feature-contract.toml")]
+        file: PathBuf,
+        /// Feature ID to embed into the generated template
+        #[arg(long)]
+        feature_id: Option<String>,
+        /// Template shape
+        #[arg(long, default_value = "fanout-fanin", value_parser = ["linear", "fanout-fanin"])]
+        pattern: String,
+        /// Overwrite file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Validate a feature contract file (YAML, JSON, or TOML)
+    #[command(visible_alias = "lint")]
     Validate {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
     },
     /// Print execution batches and topological order from a feature contract
     Plan {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
     },
     /// Run feature-level verification checks mapped to acceptance criteria
     Verify {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Verification profile to run
         #[arg(long, default_value = "strict", value_parser = ["fast", "strict"])]
@@ -379,7 +402,7 @@ enum FeatureAction {
     /// Produce supervised promotion decision from latest dispatch/verify ledgers
     Promote {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Optional dispatch ledger JSON path (auto-detected when omitted)
         #[arg(long)]
@@ -391,7 +414,7 @@ enum FeatureAction {
     /// Dispatch feature tasks using DAG order and wait for terminal outcomes
     Dispatch {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Global wait timeout per task (seconds) when task-level wait_secs is unset
         #[arg(long, default_value_t = 180)]
@@ -428,7 +451,7 @@ enum FeatureAction {
     /// Run dispatch + verify + promote in one command and emit consolidated gate artifact
     Gate {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Global wait timeout per task (seconds) when task-level wait_secs is unset
         #[arg(long, default_value_t = 180)]
@@ -609,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
         conn,
         config.memory.recency_half_life_days,
         config.memory.dedup_threshold,
+        config.memory.retrieval_cache_capacity,
     ));
 
     let needs_cli_embedder = matches!(cli.command, Some(Commands::Memory { .. }));
@@ -653,14 +677,14 @@ async fn main() -> anyhow::Result<()> {
                 .telegram
                 .provider
                 .clone()
-                .unwrap_or_else(|| "ouath".into());
+                .unwrap_or_else(|| "openai".into());
             telegram_config.llm.provider = telegram_provider.clone();
-            let ouath_cfg = telegram_config.ouath.clone().unwrap_or_default();
+            let openai_cfg = telegram_config.openai.clone().unwrap_or_default();
 
             let system_info = telegram::SystemInfo {
                 provider: telegram_provider.clone(),
                 temperature: match telegram_provider.as_str() {
-                    "ouath" => ouath_cfg.temperature,
+                    "openai" | "ouath" => openai_cfg.temperature,
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -670,7 +694,7 @@ async fn main() -> anyhow::Result<()> {
                     _ => config.ollama.temperature,
                 },
                 max_tokens: match telegram_provider.as_str() {
-                    "ouath" => ouath_cfg.max_tokens,
+                    "openai" | "ouath" => openai_cfg.max_tokens,
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -684,23 +708,23 @@ async fn main() -> anyhow::Result<()> {
             let handle = AthenaCore::start(telegram_config.clone(), memory).await?;
             telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
         }
-        Some(Commands::Ouath { action }) => {
-            let ouath_config = config.ouath.clone().unwrap_or_default();
-            let auth = ouath::OuathAuth::new(ouath_config);
+        Some(Commands::Openai { action }) => {
+            let openai_config = config.openai.clone().unwrap_or_default();
+            let auth = openai_auth::OpenAiAuth::new(openai_config);
             match action {
-                OuathAction::Login => {
+                OpenaiAction::Login => {
                     let tokens = auth.login_interactive().await?;
                     let account = tokens.chatgpt_account_id.as_deref().unwrap_or("unknown");
                     let expires = format_epoch(tokens.expires_at);
-                    println!("Ouath login complete.");
+                    println!("OpenAI login complete.");
                     println!("  Account: {}", account);
                     println!("  Expires: {}", expires);
                 }
-                OuathAction::Status => match auth.load_tokens().await? {
+                OpenaiAction::Status => match auth.load_tokens().await? {
                     Some(tokens) => {
                         let account = tokens.chatgpt_account_id.as_deref().unwrap_or("unknown");
                         let expires = format_epoch(tokens.expires_at);
-                        println!("Ouath tokens found.");
+                        println!("OpenAI tokens found.");
                         println!("  Account: {}", account);
                         println!("  Expires: {}", expires);
                         if tokens.expired(60) {
@@ -710,12 +734,12 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     None => {
-                        println!("No Ouath tokens found. Run `athena ouath login`.");
+                        println!("No OpenAI tokens found. Run `athena openai login`.");
                     }
                 },
-                OuathAction::Logout => {
+                OpenaiAction::Logout => {
                     auth.logout().await?;
-                    println!("Ouath tokens removed.");
+                    println!("OpenAI tokens removed.");
                 }
             }
         }
@@ -767,8 +791,14 @@ async fn main() -> anyhow::Result<()> {
             skip_llm,
             ci,
             fail_on_warn,
+            security,
+            json,
         }) => {
-            let overall = doctor::run_funnel_health(&config, skip_llm).await?;
+            let overall = if security {
+                doctor::run_security_attestation(&config, json).await?
+            } else {
+                doctor::run_funnel_health(&config, skip_llm).await?
+            };
             if ci {
                 if overall == doctor::CheckStatus::Fail
                     || (fail_on_warn && overall == doctor::CheckStatus::Warn)
@@ -1248,6 +1278,55 @@ fn self_build_pr_body(run_id: &str, risk: &str, ticket: &str) -> String {
 fn parse_pr_url(text: &str) -> Option<String> {
     let re = regex::Regex::new(r"https://github\.com/[^\s]+/pull/\d+").ok()?;
     re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn format_ci_monitor_status(report: &ci_monitor::CiMonitorReport) -> String {
+    let mut ci_status = report.final_status.clone();
+    if report.post_merge_status != "not_merged" && report.post_merge_status != "not_checked" {
+        ci_status = format!("{} / {}", report.final_status, report.post_merge_status);
+    }
+    if let Some(url) = report.revert_pr_url.as_deref() {
+        ci_status.push_str(&format!(" (revert_pr={})", url));
+    }
+    ci_status
+}
+
+fn ci_monitor_report_green(report: &ci_monitor::CiMonitorReport) -> bool {
+    let final_ok = matches!(report.final_status.as_str(), "ci_passed" | "heal_succeeded");
+    let post_merge_ok = matches!(
+        report.post_merge_status.as_str(),
+        "not_merged" | "not_checked" | "post_merge_passed"
+    );
+    final_ok && post_merge_ok
+}
+
+async fn run_feature_dispatch_ci_monitor(
+    config: &Config,
+    repo_root: &Path,
+    pr_url: &str,
+) -> anyhow::Result<(String, bool, PathBuf)> {
+    let autopilot = &config.ticket_intake.ci_autopilot;
+    let max_heal_attempts = if autopilot.heal {
+        autopilot.max_heal_attempts
+    } else {
+        0
+    };
+    let report = ci_monitor::monitor_pr_ci(
+        pr_url,
+        None,
+        repo_root,
+        config,
+        autopilot.auto_merge,
+        autopilot.heal,
+        autopilot.poll_interval_secs.max(5),
+        autopilot.timeout_secs.max(30),
+        max_heal_attempts,
+    )
+    .await;
+    let status = format_ci_monitor_status(&report);
+    let green = ci_monitor_report_green(&report);
+    let artifact = write_ci_monitor_artifact(repo_root, &report)?;
+    Ok((status, green, artifact))
 }
 
 fn build_promotion_command(name: &str, run: CommandRunResult) -> SelfBuildPromotionCommand {
@@ -3021,6 +3100,7 @@ enum FeatureRunStatus {
     Succeeded,
     Failed(String),
     Skipped(String),
+    Blocked(String),
 }
 
 impl FeatureRunStatus {
@@ -3029,12 +3109,13 @@ impl FeatureRunStatus {
             Self::Succeeded => "succeeded",
             Self::Failed(_) => "failed",
             Self::Skipped(_) => "skipped",
+            Self::Blocked(_) => "blocked",
         }
     }
 
     fn reason(&self) -> Option<&str> {
         match self {
-            Self::Failed(r) | Self::Skipped(r) => Some(r),
+            Self::Failed(r) | Self::Skipped(r) | Self::Blocked(r) => Some(r),
             Self::Succeeded => None,
         }
     }
@@ -3043,9 +3124,19 @@ impl FeatureRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureTaskLedgerRow {
     task_id: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
     dispatch_task_id: Option<String>,
+    #[serde(default)]
+    ci_monitor_status: Option<String>,
     status: String,
     reason: Option<String>,
+    #[serde(default)]
+    dependency_blockers: Vec<String>,
+    #[serde(default)]
+    attempts: usize,
+    #[serde(default)]
+    retries: usize,
     mapped_acceptance: Vec<String>,
 }
 
@@ -3082,6 +3173,8 @@ struct FeatureRunSummary {
     succeeded: usize,
     failed: usize,
     skipped: usize,
+    #[serde(default)]
+    blocked: usize,
     acceptance_covered: bool,
     acceptance_satisfied: bool,
     promotable: bool,
@@ -3169,6 +3262,7 @@ struct FeatureTaskDispatchOutcome {
     dispatch_task_id: String,
     status: FeatureRunStatus,
     result_summary: Option<String>,
+    pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3208,12 +3302,115 @@ struct FeatureGateLedger {
     reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractReportTaskRow {
+    task_id: String,
+    status: String,
+    reason: Option<String>,
+    #[serde(default)]
+    ci_monitor_status: Option<String>,
+    depends_on: Vec<String>,
+    dependency_blockers: Vec<String>,
+    attempts: usize,
+    retries: usize,
+    mapped_acceptance: Vec<String>,
+    mapped_checks: Vec<String>,
+    passed_checks: Vec<String>,
+    failed_checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractReportAcceptanceRow {
+    acceptance_id: String,
+    task_ids: Vec<String>,
+    succeeded_tasks: Vec<String>,
+    verification_checks: Vec<String>,
+    passed_checks: Vec<String>,
+    satisfied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractReportSummary {
+    total_tasks: usize,
+    succeeded: usize,
+    failed: usize,
+    blocked: usize,
+    skipped: usize,
+    verification_checks_total: usize,
+    verification_checks_failed: usize,
+    verification_required_failed: usize,
+    acceptance_satisfied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractRunReport {
+    timestamp_utc: String,
+    feature_id: String,
+    contract_path: String,
+    overall_status: String,
+    verify_profile: Option<String>,
+    summary: FeatureContractReportSummary,
+    tasks: Vec<FeatureContractReportTaskRow>,
+    acceptance: Vec<FeatureContractReportAcceptanceRow>,
+}
+
 async fn handle_feature(
     action: FeatureAction,
     config: Config,
     memory: Arc<MemoryStore>,
 ) -> anyhow::Result<()> {
     match action {
+        FeatureAction::Init {
+            file,
+            feature_id,
+            pattern,
+            force,
+        } => {
+            let existed_before = file.exists();
+            let inferred_feature_id = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("my-feature-id")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>();
+            let feature_id = feature_id
+                .as_deref()
+                .unwrap_or(&inferred_feature_id)
+                .trim()
+                .to_string();
+            if existed_before && !force {
+                anyhow::bail!(
+                    "Refusing to overwrite existing file '{}'. Re-run with --force to overwrite.",
+                    file.display()
+                );
+            }
+            if let Some(parent) = file.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            let template =
+                feature_contract::render_feature_contract_template_toml(&feature_id, &pattern)?;
+            std::fs::write(&file, template)?;
+            println!("feature_contract_template={}", file.display());
+            println!(
+                "feature_id={} format=toml pattern={} overwritten={}",
+                feature_id,
+                pattern,
+                existed_before && force
+            );
+            println!(
+                "next_steps=\"athena feature validate --file {}\"",
+                file.display()
+            );
+        }
         FeatureAction::Validate { file } => {
             let contract = feature_contract::load_feature_contract(&file)?;
             let batches = contract.execution_batches()?;
@@ -3360,11 +3557,16 @@ async fn handle_feature(
             let ledger = &dispatch.ledger;
             println!("feature_ledger_json={}", dispatch.ledger_json.display());
             println!("feature_ledger_md={}", dispatch.ledger_md.display());
+            let report = build_feature_contract_run_report(&contract, &file, ledger, None);
+            let (report_json, report_md) = write_feature_contract_report_artifacts(&report)?;
+            println!("feature_contract_report_json={}", report_json.display());
+            println!("feature_contract_report_md={}", report_md.display());
             println!(
-                "feature_id={} summary succeeded={} failed={} skipped={} promotable={}",
+                "feature_id={} summary succeeded={} failed={} blocked={} skipped={} promotable={}",
                 contract.feature_id,
                 ledger.summary.succeeded,
                 ledger.summary.failed,
+                ledger.summary.blocked,
                 ledger.summary.skipped,
                 ledger.summary.promotable
             );
@@ -3479,6 +3681,15 @@ async fn handle_feature(
             let (gate_json, gate_md) = write_feature_gate_artifacts(&gate)?;
             println!("feature_gate_json={}", gate_json.display());
             println!("feature_gate_md={}", gate_md.display());
+            let report = build_feature_contract_run_report(
+                &contract,
+                &file,
+                &dispatch.ledger,
+                Some(&verify),
+            );
+            let (report_json, report_md) = write_feature_contract_report_artifacts(&report)?;
+            println!("feature_contract_report_json={}", report_json.display());
+            println!("feature_contract_report_md={}", report_md.display());
             println!(
                 "feature_id={} gate_ok={} auto_promotable={} approval_required={} verify_profile={}",
                 contract.feature_id,
@@ -3658,9 +3869,13 @@ async fn run_feature_task_dispatch(
     );
     let wait =
         wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, runnable.wait_secs).await;
-    let result_summary = match &wait {
-        WaitForAutonomousOutcome::Received(content) => clip_feature_result_summary(content),
-        WaitForAutonomousOutcome::TimedOut | WaitForAutonomousOutcome::ChannelClosed => None,
+    let (result_summary, pr_url) = match &wait {
+        WaitForAutonomousOutcome::Received(content) => {
+            (clip_feature_result_summary(content), parse_pr_url(content))
+        }
+        WaitForAutonomousOutcome::TimedOut | WaitForAutonomousOutcome::ChannelClosed => {
+            (None, None)
+        }
     };
     let status = resolve_feature_run_status_after_wait(
         &config,
@@ -3675,6 +3890,7 @@ async fn run_feature_task_dispatch(
         dispatch_task_id: task_dispatch_id,
         status,
         result_summary,
+        pr_url,
     })
 }
 
@@ -3763,6 +3979,13 @@ async fn run_feature_dispatch_flow(
         std::collections::HashMap::new();
     let mut dispatch_ids: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut ci_monitor_statuses: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut ci_monitor_by_pr: std::collections::HashMap<String, (String, bool)> =
+        std::collections::HashMap::new();
+    let mut dependency_blockers: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut attempts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let default_lane = opts
         .lane
         .clone()
@@ -3789,13 +4012,15 @@ async fn run_feature_dispatch_flow(
             let task = contract
                 .task_by_id(task_id)
                 .ok_or_else(|| anyhow::anyhow!("Task '{}' missing from contract", task_id))?;
-            if let Some(reason) = blocked_dependency_reason(task, &statuses) {
+            if let Some(blockers) = blocked_dependency_blockers(task, &statuses) {
+                let reason = blockers.join("; ");
                 println!(
-                    "task={} result=skipped reason={}",
+                    "task={} result=blocked reason={}",
                     task.id,
                     reason.replace('\n', " ")
                 );
-                statuses.insert(task.id.clone(), FeatureRunStatus::Skipped(reason));
+                dependency_blockers.insert(task.id.clone(), blockers);
+                statuses.insert(task.id.clone(), FeatureRunStatus::Blocked(reason));
                 continue;
             }
 
@@ -3852,8 +4077,73 @@ async fn run_feature_dispatch_flow(
 
         let mut stop_spawning = false;
         while let Some(joined) = set.join_next().await {
-            let outcome =
+            let mut outcome =
                 joined.map_err(|e| anyhow::anyhow!("feature task worker join failed: {}", e))??;
+            if matches!(outcome.status, FeatureRunStatus::Succeeded) {
+                if let Some(pr_url) = outcome.pr_url.clone() {
+                    let ci_enabled = config.ticket_intake.ci_autopilot.enabled;
+                    let (ci_status, ci_green) = if ci_enabled {
+                        if let Some(existing) = ci_monitor_by_pr.get(&pr_url).cloned() {
+                            existing
+                        } else {
+                            let monitor_outcome = match resolve_repo_root().await {
+                                Ok(repo_root) => {
+                                    match run_feature_dispatch_ci_monitor(
+                                        &config, &repo_root, &pr_url,
+                                    )
+                                    .await
+                                    {
+                                        Ok((status, green, artifact)) => {
+                                            println!(
+                                                "task={} ci_monitor_status={} ci_monitor_artifact={}",
+                                                outcome.task_id,
+                                                status,
+                                                artifact.display()
+                                            );
+                                            (status, green)
+                                        }
+                                        Err(e) => (
+                                            format!(
+                                                "ci_monitor_error:{}",
+                                                trim_for_single_line(&e.to_string(), 180)
+                                            ),
+                                            false,
+                                        ),
+                                    }
+                                }
+                                Err(e) => (
+                                    format!(
+                                        "ci_monitor_error:{}",
+                                        trim_for_single_line(&e.to_string(), 180)
+                                    ),
+                                    false,
+                                ),
+                            };
+                            ci_monitor_by_pr.insert(pr_url.clone(), monitor_outcome.clone());
+                            monitor_outcome
+                        }
+                    } else {
+                        ("ci_monitor_disabled".to_string(), true)
+                    };
+                    ci_monitor_statuses.insert(outcome.task_id.clone(), ci_status.clone());
+                    if !ci_green {
+                        println!(
+                            "task={} ci_monitor_status={} (non_green)",
+                            outcome.task_id, ci_status
+                        );
+                    }
+                    if let Some(summary) = outcome.result_summary.as_mut() {
+                        summary.push_str(&format!(" [ci_monitor_status:{}]", ci_status));
+                    }
+                    if !ci_green {
+                        outcome.status = FeatureRunStatus::Failed(format!(
+                            "ci autopilot non-green status ({})",
+                            ci_status
+                        ));
+                    }
+                }
+            }
+            *attempts.entry(outcome.task_id.clone()).or_insert(0) += 1;
             match &outcome.status {
                 FeatureRunStatus::Succeeded => {
                     println!("task={} result=succeeded", outcome.task_id)
@@ -3865,6 +4155,11 @@ async fn run_feature_dispatch_flow(
                 ),
                 FeatureRunStatus::Skipped(reason) => println!(
                     "task={} result=skipped reason={}",
+                    outcome.task_id,
+                    reason.replace('\n', " ")
+                ),
+                FeatureRunStatus::Blocked(reason) => println!(
+                    "task={} result=blocked reason={}",
                     outcome.task_id,
                     reason.replace('\n', " ")
                 ),
@@ -3916,11 +4211,14 @@ async fn run_feature_dispatch_flow(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
-    for status in statuses.values() {
-        match status {
-            FeatureRunStatus::Succeeded => succeeded += 1,
-            FeatureRunStatus::Failed(_) => failed += 1,
-            FeatureRunStatus::Skipped(_) => skipped += 1,
+    let mut blocked = 0usize;
+    for task in contract.tasks.iter().filter(|t| t.enabled) {
+        match statuses.get(&task.id) {
+            Some(FeatureRunStatus::Succeeded) => succeeded += 1,
+            Some(FeatureRunStatus::Failed(_)) => failed += 1,
+            Some(FeatureRunStatus::Skipped(_)) => skipped += 1,
+            Some(FeatureRunStatus::Blocked(_)) => blocked += 1,
+            None => skipped += 1,
         }
     }
 
@@ -3945,9 +4243,13 @@ async fn run_feature_dispatch_flow(
         contract_path,
         &statuses,
         &dispatch_ids,
+        &ci_monitor_statuses,
+        &dependency_blockers,
+        &attempts,
         succeeded,
         failed,
         skipped,
+        blocked,
     );
     ledger.rollback_commits = rollback_commits;
     let (ledger_json, ledger_md) = write_feature_ledger_artifacts(&ledger)?;
@@ -3959,10 +4261,10 @@ async fn run_feature_dispatch_flow(
     })
 }
 
-fn blocked_dependency_reason(
+fn blocked_dependency_blockers(
     task: &feature_contract::FeatureTask,
     statuses: &std::collections::HashMap<String, FeatureRunStatus>,
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let mut blockers = Vec::new();
     for dep in &task.depends_on {
         match statuses.get(dep) {
@@ -3973,13 +4275,16 @@ fn blocked_dependency_reason(
             Some(FeatureRunStatus::Skipped(reason)) => {
                 blockers.push(format!("dependency '{}' skipped ({})", dep, reason));
             }
+            Some(FeatureRunStatus::Blocked(reason)) => {
+                blockers.push(format!("dependency '{}' blocked ({})", dep, reason));
+            }
             None => blockers.push(format!("dependency '{}' has no result", dep)),
         }
     }
     if blockers.is_empty() {
         None
     } else {
-        Some(blockers.join("; "))
+        Some(blockers)
     }
 }
 
@@ -4338,9 +4643,13 @@ fn build_feature_run_ledger(
     contract_path: &std::path::Path,
     statuses: &std::collections::HashMap<String, FeatureRunStatus>,
     dispatch_ids: &std::collections::HashMap<String, String>,
+    ci_monitor_statuses: &std::collections::HashMap<String, String>,
+    dependency_blockers: &std::collections::HashMap<String, Vec<String>>,
+    attempts: &std::collections::HashMap<String, usize>,
     succeeded: usize,
     failed: usize,
     skipped: usize,
+    blocked: usize,
 ) -> FeatureRunLedger {
     let coverage = contract.acceptance_coverage();
     let mut acceptance_rows = Vec::new();
@@ -4368,25 +4677,15 @@ fn build_feature_run_ledger(
         });
     }
     let promotion_reasons =
-        feature_dispatch_promotion_reasons(failed, skipped, all_covered, all_satisfied);
-
-    let tasks = contract
-        .tasks
-        .iter()
-        .filter(|t| t.enabled)
-        .map(|t| {
-            let status = statuses.get(&t.id).cloned().unwrap_or_else(|| {
-                FeatureRunStatus::Skipped("not_run_due_to_early_stop".to_string())
-            });
-            FeatureTaskLedgerRow {
-                task_id: t.id.clone(),
-                dispatch_task_id: dispatch_ids.get(&t.id).cloned(),
-                status: status.label().to_string(),
-                reason: status.reason().map(|s| s.to_string()),
-                mapped_acceptance: t.mapped_acceptance.clone(),
-            }
-        })
-        .collect::<Vec<_>>();
+        feature_dispatch_promotion_reasons(failed, skipped, blocked, all_covered, all_satisfied);
+    let tasks = build_feature_task_rows(
+        contract,
+        statuses,
+        dispatch_ids,
+        ci_monitor_statuses,
+        dependency_blockers,
+        attempts,
+    );
 
     FeatureRunLedger {
         timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
@@ -4399,23 +4698,61 @@ fn build_feature_run_ledger(
             succeeded,
             failed,
             skipped,
+            blocked,
             acceptance_covered: all_covered,
             acceptance_satisfied: all_satisfied,
-            promotable: failed == 0 && skipped == 0 && all_satisfied,
+            promotable: failed == 0 && skipped == 0 && blocked == 0 && all_satisfied,
             promotion_reasons,
         },
     }
 }
 
+fn build_feature_task_rows(
+    contract: &feature_contract::FeatureContract,
+    statuses: &std::collections::HashMap<String, FeatureRunStatus>,
+    dispatch_ids: &std::collections::HashMap<String, String>,
+    ci_monitor_statuses: &std::collections::HashMap<String, String>,
+    dependency_blockers: &std::collections::HashMap<String, Vec<String>>,
+    attempts: &std::collections::HashMap<String, usize>,
+) -> Vec<FeatureTaskLedgerRow> {
+    contract
+        .tasks
+        .iter()
+        .filter(|t| t.enabled)
+        .map(|t| {
+            let status = statuses.get(&t.id).cloned().unwrap_or_else(|| {
+                FeatureRunStatus::Skipped("not_run_due_to_early_stop".to_string())
+            });
+            let attempt_count = attempts.get(&t.id).copied().unwrap_or_default();
+            FeatureTaskLedgerRow {
+                task_id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                dispatch_task_id: dispatch_ids.get(&t.id).cloned(),
+                ci_monitor_status: ci_monitor_statuses.get(&t.id).cloned(),
+                status: status.label().to_string(),
+                reason: status.reason().map(|s| s.to_string()),
+                dependency_blockers: dependency_blockers.get(&t.id).cloned().unwrap_or_default(),
+                attempts: attempt_count,
+                retries: attempt_count.saturating_sub(1),
+                mapped_acceptance: t.mapped_acceptance.clone(),
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
 fn feature_dispatch_promotion_reasons(
     failed: usize,
     skipped: usize,
+    blocked: usize,
     all_covered: bool,
     all_satisfied: bool,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if failed > 0 {
         reasons.push(format!("{} task(s) failed", failed));
+    }
+    if blocked > 0 {
+        reasons.push(format!("{} task(s) blocked by dependencies", blocked));
     }
     if skipped > 0 {
         reasons.push(format!("{} task(s) skipped", skipped));
@@ -4454,9 +4791,10 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
     out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
     out.push_str(&format!("- contract: `{}`\n", ledger.contract_path));
     out.push_str(&format!(
-        "- summary: succeeded={} failed={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n",
+        "- summary: succeeded={} failed={} blocked={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n",
         ledger.summary.succeeded,
         ledger.summary.failed,
+        ledger.summary.blocked,
         ledger.summary.skipped,
         ledger.summary.acceptance_covered,
         ledger.summary.acceptance_satisfied,
@@ -4481,62 +4819,77 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
         ));
     }
     out.push('\n');
+    append_feature_ledger_tasks(&mut out, &ledger.tasks);
+    append_feature_ledger_acceptance(&mut out, &ledger.acceptance);
+    append_feature_ledger_rollbacks(&mut out, &ledger.rollback_commits);
+    out
+}
 
+fn append_feature_ledger_tasks(out: &mut String, rows: &[FeatureTaskLedgerRow]) {
     out.push_str("## Tasks\n\n");
-    out.push_str("| task_id | dispatch_task_id | status | reason | mapped_acceptance |\n");
-    out.push_str("|---|---|---|---|---|\n");
-    for row in &ledger.tasks {
+    out.push_str(
+        "| task_id | dispatch_task_id | ci_monitor_status | status | attempts | retries | blockers | reason | mapped_acceptance |\n",
+    );
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    for row in rows {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row.task_id,
             row.dispatch_task_id
                 .clone()
                 .unwrap_or_else(|| "-".to_string()),
+            row.ci_monitor_status
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
             row.status,
+            row.attempts,
+            row.retries,
+            list_or_dash(&row.dependency_blockers, " ; "),
             row.reason.clone().unwrap_or_else(|| "-".to_string()),
-            if row.mapped_acceptance.is_empty() {
-                "-".to_string()
-            } else {
-                row.mapped_acceptance.join(",")
-            }
+            list_or_dash(&row.mapped_acceptance, ",")
         ));
     }
+}
 
+fn append_feature_ledger_acceptance(out: &mut String, rows: &[FeatureAcceptanceLedgerRow]) {
     out.push_str("\n## Acceptance\n\n");
     out.push_str("| acceptance_id | covered_by_tasks | succeeded_tasks | covered | satisfied |\n");
     out.push_str("|---|---|---|---|---|\n");
-    for row in &ledger.acceptance {
+    for row in rows {
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             row.acceptance_id,
-            if row.covered_by_tasks.is_empty() {
-                "-".to_string()
-            } else {
-                row.covered_by_tasks.join(",")
-            },
-            if row.succeeded_tasks.is_empty() {
-                "-".to_string()
-            } else {
-                row.succeeded_tasks.join(",")
-            },
+            list_or_dash(&row.covered_by_tasks, ","),
+            list_or_dash(&row.succeeded_tasks, ","),
             row.covered,
             row.satisfied
         ));
     }
-    if !ledger.rollback_commits.is_empty() {
-        out.push_str("\n## Rollback Commits\n\n");
-        out.push_str("| commit_sha | reverted | error |\n");
-        out.push_str("|---|---|---|\n");
-        for row in &ledger.rollback_commits {
-            out.push_str(&format!(
-                "| {} | {} | {} |\n",
-                row.commit_sha,
-                row.reverted,
-                row.error.clone().unwrap_or_else(|| "-".to_string())
-            ));
-        }
+}
+
+fn append_feature_ledger_rollbacks(out: &mut String, rows: &[FeatureRollbackLedgerRow]) {
+    if rows.is_empty() {
+        return;
     }
-    out
+    out.push_str("\n## Rollback Commits\n\n");
+    out.push_str("| commit_sha | reverted | error |\n");
+    out.push_str("|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            row.commit_sha,
+            row.reverted,
+            row.error.clone().unwrap_or_else(|| "-".to_string())
+        ));
+    }
+}
+
+fn list_or_dash(values: &[String], separator: &str) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.join(separator)
+    }
 }
 
 fn run_feature_verify(
@@ -5001,6 +5354,315 @@ fn render_feature_gate_markdown(ledger: &FeatureGateLedger) -> String {
         }
     }
     out
+}
+
+fn build_feature_contract_run_report(
+    contract: &feature_contract::FeatureContract,
+    contract_path: &std::path::Path,
+    dispatch: &FeatureRunLedger,
+    verify: Option<&FeatureVerifyLedger>,
+) -> FeatureContractRunReport {
+    let dispatch_by_task = dispatch
+        .tasks
+        .iter()
+        .map(|row| (row.task_id.clone(), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let coverage = contract.acceptance_coverage();
+    let verify_coverage = contract.acceptance_verification_coverage();
+    let check_status_by_id = build_check_status_map(verify);
+    let tasks = build_feature_contract_report_tasks(
+        contract,
+        &dispatch_by_task,
+        &verify_coverage,
+        &check_status_by_id,
+        verify.is_some(),
+    );
+    let acceptance = build_feature_contract_report_acceptance_rows(
+        contract,
+        &dispatch_by_task,
+        &coverage,
+        &verify_coverage,
+        &check_status_by_id,
+        verify.is_some(),
+    );
+    let summary = build_feature_contract_report_summary(dispatch, verify);
+    let overall_status = resolve_feature_contract_report_status(dispatch, &summary);
+
+    FeatureContractRunReport {
+        timestamp_utc: dispatch.timestamp_utc.clone(),
+        feature_id: contract.feature_id.clone(),
+        contract_path: contract_path.display().to_string(),
+        overall_status,
+        verify_profile: verify.map(|v| v.summary.profile.clone()),
+        summary,
+        tasks,
+        acceptance,
+    }
+}
+
+fn build_check_status_map(
+    verify: Option<&FeatureVerifyLedger>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut check_status_by_id = std::collections::BTreeMap::new();
+    if let Some(v) = verify {
+        for row in &v.checks {
+            check_status_by_id.insert(row.check_id.clone(), row.status.clone());
+        }
+    }
+    check_status_by_id
+}
+
+fn build_feature_contract_report_tasks(
+    contract: &feature_contract::FeatureContract,
+    dispatch_by_task: &std::collections::BTreeMap<String, &FeatureTaskLedgerRow>,
+    verify_coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    check_status_by_id: &std::collections::BTreeMap<String, String>,
+    has_verify: bool,
+) -> Vec<FeatureContractReportTaskRow> {
+    let mut enabled_tasks = contract
+        .tasks
+        .iter()
+        .filter(|t| t.enabled)
+        .collect::<Vec<_>>();
+    enabled_tasks.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut rows = Vec::with_capacity(enabled_tasks.len());
+    for task in enabled_tasks {
+        let ledger_row = dispatch_by_task.get(&task.id).copied();
+        let (mapped_checks, passed_checks, failed_checks) =
+            task_check_outcomes(task, verify_coverage, check_status_by_id, has_verify);
+        rows.push(FeatureContractReportTaskRow {
+            task_id: task.id.clone(),
+            status: ledger_row
+                .map(|row| row.status.clone())
+                .unwrap_or_else(|| "pending".to_string()),
+            reason: ledger_row.and_then(|row| row.reason.clone()),
+            ci_monitor_status: ledger_row.and_then(|row| row.ci_monitor_status.clone()),
+            depends_on: ledger_row
+                .map(|row| row.depends_on.clone())
+                .unwrap_or_else(|| task.depends_on.clone()),
+            dependency_blockers: ledger_row
+                .map(|row| row.dependency_blockers.clone())
+                .unwrap_or_default(),
+            attempts: ledger_row.map(|row| row.attempts).unwrap_or(0),
+            retries: ledger_row.map(|row| row.retries).unwrap_or(0),
+            mapped_acceptance: task.mapped_acceptance.clone(),
+            mapped_checks,
+            passed_checks,
+            failed_checks,
+        });
+    }
+    rows
+}
+
+fn task_check_outcomes(
+    task: &feature_contract::FeatureTask,
+    verify_coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    check_status_by_id: &std::collections::BTreeMap<String, String>,
+    has_verify: bool,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut mapped_checks = std::collections::BTreeSet::new();
+    for acceptance in &task.mapped_acceptance {
+        if let Some(check_ids) = verify_coverage.get(acceptance) {
+            mapped_checks.extend(check_ids.iter().cloned());
+        }
+    }
+    let mapped_checks = mapped_checks.into_iter().collect::<Vec<_>>();
+    let mut passed_checks = Vec::new();
+    let mut failed_checks = Vec::new();
+    for check_id in &mapped_checks {
+        if check_status_by_id
+            .get(check_id)
+            .map(|s| s == "passed")
+            .unwrap_or(false)
+        {
+            passed_checks.push(check_id.clone());
+        } else if has_verify {
+            failed_checks.push(check_id.clone());
+        }
+    }
+    (mapped_checks, passed_checks, failed_checks)
+}
+
+fn build_feature_contract_report_acceptance_rows(
+    contract: &feature_contract::FeatureContract,
+    dispatch_by_task: &std::collections::BTreeMap<String, &FeatureTaskLedgerRow>,
+    coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    verify_coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    check_status_by_id: &std::collections::BTreeMap<String, String>,
+    has_verify: bool,
+) -> Vec<FeatureContractReportAcceptanceRow> {
+    let mut rows = Vec::new();
+    for ac in &contract.acceptance_criteria {
+        let task_ids = coverage.get(&ac.id).cloned().unwrap_or_default();
+        let succeeded_tasks = task_ids
+            .iter()
+            .filter(|task_id| {
+                dispatch_by_task
+                    .get(*task_id)
+                    .map(|row| row.status == "succeeded")
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let verification_checks = verify_coverage.get(&ac.id).cloned().unwrap_or_default();
+        let passed_checks = verification_checks
+            .iter()
+            .filter(|check_id| {
+                check_status_by_id
+                    .get(*check_id)
+                    .map(|status| status == "passed")
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let satisfied = if has_verify {
+            !succeeded_tasks.is_empty() && !passed_checks.is_empty()
+        } else {
+            !succeeded_tasks.is_empty()
+        };
+        rows.push(FeatureContractReportAcceptanceRow {
+            acceptance_id: ac.id.clone(),
+            task_ids,
+            succeeded_tasks,
+            verification_checks,
+            passed_checks,
+            satisfied,
+        });
+    }
+    rows.sort_by(|a, b| a.acceptance_id.cmp(&b.acceptance_id));
+    rows
+}
+
+fn build_feature_contract_report_summary(
+    dispatch: &FeatureRunLedger,
+    verify: Option<&FeatureVerifyLedger>,
+) -> FeatureContractReportSummary {
+    let verification_checks_total = verify.map(|v| v.summary.checks_total).unwrap_or(0);
+    let verification_checks_failed = verify.map(|v| v.summary.checks_failed).unwrap_or(0);
+    let verification_required_failed = verify
+        .map(|v| v.summary.required_checks_failed)
+        .unwrap_or(0);
+    let acceptance_satisfied = if let Some(v) = verify {
+        dispatch.summary.acceptance_satisfied && v.summary.acceptance_satisfied
+    } else {
+        dispatch.summary.acceptance_satisfied
+    };
+    FeatureContractReportSummary {
+        total_tasks: dispatch.tasks.len(),
+        succeeded: dispatch.summary.succeeded,
+        failed: dispatch.summary.failed,
+        blocked: dispatch.summary.blocked,
+        skipped: dispatch.summary.skipped,
+        verification_checks_total,
+        verification_checks_failed,
+        verification_required_failed,
+        acceptance_satisfied,
+    }
+}
+
+fn resolve_feature_contract_report_status(
+    dispatch: &FeatureRunLedger,
+    summary: &FeatureContractReportSummary,
+) -> String {
+    if dispatch.summary.failed > 0 {
+        "failed".to_string()
+    } else if dispatch.summary.blocked > 0 {
+        "blocked".to_string()
+    } else if dispatch.summary.skipped > 0 {
+        "partial".to_string()
+    } else if summary.verification_checks_failed > 0 || !summary.acceptance_satisfied {
+        "verify_failed".to_string()
+    } else {
+        "succeeded".to_string()
+    }
+}
+
+fn write_feature_contract_report_artifacts(
+    report: &FeatureContractRunReport,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let out_dir = std::path::PathBuf::from("artifacts");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_feature_id = sanitize_feature_id(&report.feature_id);
+    let base = format!("feature-contract-report-{}", safe_feature_id);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    std::fs::write(&json_path, serde_json::to_string_pretty(report)?)?;
+    std::fs::write(&md_path, render_feature_contract_report_markdown(report))?;
+    Ok((json_path, md_path))
+}
+
+fn render_feature_contract_report_markdown(report: &FeatureContractRunReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Feature Contract Run Report\n\n");
+    out.push_str(&format!("- feature_id: `{}`\n", report.feature_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", report.timestamp_utc));
+    out.push_str(&format!("- contract: `{}`\n", report.contract_path));
+    out.push_str(&format!("- overall_status: `{}`\n", report.overall_status));
+    out.push_str(&format!(
+        "- verify_profile: `{}`\n",
+        report.verify_profile.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "- summary: total_tasks={} succeeded={} failed={} blocked={} skipped={} checks_total={} checks_failed={} required_checks_failed={} acceptance_satisfied={}\n\n",
+        report.summary.total_tasks,
+        report.summary.succeeded,
+        report.summary.failed,
+        report.summary.blocked,
+        report.summary.skipped,
+        report.summary.verification_checks_total,
+        report.summary.verification_checks_failed,
+        report.summary.verification_required_failed,
+        report.summary.acceptance_satisfied
+    ));
+    append_feature_contract_report_tasks(&mut out, &report.tasks);
+    append_feature_contract_report_acceptance(&mut out, &report.acceptance);
+    out
+}
+
+fn append_feature_contract_report_tasks(out: &mut String, rows: &[FeatureContractReportTaskRow]) {
+    out.push_str("## Tasks\n\n");
+    out.push_str("| task_id | status | ci_monitor_status | attempts | retries | depends_on | blockers | mapped_acceptance | checks_passed/checks_total | reason |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {}/{} | {} |\n",
+            row.task_id,
+            row.status,
+            row.ci_monitor_status
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            row.attempts,
+            row.retries,
+            list_or_dash(&row.depends_on, ","),
+            list_or_dash(&row.dependency_blockers, " ; "),
+            list_or_dash(&row.mapped_acceptance, ","),
+            row.passed_checks.len(),
+            row.mapped_checks.len(),
+            row.reason.clone().unwrap_or_else(|| "-".to_string())
+        ));
+    }
+}
+
+fn append_feature_contract_report_acceptance(
+    out: &mut String,
+    rows: &[FeatureContractReportAcceptanceRow],
+) {
+    out.push_str("\n## Acceptance\n\n");
+    out.push_str(
+        "| acceptance_id | task_ids | succeeded_tasks | verification_checks | passed_checks | satisfied |\n",
+    );
+    out.push_str("|---|---|---|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            row.acceptance_id,
+            list_or_dash(&row.task_ids, ","),
+            list_or_dash(&row.succeeded_tasks, ","),
+            list_or_dash(&row.verification_checks, ","),
+            list_or_dash(&row.passed_checks, ","),
+            row.satisfied
+        ));
+    }
 }
 
 fn read_dispatch_ledger(path: &std::path::Path) -> anyhow::Result<FeatureRunLedger> {
@@ -5950,17 +6612,20 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_feature_rollback_commit_policy_context, build_feature_promotion_decision,
-        build_feature_run_ledger, build_feature_task_context, build_self_build_review_checklist,
-        classify_chat_command, commit_message_contains_tag, compute_feature_outcome_grace_secs,
+        append_feature_rollback_commit_policy_context, build_feature_contract_run_report,
+        build_feature_promotion_decision, build_feature_run_ledger, build_feature_task_context,
+        build_self_build_review_checklist, ci_monitor_report_green, classify_chat_command,
+        commit_message_contains_tag, compute_feature_outcome_grace_secs,
         dashboard_output_format_label, default_dashboard_out_file, ensure_clean_working_tree,
         evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
-        feature_batch_dynamic_parallelism, latest_eval_gate_status, parse_dispatch_task_id,
-        parse_git_status_paths, plan_self_build_promotion, pulse_matches_task_id,
-        render_feature_ledger_markdown, resolve_self_build_ci_monitor, rollback_feature_commits,
-        run_feature_verify, track_feature_commits_since, wait_for_autonomous_pulse, ChatCommand,
-        DashboardOutputFormat, FeatureRunStatus, SelfBuildPromoteMode, WaitForAutonomousOutcome,
+        feature_batch_dynamic_parallelism, format_ci_monitor_status, latest_eval_gate_status,
+        parse_dispatch_task_id, parse_git_status_paths, plan_self_build_promotion,
+        pulse_matches_task_id, render_feature_ledger_markdown, resolve_self_build_ci_monitor,
+        rollback_feature_commits, run_feature_verify, track_feature_commits_since,
+        wait_for_autonomous_pulse, ChatCommand, DashboardOutputFormat, FeatureRunStatus,
+        SelfBuildPromoteMode, WaitForAutonomousOutcome,
     };
+    use crate::ci_monitor::CiMonitorReport;
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
     };
@@ -6404,6 +7069,37 @@ mod tests {
     }
 
     #[test]
+    fn ci_monitor_helpers_capture_green_and_status_rendering() {
+        let green = CiMonitorReport {
+            pr_url: "https://github.com/acme/repo/pull/1".to_string(),
+            branch: None,
+            started_utc: "2026-03-03T00:00:00Z".to_string(),
+            finished_utc: "2026-03-03T00:01:00Z".to_string(),
+            final_status: "ci_passed".to_string(),
+            post_merge_status: "post_merge_passed".to_string(),
+            revert_pr_url: None,
+            polls: Vec::new(),
+            heal_attempts: Vec::new(),
+            merged_after_ci: true,
+            commands: Vec::new(),
+        };
+        assert!(ci_monitor_report_green(&green));
+        assert_eq!(
+            format_ci_monitor_status(&green),
+            "ci_passed / post_merge_passed".to_string()
+        );
+
+        let failing = CiMonitorReport {
+            final_status: "heal_exhausted".to_string(),
+            post_merge_status: "not_merged".to_string(),
+            revert_pr_url: Some("https://github.com/acme/repo/pull/2".to_string()),
+            ..green.clone()
+        };
+        assert!(!ci_monitor_report_green(&failing));
+        assert!(format_ci_monitor_status(&failing).contains("revert_pr="));
+    }
+
+    #[test]
     fn feature_ledger_marks_unsatisfied_acceptance() {
         let contract = sample_contract();
         let mut statuses = HashMap::new();
@@ -6417,8 +7113,12 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             1,
             1,
+            0,
             0,
         );
         assert!(!ledger.summary.acceptance_satisfied);
@@ -6436,7 +7136,11 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             2,
+            0,
             0,
             0,
         );
@@ -6459,8 +7163,12 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             1,
             1,
+            0,
             0,
         );
         ledger.rollback_commits = vec![
@@ -6477,10 +7185,77 @@ mod tests {
         ];
 
         let md = render_feature_ledger_markdown(&ledger);
+        assert!(md.contains("ci_monitor_status"));
         assert!(md.contains("## Rollback Commits"));
         assert!(md.contains("abc123"));
         assert!(md.contains("def456"));
         assert!(md.contains("conflict"));
+    }
+
+    #[test]
+    fn feature_contract_report_sorts_tasks_and_captures_blockers() {
+        let mut contract = sample_contract();
+        contract.tasks.swap(0, 1);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert(
+            "T2".to_string(),
+            FeatureRunStatus::Blocked("dependency 'T1' failed (timeout)".to_string()),
+        );
+        let mut blockers = HashMap::new();
+        blockers.insert(
+            "T2".to_string(),
+            vec!["dependency 'T1' failed (timeout)".to_string()],
+        );
+        let mut attempts = HashMap::new();
+        attempts.insert("T1".to_string(), 2usize);
+        let mut ci_status = HashMap::new();
+        ci_status.insert(
+            "T1".to_string(),
+            "ci_passed / post_merge_passed".to_string(),
+        );
+        let ledger = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            &ci_status,
+            &blockers,
+            &attempts,
+            1,
+            0,
+            0,
+            1,
+        );
+        let verify = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "strict",
+        )
+        .unwrap();
+        let report = build_feature_contract_run_report(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &ledger,
+            Some(&verify),
+        );
+
+        assert_eq!(report.tasks.len(), 2);
+        assert_eq!(report.tasks[0].task_id, "T1");
+        assert_eq!(report.tasks[0].attempts, 2);
+        assert_eq!(report.tasks[0].retries, 1);
+        assert_eq!(
+            report.tasks[0].ci_monitor_status.as_deref(),
+            Some("ci_passed / post_merge_passed")
+        );
+        assert_eq!(report.tasks[1].task_id, "T2");
+        assert_eq!(report.tasks[1].status, "blocked");
+        assert_eq!(
+            report.tasks[1].dependency_blockers,
+            vec!["dependency 'T1' failed (timeout)".to_string()]
+        );
+        assert_eq!(report.overall_status, "blocked");
     }
 
     #[test]
@@ -6541,7 +7316,11 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             2,
+            0,
             0,
             0,
         );
@@ -6580,7 +7359,11 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             2,
+            0,
             0,
             0,
         );

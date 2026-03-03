@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
+use chrono::{SecondsFormat, Utc};
 use rusqlite::Connection;
+use serde::Serialize;
 
 use crate::config::{self, Config};
 use crate::docker;
@@ -8,6 +10,7 @@ use crate::knobs;
 use crate::profiles;
 use crate::secrets;
 use crate::tool_usage::ToolUsageStore;
+use crate::tools;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckStatus {
@@ -61,6 +64,99 @@ struct LlmHealth {
     status: CheckStatus,
     detail: String,
     fix: Option<String>,
+}
+
+const SECURITY_ATTESTATION_SCHEMA_VERSION: &str = "v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum JsonCheckStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+impl JsonCheckStatus {
+    fn label(self) -> &'static str {
+        match self {
+            JsonCheckStatus::Pass => "PASS",
+            JsonCheckStatus::Warn => "WARN",
+            JsonCheckStatus::Fail => "FAIL",
+        }
+    }
+
+    fn as_check_status(self) -> CheckStatus {
+        match self {
+            JsonCheckStatus::Pass => CheckStatus::Pass,
+            JsonCheckStatus::Warn => CheckStatus::Warn,
+            JsonCheckStatus::Fail => CheckStatus::Fail,
+        }
+    }
+}
+
+impl From<CheckStatus> for JsonCheckStatus {
+    fn from(value: CheckStatus) -> Self {
+        match value {
+            CheckStatus::Pass => JsonCheckStatus::Pass,
+            CheckStatus::Warn => JsonCheckStatus::Warn,
+            CheckStatus::Fail => JsonCheckStatus::Fail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SecurityAttestationReport {
+    schema_version: String,
+    generated_at: String,
+    summary: SecuritySummary,
+    ghosts: Vec<GhostSecurityReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SecuritySummary {
+    overall_status: JsonCheckStatus,
+    ghosts_total: usize,
+    ghosts_failing: usize,
+    checks_pass: usize,
+    checks_warn: usize,
+    checks_fail: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhostSecurityReport {
+    name: String,
+    status: JsonCheckStatus,
+    effective_controls: EffectiveControls,
+    checks: Vec<SecurityCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EffectiveControls {
+    container_mode: String,
+    caps_dropped: Vec<String>,
+    rootfs_readonly: bool,
+    network_mode: String,
+    pid_limit: i64,
+    memory_limit: i64,
+    cpu_quota: i64,
+    tool_guard: bool,
+    path_guard: bool,
+    sensitive_pattern_guard: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SecurityCheck {
+    id: String,
+    status: JsonCheckStatus,
+    observed: String,
+    expected: String,
+    remediation: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SecurityContext {
+    container: docker::EffectiveContainerSecurity,
+    valid_sensitive_patterns: usize,
 }
 
 struct DoctorSnapshot {
@@ -318,8 +414,14 @@ async fn evaluate_llm_health(config: &Config, skip_llm: bool) -> LlmHealth {
         };
     }
 
+    let provider_candidates = if config.local_only_enabled() {
+        vec![config.llm.provider.clone()]
+    } else {
+        config.provider_candidates()
+    };
+
     let mut failures = Vec::new();
-    for provider_name in config.provider_candidates() {
+    for provider_name in provider_candidates {
         match config.build_llm_provider_for(&provider_name) {
             Ok(provider) => match provider.health_check().await {
                 Ok(()) => {
@@ -793,6 +895,257 @@ fn execution_learning_check(snap: &DoctorSnapshot) -> CheckItem {
     }
 }
 
+async fn build_local_only_funnel(config: &Config, skip_llm: bool) -> FunnelReport {
+    let checks = vec![
+        local_only_profile_check(config),
+        local_only_provider_check(config),
+        local_only_ollama_endpoint_check(config),
+        local_only_storage_paths_check(config),
+        local_only_outbound_integrations_check(config),
+        local_only_ollama_reachability_check(config, skip_llm).await,
+    ];
+
+    FunnelReport {
+        name: "Funnel 5: Local-Only Deployment Readiness",
+        checks,
+    }
+}
+
+fn local_only_not_enforced(stage: &'static str, detail: String) -> CheckItem {
+    CheckItem {
+        stage,
+        status: CheckStatus::Pass,
+        detail,
+        fix: None,
+    }
+}
+
+fn local_only_profile_check(config: &Config) -> CheckItem {
+    let profile = config.runtime_profile_name();
+    CheckItem {
+        stage: "Runtime profile selection",
+        status: CheckStatus::Pass,
+        detail: if config.local_only_enabled() {
+            format!("runtime.profile={profile} (strict local-only checks enabled)")
+        } else {
+            format!("runtime.profile={profile} (local-only checks are informational)")
+        },
+        fix: (!config.local_only_enabled()).then(|| {
+            "Set `[runtime].profile = \"local_only\"` for strict local execution checks."
+                .to_string()
+        }),
+    }
+}
+
+fn local_only_provider_check(config: &Config) -> CheckItem {
+    if !config.local_only_enabled() {
+        return local_only_not_enforced(
+            "Local model provider",
+            format!(
+                "provider={} (runtime.profile != local_only)",
+                config.llm.provider
+            ),
+        );
+    }
+
+    let provider_ok = config.llm.provider == "ollama";
+    CheckItem {
+        stage: "Local model provider",
+        status: if provider_ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: format!("llm.provider={}", config.llm.provider),
+        fix: (!provider_ok).then(|| {
+            "Set `[llm].provider = \"ollama\"` when `[runtime].profile = \"local_only\"`."
+                .to_string()
+        }),
+    }
+}
+
+fn local_only_ollama_endpoint_check(config: &Config) -> CheckItem {
+    if !config.local_only_enabled() {
+        return local_only_not_enforced(
+            "Ollama endpoint loopback",
+            format!(
+                "ollama.url={} (runtime.profile != local_only)",
+                config.ollama.url
+            ),
+        );
+    }
+
+    let host = config
+        .ollama_url_host()
+        .unwrap_or_else(|| "<invalid-url>".to_string());
+    let endpoint_ok = config.ollama_url_is_loopback();
+
+    CheckItem {
+        stage: "Ollama endpoint loopback",
+        status: if endpoint_ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: format!("ollama.url={} (host={host})", config.ollama.url),
+        fix: (!endpoint_ok).then(|| {
+            "Use a loopback Ollama URL (e.g. `http://localhost:11434` or `http://127.0.0.1:11434`)."
+                .to_string()
+        }),
+    }
+}
+
+fn local_only_storage_paths_check(config: &Config) -> CheckItem {
+    if !config.local_only_enabled() {
+        return local_only_not_enforced(
+            "Local storage paths",
+            format!(
+                "db.path={} embedding.model_dir={} (runtime.profile != local_only)",
+                config.db.path, config.embedding.model_dir
+            ),
+        );
+    }
+
+    let db_local = is_local_path(&config.db.path) && config.db_path().is_ok();
+    let model_local =
+        is_local_path(&config.embedding.model_dir) && config.resolve_model_dir().is_ok();
+    let paths_ok = db_local && model_local;
+
+    CheckItem {
+        stage: "Local storage paths",
+        status: if paths_ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: format!(
+            "db.path={} embedding.model_dir={}",
+            config.db.path, config.embedding.model_dir
+        ),
+        fix: (!paths_ok).then(|| {
+            "Use filesystem paths (for example `~/.athena/athena.db` and `~/.athena/models/all-MiniLM-L6-v2`)."
+                .to_string()
+        }),
+    }
+}
+
+fn local_only_outbound_integrations_check(config: &Config) -> CheckItem {
+    if !config.local_only_enabled() {
+        return local_only_not_enforced(
+            "Outbound integration toggles",
+            "runtime.profile != local_only".to_string(),
+        );
+    }
+
+    let mut outbound_risks = Vec::new();
+    if config.langfuse.enabled
+        || config.langfuse.public_key.is_some()
+        || config.langfuse.secret_key.is_some()
+    {
+        outbound_risks.push("langfuse");
+    }
+    if config.ticket_intake.enabled {
+        outbound_risks.push("ticket_intake.enabled");
+    }
+    if !config.ticket_intake.sources.is_empty() {
+        outbound_risks.push("ticket_intake.sources");
+    }
+    if config.ticket_intake.webhook.enabled {
+        outbound_risks.push("ticket_intake.webhook.enabled");
+    }
+
+    let outbound_clean = outbound_risks.is_empty();
+    CheckItem {
+        stage: "Outbound integration toggles",
+        status: if outbound_clean {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: if outbound_clean {
+            "langfuse + ticket intake integrations are disabled".to_string()
+        } else {
+            format!("potential outbound paths enabled: {}", outbound_risks.join(", "))
+        },
+        fix: (!outbound_clean).then(|| {
+            "Disable `[langfuse]`, set `[ticket_intake].enabled = false`, keep `[ticket_intake].sources = []`, and disable `[ticket_intake.webhook]` for local-only mode."
+                .to_string()
+        }),
+    }
+}
+
+async fn local_only_ollama_reachability_check(config: &Config, skip_llm: bool) -> CheckItem {
+    if !config.local_only_enabled() {
+        return local_only_not_enforced(
+            "Local Ollama reachability",
+            "runtime.profile != local_only".to_string(),
+        );
+    }
+
+    if skip_llm {
+        return CheckItem {
+            stage: "Local Ollama reachability",
+            status: CheckStatus::Pass,
+            detail: "skipped (--skip-llm)".to_string(),
+            fix: None,
+        };
+    }
+
+    if config.llm.provider != "ollama" {
+        return CheckItem {
+            stage: "Local Ollama reachability",
+            status: CheckStatus::Warn,
+            detail: format!(
+                "provider={} (skip direct Ollama probe)",
+                config.llm.provider
+            ),
+            fix: Some("Set `[llm].provider = \"ollama\"` for local-only mode.".to_string()),
+        };
+    }
+
+    if !config.ollama_url_is_loopback() {
+        return CheckItem {
+            stage: "Local Ollama reachability",
+            status: CheckStatus::Warn,
+            detail: format!(
+                "ollama.url={} is not loopback (probe skipped to avoid outbound request)",
+                config.ollama.url
+            ),
+            fix: Some("Set `[ollama].url` to a loopback address and rerun doctor.".to_string()),
+        };
+    }
+
+    match config.build_llm_provider_for("ollama") {
+        Ok(provider) => match provider.health_check().await {
+            Ok(()) => CheckItem {
+                stage: "Local Ollama reachability",
+                status: CheckStatus::Pass,
+                detail: format!("{} reachable", config.ollama.url),
+                fix: None,
+            },
+            Err(e) => CheckItem {
+                stage: "Local Ollama reachability",
+                status: CheckStatus::Fail,
+                detail: format!("{} unreachable: {}", config.ollama.url, e),
+                fix: Some(
+                    "Start/restart the local Ollama daemon and pull the configured model."
+                        .to_string(),
+                ),
+            },
+        },
+        Err(e) => CheckItem {
+            stage: "Local Ollama reachability",
+            status: CheckStatus::Fail,
+            detail: format!("failed to build Ollama provider: {}", e),
+            fix: Some("Fix `[ollama]` config and rerun doctor.".to_string()),
+        },
+    }
+}
+
+fn is_local_path(path: &str) -> bool {
+    !path.contains("://")
+}
+
 fn needs_cargo_check(snap: &DoctorSnapshot) -> bool {
     snap.rust_workspace
         && snap
@@ -854,6 +1207,338 @@ async fn run_cargo_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
             fix: Some("Fix container startup/image issues, then re-run `athena doctor`.".to_string()),
         },
     }
+}
+
+fn valid_sensitive_pattern_count(patterns: &[String]) -> usize {
+    patterns
+        .iter()
+        .filter(|pattern| regex::Regex::new(pattern).is_ok())
+        .count()
+}
+
+fn security_check(
+    id: &str,
+    status: CheckStatus,
+    observed: String,
+    expected: String,
+    remediation: &str,
+) -> SecurityCheck {
+    SecurityCheck {
+        id: id.to_string(),
+        status: JsonCheckStatus::from(status),
+        observed,
+        expected,
+        remediation: (status != CheckStatus::Pass).then(|| remediation.to_string()),
+    }
+}
+
+fn build_security_context(config: &Config) -> SecurityContext {
+    SecurityContext {
+        container: docker::effective_container_security(&config.docker),
+        valid_sensitive_patterns: valid_sensitive_pattern_count(&config.manager.sensitive_patterns),
+    }
+}
+
+fn build_effective_controls(
+    ghost: &config::GhostConfig,
+    context: &SecurityContext,
+) -> EffectiveControls {
+    EffectiveControls {
+        container_mode: context.container.container_mode.to_string(),
+        caps_dropped: context.container.caps_dropped.clone(),
+        rootfs_readonly: context.container.rootfs_readonly,
+        network_mode: context.container.network_mode.to_string(),
+        pid_limit: context.container.pid_limit,
+        memory_limit: context.container.memory_limit,
+        cpu_quota: context.container.cpu_quota,
+        tool_guard: tools::TOOL_ALLOWLIST_GUARD_ENABLED && !ghost.tools.is_empty(),
+        path_guard: tools::PATH_GUARD_ENABLED,
+        sensitive_pattern_guard: context.valid_sensitive_patterns > 0,
+    }
+}
+
+fn container_security_checks(controls: &EffectiveControls) -> Vec<SecurityCheck> {
+    vec![
+        security_check(
+            "container.mode",
+            if controls.container_mode == docker::CONTAINER_MODE {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.container_mode.clone(),
+            docker::CONTAINER_MODE.to_string(),
+            "Route ghost task execution through Docker containers.",
+        ),
+        security_check(
+            "container.caps_dropped",
+            if controls
+                .caps_dropped
+                .iter()
+                .any(|cap| cap == docker::CAP_DROP_ALL)
+            {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.caps_dropped.join(","),
+            format!("includes {}", docker::CAP_DROP_ALL),
+            "Drop all container capabilities (`cap_drop = [\"ALL\"]`).",
+        ),
+        security_check(
+            "rootfs.readonly",
+            if controls.rootfs_readonly {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.rootfs_readonly.to_string(),
+            "true".to_string(),
+            "Enable read-only root filesystem for ghost containers.",
+        ),
+        security_check(
+            "network.mode",
+            if controls.network_mode == docker::NETWORK_MODE_NONE {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.network_mode.clone(),
+            docker::NETWORK_MODE_NONE.to_string(),
+            "Disable ghost container networking (`network_mode = \"none\"`).",
+        ),
+    ]
+}
+
+fn limit_security_checks(controls: &EffectiveControls) -> Vec<SecurityCheck> {
+    vec![
+        security_check(
+            "limits.pid",
+            if controls.pid_limit > 0 && controls.pid_limit <= docker::DEFAULT_PIDS_LIMIT {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.pid_limit.to_string(),
+            format!("set and <= {}", docker::DEFAULT_PIDS_LIMIT),
+            "Set a conservative PID limit (default is 256).",
+        ),
+        security_check(
+            "limits.memory",
+            if controls.memory_limit > 0 {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.memory_limit.to_string(),
+            "positive byte limit".to_string(),
+            "Set `[docker].memory_limit` to a positive value.",
+        ),
+        security_check(
+            "limits.cpu",
+            if controls.cpu_quota > 0 {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.cpu_quota.to_string(),
+            "positive CFS quota".to_string(),
+            "Set `[docker].cpu_quota` to a positive value.",
+        ),
+    ]
+}
+
+fn guard_security_checks(controls: &EffectiveControls) -> Vec<SecurityCheck> {
+    vec![
+        security_check(
+            "guard.tool_allowlist",
+            if controls.tool_guard {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.tool_guard.to_string(),
+            "true".to_string(),
+            "Declare an explicit non-empty `ghost.tools` allowlist for each ghost.",
+        ),
+        security_check(
+            "guard.path_validation",
+            if controls.path_guard {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.path_guard.to_string(),
+            "true".to_string(),
+            "Enable path validation in file/path tools to block traversal and sensitive files.",
+        ),
+        security_check(
+            "guard.sensitive_patterns",
+            if controls.sensitive_pattern_guard {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            controls.sensitive_pattern_guard.to_string(),
+            "true".to_string(),
+            "Configure valid `[manager].sensitive_patterns` to gate dangerous shell commands.",
+        ),
+    ]
+}
+
+fn build_security_checks(controls: &EffectiveControls) -> Vec<SecurityCheck> {
+    let mut checks = container_security_checks(controls);
+    checks.extend(limit_security_checks(controls));
+    checks.extend(guard_security_checks(controls));
+    checks
+}
+
+fn summarize_ghost_security_status(checks: &[SecurityCheck]) -> JsonCheckStatus {
+    checks
+        .iter()
+        .map(|check| check.status.as_check_status())
+        .max()
+        .unwrap_or(CheckStatus::Pass)
+        .into()
+}
+
+fn build_security_summary(ghosts: &[GhostSecurityReport]) -> SecuritySummary {
+    let checks_pass = ghosts
+        .iter()
+        .flat_map(|ghost| ghost.checks.iter())
+        .filter(|check| check.status == JsonCheckStatus::Pass)
+        .count();
+    let checks_warn = ghosts
+        .iter()
+        .flat_map(|ghost| ghost.checks.iter())
+        .filter(|check| check.status == JsonCheckStatus::Warn)
+        .count();
+    let checks_fail = ghosts
+        .iter()
+        .flat_map(|ghost| ghost.checks.iter())
+        .filter(|check| check.status == JsonCheckStatus::Fail)
+        .count();
+    let ghosts_failing = ghosts
+        .iter()
+        .filter(|ghost| ghost.status == JsonCheckStatus::Fail)
+        .count();
+
+    let overall_status = if checks_fail > 0 {
+        JsonCheckStatus::Fail
+    } else if checks_warn > 0 {
+        JsonCheckStatus::Warn
+    } else {
+        JsonCheckStatus::Pass
+    };
+
+    SecuritySummary {
+        overall_status,
+        ghosts_total: ghosts.len(),
+        ghosts_failing,
+        checks_pass,
+        checks_warn,
+        checks_fail,
+    }
+}
+
+fn build_security_attestation_report_at(
+    config: &Config,
+    generated_at: String,
+) -> SecurityAttestationReport {
+    let context = build_security_context(config);
+    let mut ghosts = config
+        .ghosts
+        .iter()
+        .map(|ghost| {
+            let effective_controls = build_effective_controls(ghost, &context);
+            let checks = build_security_checks(&effective_controls);
+            GhostSecurityReport {
+                name: ghost.name.clone(),
+                status: summarize_ghost_security_status(&checks),
+                effective_controls,
+                checks,
+            }
+        })
+        .collect::<Vec<_>>();
+    ghosts.sort_by(|a, b| a.name.cmp(&b.name));
+
+    SecurityAttestationReport {
+        schema_version: SECURITY_ATTESTATION_SCHEMA_VERSION.to_string(),
+        generated_at,
+        summary: build_security_summary(&ghosts),
+        ghosts,
+    }
+}
+
+fn build_security_attestation_report(config: &Config) -> SecurityAttestationReport {
+    build_security_attestation_report_at(
+        config,
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+    )
+}
+
+fn print_security_attestation_report(report: &SecurityAttestationReport) {
+    println!("Athena Security Attestation");
+    println!("Schema: {}", report.schema_version);
+    println!("Generated: {}", report.generated_at);
+    println!(
+        "Overall: {} (ghosts={}, failing_ghosts={}, pass={}, warn={}, fail={})",
+        report.summary.overall_status.label(),
+        report.summary.ghosts_total,
+        report.summary.ghosts_failing,
+        report.summary.checks_pass,
+        report.summary.checks_warn,
+        report.summary.checks_fail
+    );
+    println!();
+
+    for ghost in &report.ghosts {
+        println!("Ghost: {} [{}]", ghost.name, ghost.status.label());
+        println!(
+            "  Effective controls: container_mode={} caps_dropped={} rootfs_readonly={} network_mode={}",
+            ghost.effective_controls.container_mode,
+            ghost.effective_controls.caps_dropped.join(","),
+            ghost.effective_controls.rootfs_readonly,
+            ghost.effective_controls.network_mode
+        );
+        println!(
+            "  Limits: pid_limit={} memory_limit={} cpu_quota={}",
+            ghost.effective_controls.pid_limit,
+            ghost.effective_controls.memory_limit,
+            ghost.effective_controls.cpu_quota
+        );
+        println!(
+            "  Guards: tool_allowlist={} path_validation={} sensitive_patterns={}",
+            ghost.effective_controls.tool_guard,
+            ghost.effective_controls.path_guard,
+            ghost.effective_controls.sensitive_pattern_guard
+        );
+        for check in &ghost.checks {
+            println!(
+                "  [{}] {} | observed={} | expected={}",
+                check.status.label(),
+                check.id,
+                check.observed,
+                check.expected
+            );
+            if check.status != JsonCheckStatus::Pass {
+                if let Some(remediation) = &check.remediation {
+                    println!("      remediation: {}", remediation);
+                }
+            }
+        }
+        println!();
+    }
+}
+
+pub async fn run_security_attestation(config: &Config, json: bool) -> anyhow::Result<CheckStatus> {
+    let report = build_security_attestation_report(config);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_security_attestation_report(&report);
+    }
+    Ok(report.summary.overall_status.as_check_status())
 }
 
 fn summarize_reports(reports: &[FunnelReport]) -> (CheckStatus, usize, usize, Vec<String>) {
@@ -948,12 +1633,14 @@ async fn build_funnel_reports(
     config: &Config,
     snap: &DoctorSnapshot,
     llm: &LlmHealth,
+    skip_llm: bool,
 ) -> Vec<FunnelReport> {
     vec![
         build_funnel1(config, snap, llm),
         build_funnel2(config, snap, llm),
         build_funnel3(config, snap, llm),
         build_funnel4(config, snap, llm).await,
+        build_local_only_funnel(config, skip_llm).await,
     ]
 }
 
@@ -977,8 +1664,151 @@ fn render_funnel_report(
 
 pub async fn run_funnel_health(config: &Config, skip_llm: bool) -> anyhow::Result<CheckStatus> {
     let (snap, llm) = collect_funnel_inputs(config, skip_llm).await?;
-    let reports = build_funnel_reports(config, &snap, &llm).await;
+    let reports = build_funnel_reports(config, &snap, &llm, skip_llm).await;
     let (overall, fail_count, warn_count, fixes) = summarize_reports(&reports);
     render_funnel_report(&snap, &reports, overall, fail_count, warn_count, &fixes);
     Ok(overall)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_attestation_json_schema_v1_shape() {
+        let config = Config::default();
+        let report =
+            build_security_attestation_report_at(&config, "2026-03-03T00:00:00.000Z".to_string());
+        let value = match serde_json::to_value(&report) {
+            Ok(v) => v,
+            Err(e) => panic!("failed to serialize security report: {}", e),
+        };
+        let root = match value.as_object() {
+            Some(v) => v,
+            None => panic!("security report root should be an object"),
+        };
+
+        assert_eq!(
+            root.get("schema_version")
+                .and_then(serde_json::Value::as_str),
+            Some("v1")
+        );
+        assert!(root.contains_key("generated_at"));
+        assert!(root.contains_key("summary"));
+        assert!(root.contains_key("ghosts"));
+
+        let ghosts = match root.get("ghosts").and_then(serde_json::Value::as_array) {
+            Some(v) => v,
+            None => panic!("ghosts should be an array"),
+        };
+        assert!(!ghosts.is_empty());
+
+        for ghost in ghosts {
+            let status = ghost.get("status").and_then(serde_json::Value::as_str);
+            assert!(matches!(status, Some("pass" | "warn" | "fail")));
+            let checks = match ghost.get("checks").and_then(serde_json::Value::as_array) {
+                Some(v) => v,
+                None => panic!("checks should be an array"),
+            };
+            assert!(!checks.is_empty());
+            for check in checks {
+                let check_status = check.get("status").and_then(serde_json::Value::as_str);
+                assert!(matches!(check_status, Some("pass" | "warn" | "fail")));
+                assert!(check.get("id").is_some());
+                assert!(check.get("observed").is_some());
+                assert!(check.get("expected").is_some());
+                assert!(check.get("remediation").is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn security_attestation_fails_without_valid_sensitive_patterns() {
+        let mut config = Config::default();
+        config.manager.sensitive_patterns = vec!["[".to_string()];
+
+        let report =
+            build_security_attestation_report_at(&config, "2026-03-03T00:00:00.000Z".to_string());
+        assert_eq!(report.summary.overall_status, JsonCheckStatus::Fail);
+
+        for ghost in &report.ghosts {
+            let check = match ghost
+                .checks
+                .iter()
+                .find(|check| check.id == "guard.sensitive_patterns")
+            {
+                Some(v) => v,
+                None => panic!("guard.sensitive_patterns check missing for {}", ghost.name),
+            };
+            assert_eq!(check.status, JsonCheckStatus::Fail);
+            assert!(check.remediation.is_some());
+        }
+    }
+
+    #[test]
+    fn security_attestation_uses_effective_limit_overrides() {
+        let mut config = Config::default();
+        config.docker.memory_limit = 123_456_789;
+        config.docker.cpu_quota = 65_000;
+
+        let report =
+            build_security_attestation_report_at(&config, "2026-03-03T00:00:00.000Z".to_string());
+        for ghost in &report.ghosts {
+            assert_eq!(ghost.effective_controls.memory_limit, 123_456_789);
+            assert_eq!(ghost.effective_controls.cpu_quota, 65_000);
+        }
+    }
+
+    #[test]
+    fn local_only_provider_requires_ollama() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::LocalOnly;
+        config.llm.provider = "openai".to_string();
+
+        let check = local_only_provider_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn local_only_ollama_endpoint_must_be_loopback() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::LocalOnly;
+        config.llm.provider = "ollama".to_string();
+        config.ollama.url = "http://example.com:11434".to_string();
+
+        let check = local_only_ollama_endpoint_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn local_only_flags_outbound_integrations() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::LocalOnly;
+        config.langfuse.enabled = true;
+
+        let check = local_only_outbound_integrations_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("langfuse"));
+    }
+
+    #[test]
+    fn local_only_storage_paths_reject_urls() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::LocalOnly;
+        config.db.path = "https://example.com/athena.db".to_string();
+
+        let check = local_only_storage_paths_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn local_only_checks_are_informational_when_profile_not_selected() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::Standard;
+        config.llm.provider = "openai".to_string();
+
+        let check = local_only_provider_check(&config);
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("runtime.profile != local_only"));
+    }
 }

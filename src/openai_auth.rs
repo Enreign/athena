@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
-use crate::config::OuathConfig;
+use crate::config::OpenAiConfig;
 use crate::error::{AthenaError, Result};
 
 const DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -25,39 +25,42 @@ const DEFAULT_CALLBACK_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_ACCOUNT_URL: &str = "https://api.openai.com/auth";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OuathTokens {
+pub struct OpenAiTokens {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: i64,
     pub chatgpt_account_id: Option<String>,
 }
 
-impl OuathTokens {
+impl OpenAiTokens {
     pub fn expired(&self, skew_secs: i64) -> bool {
         let now = chrono::Utc::now().timestamp();
         self.expires_at - skew_secs <= now
     }
 }
 
-pub struct OuathAuth {
-    config: OuathConfig,
+pub struct OpenAiAuth {
+    config: OpenAiConfig,
     client: Client,
     token_path: PathBuf,
-    cached: RwLock<Option<OuathTokens>>,
+    legacy_token_path: Option<PathBuf>,
+    cached: RwLock<Option<OpenAiTokens>>,
 }
 
-impl OuathAuth {
-    pub fn new(config: OuathConfig) -> Self {
+impl OpenAiAuth {
+    pub fn new(config: OpenAiConfig) -> Self {
         let token_path = expand_path(&config.auth_file);
+        let legacy_token_path = legacy_token_path(&token_path);
         Self {
             config,
             client: Client::new(),
             token_path,
+            legacy_token_path,
             cached: RwLock::new(None),
         }
     }
 
-    pub async fn load_tokens(&self) -> Result<Option<OuathTokens>> {
+    pub async fn load_tokens(&self) -> Result<Option<OpenAiTokens>> {
         {
             let read = self.cached.read().await;
             if read.is_some() {
@@ -65,34 +68,50 @@ impl OuathAuth {
             }
         }
 
-        if !self.token_path.exists() {
+        let token_file = if self.token_path.exists() {
+            self.token_path.clone()
+        } else if let Some(legacy) = self.legacy_token_path.as_ref().filter(|p| p.exists()) {
+            legacy.clone()
+        } else {
             return Ok(None);
+        };
+
+        let contents = std::fs::read_to_string(&token_file).map_err(|e| {
+            AthenaError::Config(format!(
+                "Failed to read OpenAI token file {}: {}",
+                token_file.display(),
+                e
+            ))
+        })?;
+        let tokens: OpenAiTokens = serde_json::from_str(&contents).map_err(|e| {
+            AthenaError::Config(format!(
+                "Failed to parse OpenAI token file {}: {}",
+                token_file.display(),
+                e
+            ))
+        })?;
+
+        if token_file != self.token_path {
+            tracing::info!(
+                legacy_path = %token_file.display(),
+                new_path = %self.token_path.display(),
+                "Loaded legacy OpenAI token file; migrating to new path"
+            );
+            if let Err(e) = self.save_tokens(&tokens).await {
+                tracing::warn!(error = %e, "Failed to migrate OpenAI token file");
+            }
         }
 
-        let contents = std::fs::read_to_string(&self.token_path).map_err(|e| {
-            AthenaError::Config(format!(
-                "Failed to read Ouath token file {}: {}",
-                self.token_path.display(),
-                e
-            ))
-        })?;
-        let tokens: OuathTokens = serde_json::from_str(&contents).map_err(|e| {
-            AthenaError::Config(format!(
-                "Failed to parse Ouath token file {}: {}",
-                self.token_path.display(),
-                e
-            ))
-        })?;
         let mut write = self.cached.write().await;
         *write = Some(tokens.clone());
         Ok(Some(tokens))
     }
 
-    pub async fn save_tokens(&self, tokens: &OuathTokens) -> Result<()> {
+    pub async fn save_tokens(&self, tokens: &OpenAiTokens) -> Result<()> {
         if let Some(parent) = self.token_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 AthenaError::Config(format!(
-                    "Failed to create Ouath token dir {}: {}",
+                    "Failed to create OpenAI token dir {}: {}",
                     parent.display(),
                     e
                 ))
@@ -100,11 +119,11 @@ impl OuathAuth {
         }
 
         let body = serde_json::to_string_pretty(tokens).map_err(|e| {
-            AthenaError::Internal(format!("Failed to serialize Ouath tokens: {}", e))
+            AthenaError::Internal(format!("Failed to serialize OpenAI tokens: {}", e))
         })?;
         std::fs::write(&self.token_path, body).map_err(|e| {
             AthenaError::Config(format!(
-                "Failed to write Ouath token file {}: {}",
+                "Failed to write OpenAI token file {}: {}",
                 self.token_path.display(),
                 e
             ))
@@ -116,7 +135,7 @@ impl OuathAuth {
             std::fs::set_permissions(&self.token_path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| {
                     AthenaError::Config(format!(
-                        "Failed to set permissions on Ouath token file {}: {}",
+                        "Failed to set permissions on OpenAI token file {}: {}",
                         self.token_path.display(),
                         e
                     ))
@@ -128,9 +147,9 @@ impl OuathAuth {
         Ok(())
     }
 
-    pub async fn ensure_valid_tokens(&self) -> Result<OuathTokens> {
+    pub async fn ensure_valid_tokens(&self) -> Result<OpenAiTokens> {
         let tokens = self.load_tokens().await?.ok_or_else(|| {
-            AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into())
+            AthenaError::Config("OpenAI not authenticated. Run `athena openai login`.".into())
         })?;
 
         if !tokens.expired(60) {
@@ -144,9 +163,9 @@ impl OuathAuth {
         Ok(refreshed)
     }
 
-    pub async fn force_refresh(&self) -> Result<OuathTokens> {
+    pub async fn force_refresh(&self) -> Result<OpenAiTokens> {
         let tokens = self.load_tokens().await?.ok_or_else(|| {
-            AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into())
+            AthenaError::Config("OpenAI not authenticated. Run `athena openai login`.".into())
         })?;
         let refreshed = self
             .refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref())
@@ -155,7 +174,7 @@ impl OuathAuth {
         Ok(refreshed)
     }
 
-    pub async fn login_interactive(&self) -> Result<OuathTokens> {
+    pub async fn login_interactive(&self) -> Result<OpenAiTokens> {
         let client_id = oauth_client_id();
         let auth_url = oauth_auth_url();
         let token_url = oauth_token_url();
@@ -198,11 +217,22 @@ impl OuathAuth {
         if self.token_path.exists() {
             std::fs::remove_file(&self.token_path).map_err(|e| {
                 AthenaError::Config(format!(
-                    "Failed to remove Ouath token file {}: {}",
+                    "Failed to remove OpenAI token file {}: {}",
                     self.token_path.display(),
                     e
                 ))
             })?;
+        }
+        if let Some(legacy_path) = &self.legacy_token_path {
+            if legacy_path.exists() {
+                std::fs::remove_file(legacy_path).map_err(|e| {
+                    AthenaError::Config(format!(
+                        "Failed to remove legacy OpenAI token file {}: {}",
+                        legacy_path.display(),
+                        e
+                    ))
+                })?;
+            }
         }
         let mut write = self.cached.write().await;
         *write = None;
@@ -213,7 +243,7 @@ impl OuathAuth {
         &self,
         refresh_token: &str,
         old_account_id: Option<&str>,
-    ) -> Result<OuathTokens> {
+    ) -> Result<OpenAiTokens> {
         let client_id = oauth_client_id();
         let token_url = oauth_token_url();
         let params = [
@@ -227,7 +257,7 @@ impl OuathAuth {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(AthenaError::Llm(format!(
-                "Ouath refresh failed ({}): {}",
+                "OpenAI refresh failed ({}): {}",
                 status, body
             )));
         }
@@ -239,7 +269,7 @@ impl OuathAuth {
             .refresh_token
             .unwrap_or_else(|| refresh_token.to_string());
 
-        let tokens = OuathTokens {
+        let tokens = OpenAiTokens {
             access_token,
             refresh_token,
             expires_at,
@@ -252,7 +282,7 @@ impl OuathAuth {
         Ok(resolved)
     }
 
-    async fn resolve_account_id(&self, mut tokens: OuathTokens) -> Result<OuathTokens> {
+    async fn resolve_account_id(&self, mut tokens: OpenAiTokens) -> Result<OpenAiTokens> {
         if tokens.chatgpt_account_id.is_none() {
             tokens.chatgpt_account_id = extract_account_id(&tokens.access_token);
             if tokens.chatgpt_account_id.is_none() {
@@ -310,7 +340,7 @@ fn oauth_scopes() -> String {
     std::env::var("OUATH_SCOPES").unwrap_or_else(|_| DEFAULT_SCOPES.into())
 }
 
-fn oauth_redirect_uri(config: &OuathConfig) -> String {
+fn oauth_redirect_uri(config: &OpenAiConfig) -> String {
     if let Ok(val) = std::env::var("OUATH_REDIRECT_URI") {
         return val;
     }
@@ -327,6 +357,14 @@ fn expand_path(raw: &str) -> PathBuf {
         }
     }
     PathBuf::from(raw)
+}
+
+fn legacy_token_path(primary_token_path: &std::path::Path) -> Option<PathBuf> {
+    let file_name = primary_token_path.file_name()?.to_str()?;
+    if file_name != "openai.json" {
+        return None;
+    }
+    Some(primary_token_path.with_file_name("ouath.json"))
 }
 
 fn pkce_pair() -> (String, String) {
@@ -354,7 +392,7 @@ fn build_authorize_url(
     state: &str,
 ) -> Result<String> {
     let mut url = url::Url::parse(auth_url)
-        .map_err(|e| AthenaError::Config(format!("Invalid Ouath auth URL {}: {}", auth_url, e)))?;
+        .map_err(|e| AthenaError::Config(format!("Invalid OpenAI auth URL {}: {}", auth_url, e)))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -375,7 +413,7 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
     let port = url.port().unwrap_or(1455);
     let listener = TcpListener::bind((host, port)).await.map_err(|e| {
         AthenaError::Config(format!(
-            "Failed to bind Ouath callback listener on {}:{}: {}",
+            "Failed to bind OpenAI callback listener on {}:{}: {}",
             host, port, e
         ))
     })?;
@@ -386,11 +424,11 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
     )
     .await
     .map_err(|_| AthenaError::Timeout(DEFAULT_CALLBACK_TIMEOUT_SECS))?
-    .map_err(|e| AthenaError::Config(format!("Ouath callback listener failed: {}", e)))?;
+    .map_err(|e| AthenaError::Config(format!("OpenAI callback listener failed: {}", e)))?;
 
     let mut buf = [0u8; 4096];
     let n = socket.read(&mut buf).await.map_err(|e| {
-        AthenaError::Config(format!("Failed to read Ouath callback request: {}", e))
+        AthenaError::Config(format!("Failed to read OpenAI callback request: {}", e))
     })?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req
@@ -399,7 +437,7 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
     let parsed = url::Url::parse(&format!("http://localhost{}", path))
-        .map_err(|e| AthenaError::Config(format!("Failed to parse Ouath callback URL: {}", e)))?;
+        .map_err(|e| AthenaError::Config(format!("Failed to parse OpenAI callback URL: {}", e)))?;
     let mut code: Option<String> = None;
     let mut state: Option<String> = None;
     for (k, v) in parsed.query_pairs() {
@@ -411,7 +449,7 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
     }
 
     let Some(code) = code else {
-        let body = "<html><body><h3>Ouath login failed.</h3><p>Missing authorization code.</p></body></html>";
+        let body = "<html><body><h3>OpenAI login failed.</h3><p>Missing authorization code.</p></body></html>";
         let response = format!(
             "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
@@ -419,22 +457,22 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
         );
         let _ = socket.write_all(response.as_bytes()).await;
         return Err(AthenaError::Config(
-            "Ouath callback missing authorization code".into(),
+            "OpenAI callback missing authorization code".into(),
         ));
     };
     if state.as_deref() != Some(expected_state) {
-        let body = "<html><body><h3>Ouath login failed.</h3><p>State mismatch (possible CSRF).</p></body></html>";
+        let body = "<html><body><h3>OpenAI login failed.</h3><p>State mismatch (possible CSRF).</p></body></html>";
         let response = format!(
             "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
-        return Err(AthenaError::Config("Ouath callback state mismatch".into()));
+        return Err(AthenaError::Config("OpenAI callback state mismatch".into()));
     }
 
     let body =
-        "<html><body><h3>Ouath login complete.</h3><p>You can close this window.</p></body></html>";
+        "<html><body><h3>OpenAI login complete.</h3><p>You can close this window.</p></body></html>";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
@@ -452,7 +490,7 @@ async fn exchange_code_for_tokens(
     redirect_uri: &str,
     code: &str,
     code_verifier: &str,
-) -> Result<OuathTokens> {
+) -> Result<OpenAiTokens> {
     let params = [
         ("grant_type", "authorization_code"),
         ("client_id", client_id),
@@ -466,7 +504,7 @@ async fn exchange_code_for_tokens(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(AthenaError::Llm(format!(
-            "Ouath token exchange failed ({}): {}",
+            "OpenAI token exchange failed ({}): {}",
             status, body
         )));
     }
@@ -474,10 +512,10 @@ async fn exchange_code_for_tokens(
     let body: TokenResponse = resp.json().await?;
     let expires_at = chrono::Utc::now().timestamp() + body.expires_in;
 
-    Ok(OuathTokens {
+    Ok(OpenAiTokens {
         access_token: body.access_token,
         refresh_token: body.refresh_token.ok_or_else(|| {
-            AthenaError::Config("Ouath token response missing refresh_token".into())
+            AthenaError::Config("OpenAI token response missing refresh_token".into())
         })?,
         expires_at,
         chatgpt_account_id: None,

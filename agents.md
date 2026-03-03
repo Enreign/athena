@@ -32,14 +32,14 @@ Each provider has **two independent model slots**:
 **Always set `classifier_model`** to a lighter model. If omitted, the main model handles routing on every request — slow and expensive.
 
 Auth requirements differ per provider:
-- **`ouath`** — reads `~/.athena/ouath.json` (not an env var). Default URL: `https://chatgpt.com/backend-api/codex`.
+- **`openai`** — reads `~/.athena/openai.json` (not an env var). Default URL: `https://chatgpt.com/backend-api/codex`. Legacy `~/.athena/ouath.json` is auto-detected and migrated. (`ouath` alias is still accepted for backward compatibility.)
 - **`openrouter`** — `OPENROUTER_API_KEY` env var.
 - **`zen`** — `OPENCODE_API_KEY` env var.
 - **`ollama`** — no auth; the Ollama daemon must be running at the configured URL (default `http://localhost:11434`).
 
 Provider fallback order when the primary is unavailable:
 ```
-configured provider → ouath → ollama → openrouter → zen
+configured provider → openai → ollama → openrouter → zen
 ```
 
 Observability via Langfuse is fully opt-in. Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` to enable tracing. No errors are emitted if these are absent — tracing is simply skipped.

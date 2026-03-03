@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::config::{OllamaConfig, OuathConfig};
+use crate::config::{OllamaConfig, OpenAiConfig};
 use crate::error::{AthenaError, Result};
-use crate::ouath::{OuathAuth, OuathTokens};
+use crate::openai_auth::{OpenAiAuth, OpenAiTokens};
 
 // ---------------------------------------------------------------------------
 // Token usage tracking
@@ -215,6 +215,15 @@ struct ApiToolDefinition {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct ResponsesApiToolDefinition {
+    #[serde(rename = "type")]
+    def_type: String,
+    name: String,
+    description: String,
+    parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ApiFunctionDefinition {
     name: String,
     description: String,
@@ -235,6 +244,23 @@ fn tool_schemas_to_api(tools: &[ToolSchema]) -> Option<Vec<ApiToolDefinition>> {
                     description: t.description.clone(),
                     parameters: t.parameters.clone(),
                 },
+            })
+            .collect(),
+    )
+}
+
+fn tool_schemas_to_responses_api(tools: &[ToolSchema]) -> Option<Vec<ResponsesApiToolDefinition>> {
+    if tools.is_empty() {
+        return None;
+    }
+    Some(
+        tools
+            .iter()
+            .map(|t| ResponsesApiToolDefinition {
+                def_type: "function".to_string(),
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
             })
             .collect(),
     )
@@ -329,25 +355,25 @@ pub trait LlmProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Ouath (OpenAI subscription OAuth) client
+// OpenAi (OpenAI subscription OAuth) client
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OuathApiStyle {
+enum OpenAiApiStyle {
     Responses,
     ChatCompletions,
 }
 
-pub struct OuathClient {
+pub struct OpenAiClient {
     client: Client,
-    config: OuathConfig,
-    auth: OuathAuth,
+    config: OpenAiConfig,
+    auth: OpenAiAuth,
     model_override: std::sync::RwLock<Option<String>>,
 }
 
-impl OuathClient {
-    pub fn new(config: OuathConfig) -> Self {
-        let auth = OuathAuth::new(config.clone());
+impl OpenAiClient {
+    pub fn new(config: OpenAiConfig) -> Self {
+        let auth = OpenAiAuth::new(config.clone());
         Self {
             client: Client::new(),
             config,
@@ -364,33 +390,33 @@ impl OuathClient {
             .unwrap_or_else(|| self.config.model.clone())
     }
 
-    fn api_style(&self) -> OuathApiStyle {
+    fn api_style(&self) -> OpenAiApiStyle {
         if let Some(style) = self.config.api_style.as_deref() {
             return match style {
-                "chat_completions" | "chat" => OuathApiStyle::ChatCompletions,
-                _ => OuathApiStyle::Responses,
+                "chat_completions" | "chat" => OpenAiApiStyle::ChatCompletions,
+                _ => OpenAiApiStyle::Responses,
             };
         }
         let url = self.config.url.as_str();
         if url.contains("/responses") {
-            OuathApiStyle::Responses
+            OpenAiApiStyle::Responses
         } else if url.contains("/chat/completions") || url.contains("api.openai.com") {
-            OuathApiStyle::ChatCompletions
+            OpenAiApiStyle::ChatCompletions
         } else {
-            OuathApiStyle::Responses
+            OpenAiApiStyle::Responses
         }
     }
 
-    fn endpoint(&self, style: OuathApiStyle) -> String {
+    fn endpoint(&self, style: OpenAiApiStyle) -> String {
         match style {
-            OuathApiStyle::ChatCompletions => {
+            OpenAiApiStyle::ChatCompletions => {
                 if self.config.url.contains("/chat/completions") {
                     self.config.url.clone()
                 } else {
                     format!("{}/chat/completions", self.config.url.trim_end_matches('/'))
                 }
             }
-            OuathApiStyle::Responses => {
+            OpenAiApiStyle::Responses => {
                 if self.config.url.contains("/responses") {
                     self.config.url.clone()
                 } else {
@@ -407,13 +433,13 @@ impl OuathClient {
 
     async fn send_with_auth_retry<T: Serialize + ?Sized>(
         &self,
-        style: OuathApiStyle,
+        style: OpenAiApiStyle,
         body: &T,
         extra_header: Option<(&str, &str)>,
     ) -> Result<(reqwest::Response, Instant)> {
         let mut tokens = self.auth.ensure_valid_tokens().await?;
         let mut start = Instant::now();
-        let mut resp = send_ouath_request(
+        let mut resp = send_openai_request(
             &self.client,
             &self.endpoint(style),
             body,
@@ -425,7 +451,7 @@ impl OuathClient {
         if matches!(resp.status().as_u16(), 401 | 403) {
             tokens = self.auth.force_refresh().await?;
             start = Instant::now();
-            resp = send_ouath_request(
+            resp = send_openai_request(
                 &self.client,
                 &self.endpoint(style),
                 body,
@@ -446,7 +472,7 @@ impl OuathClient {
         let has_tools = !tools.is_empty();
         let model = self.effective_model();
         tracing::info!(
-            provider = "OpenAI (Ouath)",
+            provider = "OpenAI",
             model = %model,
             messages = messages.len(),
             has_tools,
@@ -471,7 +497,7 @@ impl OuathClient {
         };
 
         let (resp, start) = self
-            .send_with_auth_retry(OuathApiStyle::ChatCompletions, &req, None)
+            .send_with_auth_retry(OpenAiApiStyle::ChatCompletions, &req, None)
             .await?;
         let latency = start.elapsed();
         crate::introspect::record_llm_latency(latency.as_millis() as u64);
@@ -479,10 +505,10 @@ impl OuathClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::error!(provider = "OpenAI (Ouath)", %status, "LLM error");
+            tracing::error!(provider = "OpenAI", %status, "LLM error");
             crate::introspect::record_error();
             return Err(AthenaError::Llm(format!(
-                "Ouath returned {}: {}",
+                "OpenAI returned {}: {}",
                 status, body
             )));
         }
@@ -495,7 +521,7 @@ impl OuathClient {
         });
 
         let Some(choice) = chat_resp.choices.into_iter().next() else {
-            return Err(AthenaError::Llm("Ouath returned empty choices".into()));
+            return Err(AthenaError::Llm("OpenAI returned empty choices".into()));
         };
 
         if let Some(tool_calls) = choice.message.tool_calls {
@@ -540,7 +566,7 @@ impl OuathClient {
         let has_tools = !tools.is_empty();
         let model = self.effective_model();
         tracing::info!(
-            provider = "OpenAI (Ouath)",
+            provider = "OpenAI",
             model = %model,
             messages = messages.len(),
             has_tools,
@@ -548,7 +574,7 @@ impl OuathClient {
         );
 
         let (instructions, input) = build_responses_input(messages);
-        let api_tools = tool_schemas_to_api(tools);
+        let api_tools = tool_schemas_to_responses_api(tools);
 
         let mut req = serde_json::json!({
             "model": model,
@@ -592,7 +618,7 @@ impl OuathClient {
 
         let (resp, start) = self
             .send_with_auth_retry(
-                OuathApiStyle::Responses,
+                OpenAiApiStyle::Responses,
                 &req,
                 Some(("OpenAI-Beta", "responses=experimental")),
             )
@@ -603,10 +629,10 @@ impl OuathClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::error!(provider = "OpenAI (Ouath)", %status, "LLM error");
+            tracing::error!(provider = "OpenAI", %status, "LLM error");
             crate::introspect::record_error();
             return Err(AthenaError::Llm(format!(
-                "Ouath returned {}: {}",
+                "OpenAI returned {}: {}",
                 status, body
             )));
         }
@@ -618,7 +644,7 @@ impl OuathClient {
 }
 
 #[async_trait]
-impl LlmProvider for OuathClient {
+impl LlmProvider for OpenAiClient {
     async fn chat(&self, messages: &[Message]) -> Result<String> {
         let converted: Vec<ChatMessage> = messages
             .iter()
@@ -645,7 +671,7 @@ impl LlmProvider for OuathClient {
     }
 
     fn provider_name(&self) -> &str {
-        "OpenAI (Ouath)"
+        "OpenAI"
     }
 
     fn supports_tools(&self) -> bool {
@@ -662,10 +688,10 @@ impl LlmProvider for OuathClient {
         tools: &[ToolSchema],
     ) -> Result<(ChatResponse, Option<TokenUsage>)> {
         match self.api_style() {
-            OuathApiStyle::ChatCompletions => {
+            OpenAiApiStyle::ChatCompletions => {
                 self.chat_with_tools_chat_completions(messages, tools).await
             }
-            OuathApiStyle::Responses => self.chat_with_tools_responses(messages, tools).await,
+            OpenAiApiStyle::Responses => self.chat_with_tools_responses(messages, tools).await,
         }
     }
 
@@ -719,11 +745,11 @@ impl LlmProvider for OuathClient {
         tools: &[ToolSchema],
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         match self.api_style() {
-            OuathApiStyle::ChatCompletions => {
+            OpenAiApiStyle::ChatCompletions => {
                 self.chat_with_tools_stream_chat_completions(messages, tools)
                     .await
             }
-            OuathApiStyle::Responses => {
+            OpenAiApiStyle::Responses => {
                 self.chat_with_tools_stream_responses(messages, tools).await
             }
         }
@@ -754,8 +780,8 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value
                 if let Some(calls) = tool_calls {
                     for tc in calls {
                         input.push(serde_json::json!({
-                            "type": "tool_call",
-                            "id": tc.id,
+                            "type": "function_call",
+                            "call_id": tc.id,
                             "name": tc.name,
                             "arguments": tc.arguments.to_string(),
                         }));
@@ -767,8 +793,8 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value
                 content,
             } => {
                 input.push(serde_json::json!({
-                    "type": "tool_output",
-                    "tool_call_id": tool_call_id,
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
                     "output": content,
                 }));
             }
@@ -783,7 +809,7 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value
     (instructions, input)
 }
 
-impl OuathClient {
+impl OpenAiClient {
     async fn chat_with_tools_stream_chat_completions(
         &self,
         messages: &[ChatMessage],
@@ -792,7 +818,7 @@ impl OuathClient {
         let has_tools = !tools.is_empty();
         let model = self.effective_model();
         tracing::info!(
-            provider = "OpenAI (Ouath)",
+            provider = "OpenAI",
             model = %model,
             messages = messages.len(),
             has_tools,
@@ -820,15 +846,15 @@ impl OuathClient {
         };
 
         let (resp, _start) = self
-            .send_with_auth_retry(OuathApiStyle::ChatCompletions, &req, None)
+            .send_with_auth_retry(OpenAiApiStyle::ChatCompletions, &req, None)
             .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::error!(provider = "OpenAI (Ouath)", %status, "LLM stream error");
+            tracing::error!(provider = "OpenAI", %status, "LLM stream error");
             return Err(AthenaError::Llm(format!(
-                "Ouath returned {}: {}",
+                "OpenAI returned {}: {}",
                 status, body
             )));
         }
@@ -847,7 +873,7 @@ impl OuathClient {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::warn!(provider = "OpenAI (Ouath)", error = %e, "Stream read error");
+                        tracing::warn!(provider = "OpenAI", error = %e, "Stream read error");
                         crate::introspect::record_error();
                         crate::introspect::record_llm_latency(
                             stream_start.elapsed().as_millis() as u64
@@ -980,7 +1006,7 @@ impl OuathClient {
         let has_tools = !tools.is_empty();
         let model = self.effective_model();
         tracing::info!(
-            provider = "OpenAI (Ouath)",
+            provider = "OpenAI",
             model = %model,
             messages = messages.len(),
             has_tools,
@@ -989,7 +1015,7 @@ impl OuathClient {
         );
 
         let (instructions, input) = build_responses_input(messages);
-        let api_tools = tool_schemas_to_api(tools);
+        let api_tools = tool_schemas_to_responses_api(tools);
 
         let mut req = serde_json::json!({
             "model": model,
@@ -1034,7 +1060,7 @@ impl OuathClient {
 
         let (resp, _start) = self
             .send_with_auth_retry(
-                OuathApiStyle::Responses,
+                OpenAiApiStyle::Responses,
                 &req,
                 Some(("OpenAI-Beta", "responses=experimental")),
             )
@@ -1043,9 +1069,9 @@ impl OuathClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::error!(provider = "OpenAI (Ouath)", %status, "LLM stream error");
+            tracing::error!(provider = "OpenAI", %status, "LLM stream error");
             return Err(AthenaError::Llm(format!(
-                "Ouath returned {}: {}",
+                "OpenAI returned {}: {}",
                 status, body
             )));
         }
@@ -1058,7 +1084,7 @@ impl OuathClient {
 
             let mut byte_stream = resp.bytes_stream();
             let mut buffer = String::new();
-            let mut partial_calls: HashMap<String, OuathPartialToolCall> = HashMap::new();
+            let mut partial_calls: HashMap<String, OpenAiPartialToolCall> = HashMap::new();
             let mut emitted_calls: HashSet<String> = HashSet::new();
             let mut final_response: Option<Value> = None;
             let mut text_emitted = false;
@@ -1068,7 +1094,7 @@ impl OuathClient {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::warn!(provider = "OpenAI (Ouath)", error = %e, "Stream read error");
+                        tracing::warn!(provider = "OpenAI", error = %e, "Stream read error");
                         crate::introspect::record_error();
                         crate::introspect::record_llm_latency(
                             stream_start.elapsed().as_millis() as u64
@@ -1169,13 +1195,13 @@ impl OuathClient {
     }
 }
 
-struct OuathPartialToolCall {
+struct OpenAiPartialToolCall {
     id: String,
     name: String,
     arguments: String,
 }
 
-impl OuathPartialToolCall {
+impl OpenAiPartialToolCall {
     fn new(id: String) -> Self {
         Self {
             id,
@@ -1185,11 +1211,11 @@ impl OuathPartialToolCall {
     }
 }
 
-async fn send_ouath_request<T: Serialize + ?Sized>(
+async fn send_openai_request<T: Serialize + ?Sized>(
     client: &Client,
     endpoint: &str,
     body: &T,
-    tokens: &OuathTokens,
+    tokens: &OpenAiTokens,
     require_account_id: bool,
     extra_header: Option<(&str, &str)>,
 ) -> Result<reqwest::Response> {
@@ -1205,7 +1231,7 @@ async fn send_ouath_request<T: Serialize + ?Sized>(
         builder = builder.header("chatgpt-account-id", account_id);
     } else if require_account_id {
         return Err(AthenaError::Config(
-            "Ouath tokens missing chatgpt_account_id. Re-authenticate.".into(),
+            "OpenAI tokens missing chatgpt_account_id. Re-authenticate.".into(),
         ));
     }
 
@@ -1241,15 +1267,15 @@ async fn collect_stream_response(
     Ok((ChatResponse::Text(text), usage))
 }
 
-fn apply_tool_item(partials: &mut HashMap<String, OuathPartialToolCall>, item: &Value) {
+fn apply_tool_item(partials: &mut HashMap<String, OpenAiPartialToolCall>, item: &Value) {
     if !is_tool_call_item(item) {
         return;
     }
     let id = extract_tool_call_id(item)
-        .unwrap_or_else(|| format!("ouath-call-{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|| format!("openai-call-{}", uuid::Uuid::new_v4()));
     let entry = partials
         .entry(id.clone())
-        .or_insert_with(|| OuathPartialToolCall::new(id));
+        .or_insert_with(|| OpenAiPartialToolCall::new(id));
     if entry.name.is_empty() {
         if let Some(name) = extract_tool_call_name(item) {
             entry.name = name;
@@ -1261,16 +1287,16 @@ fn apply_tool_item(partials: &mut HashMap<String, OuathPartialToolCall>, item: &
 }
 
 fn apply_tool_delta(
-    partials: &mut HashMap<String, OuathPartialToolCall>,
+    partials: &mut HashMap<String, OpenAiPartialToolCall>,
     item_id: Option<String>,
     delta: &Value,
 ) {
     let id = item_id
         .or_else(|| extract_tool_call_id(delta))
-        .unwrap_or_else(|| format!("ouath-call-{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|| format!("openai-call-{}", uuid::Uuid::new_v4()));
     let entry = partials
         .entry(id.clone())
-        .or_insert_with(|| OuathPartialToolCall::new(id));
+        .or_insert_with(|| OpenAiPartialToolCall::new(id));
     if entry.name.is_empty() {
         if let Some(name) = extract_tool_call_name(delta) {
             entry.name = name;
@@ -1283,7 +1309,7 @@ fn apply_tool_delta(
 
 async fn emit_responses_final(
     tx: &mpsc::Sender<StreamEvent>,
-    partials: &mut HashMap<String, OuathPartialToolCall>,
+    partials: &mut HashMap<String, OpenAiPartialToolCall>,
     emitted: &mut HashSet<String>,
     final_response: &mut Option<Value>,
     text_emitted: &mut bool,
@@ -1450,7 +1476,7 @@ fn parse_tool_call(item: &Value) -> Option<ToolCall> {
         .or_else(|| item.get("item_id"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("ouath-call-{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|| format!("openai-call-{}", uuid::Uuid::new_v4()));
 
     let name = item
         .get("name")
@@ -2555,6 +2581,39 @@ mod tests {
         assert_eq!(simple.content, "result");
     }
 
+    #[test]
+    fn test_build_responses_input_uses_function_call_items() {
+        let messages = vec![ChatMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "pwd"}),
+            }]),
+        }];
+
+        let (_instructions, input) = build_responses_input(&messages);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["name"], "shell");
+        assert_eq!(input[0]["arguments"], "{\"command\":\"pwd\"}");
+    }
+
+    #[test]
+    fn test_build_responses_input_uses_function_call_output_items() {
+        let messages = vec![ChatMessage::Tool {
+            tool_call_id: "call_2".into(),
+            content: "ok".into(),
+        }];
+
+        let (_instructions, input) = build_responses_input(&messages);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_2");
+        assert_eq!(input[0]["output"], "ok");
+    }
+
     // ── OpenAiChatResponseFull deserialization ────────────────────────
 
     #[test]
@@ -2618,6 +2677,38 @@ mod tests {
         let json = serde_json::to_value(&schema).unwrap();
         assert_eq!(json["name"], "shell");
         assert_eq!(json["parameters"]["required"][0], "command");
+    }
+
+    #[test]
+    fn test_tool_schema_chat_completions_wire_shape() {
+        let tools = vec![ToolSchema {
+            name: "shell".into(),
+            description: "Run shell command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}}
+            }),
+        }];
+        let json = serde_json::to_value(tool_schemas_to_api(&tools).unwrap()).unwrap();
+        assert_eq!(json[0]["type"], "function");
+        assert_eq!(json[0]["function"]["name"], "shell");
+        assert!(json[0].get("name").is_none());
+    }
+
+    #[test]
+    fn test_tool_schema_responses_wire_shape() {
+        let tools = vec![ToolSchema {
+            name: "shell".into(),
+            description: "Run shell command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}}
+            }),
+        }];
+        let json = serde_json::to_value(tool_schemas_to_responses_api(&tools).unwrap()).unwrap();
+        assert_eq!(json[0]["type"], "function");
+        assert_eq!(json[0]["name"], "shell");
+        assert!(json[0].get("function").is_none());
     }
 
     // ── TokenBudget ────────────────────────────────────────────────────
