@@ -566,6 +566,8 @@ pub struct TicketIntakeConfig {
     pub sources: Vec<TicketIntakeSourceConfig>,
     #[serde(default)]
     pub webhook: TicketIntakeWebhookConfig,
+    #[serde(default)]
+    pub ci_autopilot: TicketIntakeCiAutopilotConfig,
 }
 
 impl Default for TicketIntakeConfig {
@@ -576,6 +578,7 @@ impl Default for TicketIntakeConfig {
             mock_dispatch: false,
             sources: Vec::new(),
             webhook: TicketIntakeWebhookConfig::default(),
+            ci_autopilot: TicketIntakeCiAutopilotConfig::default(),
         }
     }
 }
@@ -584,12 +587,60 @@ fn default_ticket_intake_interval() -> u64 {
     300
 }
 
+fn default_ticket_ci_autopilot_enabled() -> bool {
+    true
+}
+fn default_ticket_ci_auto_merge() -> bool {
+    true
+}
+fn default_ticket_ci_heal() -> bool {
+    true
+}
+fn default_ticket_ci_max_heal_attempts() -> u8 {
+    2
+}
+fn default_ticket_ci_poll_interval_secs() -> u64 {
+    45
+}
+fn default_ticket_ci_timeout_secs() -> u64 {
+    1200
+}
+
 fn default_ticket_intake_label() -> Option<String> {
     Some("athena".to_string())
 }
 
 fn default_ticket_intake_webhook_bind() -> String {
     "127.0.0.1:8765".to_string()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeCiAutopilotConfig {
+    #[serde(default = "default_ticket_ci_autopilot_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_ticket_ci_auto_merge")]
+    pub auto_merge: bool,
+    #[serde(default = "default_ticket_ci_heal")]
+    pub heal: bool,
+    #[serde(default = "default_ticket_ci_max_heal_attempts")]
+    pub max_heal_attempts: u8,
+    #[serde(default = "default_ticket_ci_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_ticket_ci_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for TicketIntakeCiAutopilotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_ticket_ci_autopilot_enabled(),
+            auto_merge: default_ticket_ci_auto_merge(),
+            heal: default_ticket_ci_heal(),
+            max_heal_attempts: default_ticket_ci_max_heal_attempts(),
+            poll_interval_secs: default_ticket_ci_poll_interval_secs(),
+            timeout_secs: default_ticket_ci_timeout_secs(),
+        }
+    }
 }
 
 // Fields are read by the webhook feature (ticket_intake/webhook.rs)

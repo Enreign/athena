@@ -126,6 +126,15 @@ poll_interval_secs = 300
 # When true, ticket intake tasks are auto-completed without executing a ghost (useful for CI).
 mock_dispatch = false
 
+[ticket_intake.ci_autopilot]
+# End-to-end bridge: dispatch -> PR -> CI poll -> self-heal -> auto-merge -> post-merge checks -> revert PR on failure
+enabled = true
+auto_merge = true
+heal = true
+max_heal_attempts = 2
+poll_interval_secs = 45
+timeout_secs = 1200
+
 # [[ticket_intake.sources]]
 # provider = "github"
 # repo = "myorg/myrepo"

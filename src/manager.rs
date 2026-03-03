@@ -61,6 +61,15 @@ struct KpiPromptCache {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct RoutingPromptContext {
+    scope: KpiPromptScope,
+    kpi_context: String,
+    lesson_context: String,
+    kpi_available: bool,
+    lesson_count: usize,
+}
+
 fn compact_context_line(input: &str, max_chars: usize) -> String {
     let first_line = input.lines().next().unwrap_or("").trim();
     if first_line.chars().count() <= max_chars {
@@ -295,6 +304,9 @@ impl Manager {
         let metrics_section = self.build_metrics_section();
         let mood_section = self.build_mood_section();
         let relationship_section = self.build_relationship_section(&session.user_id);
+        let routing_context = self
+            .build_routing_prompt_context(user_input, &recent_messages)
+            .await;
 
         // Classify the request (pass conversation history for context)
         let classify_gen = lf_trace.as_ref().map(|t| {
@@ -314,8 +326,11 @@ impl Manager {
                 &recent_messages,
                 conversation_summary.as_deref(),
                 &metrics_section,
+                &routing_context,
             )
             .await?;
+        let route_id = uuid::Uuid::new_v4().to_string();
+        self.record_route_decision(&route_id, user_input, &classification, &routing_context);
         if let Some(g) = classify_gen {
             let label = match &classification {
                 Classification::Simple(_) => "simple",
@@ -325,10 +340,12 @@ impl Manager {
             g.end(Some(label), 0, 0);
         }
 
-        let answer = match classification {
-            Classification::Simple(answer) => answer,
+        let route_started = Instant::now();
+        let classification_for_outcome = classification.clone();
+        let answer_result: Result<String> = match classification {
+            Classification::Simple(answer) => Ok(answer),
             Classification::Direct { steps } => {
-                self.execute_direct(steps, confirmer, status_tx).await?
+                self.execute_direct(steps, confirmer, status_tx).await
             }
             Classification::Complex {
                 ghost_name,
@@ -393,7 +410,30 @@ impl Manager {
                 // Optionally save a lesson
                 self.maybe_save_lesson(user_input, &result).await;
 
-                result
+                Ok(result)
+            }
+        };
+        let elapsed_ms = route_started.elapsed().as_millis();
+        let answer = match answer_result {
+            Ok(answer) => {
+                self.record_route_outcome(
+                    &route_id,
+                    &classification_for_outcome,
+                    true,
+                    None,
+                    elapsed_ms,
+                );
+                answer
+            }
+            Err(e) => {
+                self.record_route_outcome(
+                    &route_id,
+                    &classification_for_outcome,
+                    false,
+                    Some(&e.to_string()),
+                    elapsed_ms,
+                );
+                return Err(e);
             }
         };
 
@@ -548,7 +588,8 @@ impl Manager {
         relationship_section,
         recent_turns,
         conversation_summary,
-        metrics_section
+        metrics_section,
+        routing_context
     ))]
     async fn classify(
         &self,
@@ -560,9 +601,8 @@ impl Manager {
         recent_turns: &[(String, String)],
         conversation_summary: Option<&str>,
         metrics_section: &str,
+        routing_context: &RoutingPromptContext,
     ) -> Result<Classification> {
-        let kpi_context = self.build_kpi_context(user_input, recent_turns).await;
-        let lesson_context = self.build_lesson_context();
         let system = self
             .build_classifier_system_prompt(
                 memory_context,
@@ -571,8 +611,8 @@ impl Manager {
                 relationship_section,
                 metrics_section,
                 conversation_summary,
-                &kpi_context,
-                &lesson_context,
+                &routing_context.kpi_context,
+                &routing_context.lesson_context,
             )
             .await;
 
@@ -1137,12 +1177,36 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         adjusted
     }
 
-    async fn build_kpi_context(
+    async fn build_routing_prompt_context(
         &self,
         user_input: &str,
         recent_turns: &[(String, String)],
-    ) -> String {
+    ) -> RoutingPromptContext {
         let scope = infer_kpi_prompt_scope(user_input, recent_turns);
+        let kpi_raw = self.build_kpi_context_for_scope(&scope).await;
+        let kpi_available = !kpi_raw.trim().is_empty();
+        let kpi_context = if kpi_available {
+            kpi_raw
+        } else {
+            format_kpi_fallback_context(&scope)
+        };
+        let lesson_raw = self.build_lesson_context();
+        let lesson_count = count_section_bullets(&lesson_raw);
+        let lesson_context = if lesson_count > 0 {
+            lesson_raw
+        } else {
+            format_lesson_fallback_context()
+        };
+        RoutingPromptContext {
+            scope,
+            kpi_context,
+            lesson_context,
+            kpi_available,
+            lesson_count,
+        }
+    }
+
+    async fn build_kpi_context_for_scope(&self, scope: &KpiPromptScope) -> String {
         let cache_key = format!(
             "repo={} lane={} risk={}",
             scope.repo,
@@ -1172,6 +1236,77 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             expires_at: Instant::now() + KPI_CONTEXT_CACHE_TTL,
         });
         value
+    }
+
+    fn record_route_decision(
+        &self,
+        route_id: &str,
+        user_input: &str,
+        classification: &Classification,
+        routing_context: &RoutingPromptContext,
+    ) {
+        let (route_type, ghost) = classification_route_target(classification);
+        let entry = format!(
+            "route_id={} route_type={} ghost={} repo={} lane={} risk={} kpi_available={} lessons={} input=\"{}\"",
+            route_id,
+            route_type,
+            ghost.unwrap_or("-"),
+            routing_context.scope.repo,
+            routing_context.scope.lane.as_deref().unwrap_or("all-lanes"),
+            routing_context
+                .scope
+                .risk_tier
+                .as_deref()
+                .unwrap_or("all-risks"),
+            routing_context.kpi_available,
+            routing_context.lesson_count,
+            truncate_utf8(user_input, 180).replace('\n', " ")
+        );
+        let _ = self.memory.store("route_decision", &entry, None);
+        tracing::info!(
+            route_id,
+            route_type,
+            ghost = ghost.unwrap_or("-"),
+            repo = %routing_context.scope.repo,
+            lane = %routing_context.scope.lane.as_deref().unwrap_or("all-lanes"),
+            risk = %routing_context.scope.risk_tier.as_deref().unwrap_or("all-risks"),
+            kpi_available = routing_context.kpi_available,
+            lesson_count = routing_context.lesson_count,
+            "Classifier route decision recorded"
+        );
+    }
+
+    fn record_route_outcome(
+        &self,
+        route_id: &str,
+        classification: &Classification,
+        ok: bool,
+        error: Option<&str>,
+        elapsed_ms: u128,
+    ) {
+        let (route_type, ghost) = classification_route_target(classification);
+        let status = if ok { "succeeded" } else { "failed" };
+        let entry = if let Some(err) = error {
+            format!(
+                "route_id={} route_type={} ghost={} status={} elapsed_ms={} error=\"{}\"",
+                route_id,
+                route_type,
+                ghost.unwrap_or("-"),
+                status,
+                elapsed_ms,
+                truncate_utf8(err, 220).replace('\n', " ")
+            )
+        } else {
+            format!(
+                "route_id={} route_type={} ghost={} status={} elapsed_ms={}",
+                route_id,
+                route_type,
+                ghost.unwrap_or("-"),
+                status,
+                elapsed_ms
+            )
+        };
+        let _ = self.memory.store("route_outcome", &entry, None);
     }
 
     async fn resolve_cli_tool_routing_order(
@@ -1577,6 +1712,16 @@ fn format_kpi_context(
     )
 }
 
+fn format_kpi_fallback_context(scope: &KpiPromptScope) -> String {
+    format!(
+        "\n\nRecent stats for {repo}/{lane}/{risk}: unavailable (insufficient history). \
+Use conservative routing defaults and explicit verification.",
+        repo = scope.repo,
+        lane = scope.lane.as_deref().unwrap_or("all-lanes"),
+        risk = scope.risk_tier.as_deref().unwrap_or("all-risks"),
+    )
+}
+
 fn format_ghost_success_context(rows: &[kpi::GhostSuccessRate]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -1684,6 +1829,27 @@ fn format_lesson_context(memories: &[crate::memory::Memory]) -> String {
     }
 }
 
+fn format_lesson_fallback_context() -> String {
+    "\n\nRecent lessons:\n- none recent; prefer conservative execution and explicit checks."
+        .to_string()
+}
+
+fn count_section_bullets(section: &str) -> usize {
+    section
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("- "))
+        .count()
+}
+
+fn classification_route_target(classification: &Classification) -> (&'static str, Option<&str>) {
+    match classification {
+        Classification::Simple(_) => ("simple", None),
+        Classification::Direct { .. } => ("direct", None),
+        Classification::Complex { ghost_name, .. } => ("complex", Some(ghost_name.as_str())),
+    }
+}
+
 /// Truncate a string to at most `max_bytes` without splitting a UTF-8 character.
 fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -1696,6 +1862,7 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+#[derive(Clone)]
 enum Classification {
     Simple(String),
     Direct {
@@ -1711,8 +1878,10 @@ enum Classification {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_token_budget_strategy, estimate_token_budget, format_ghost_success_context,
-        format_kpi_context, format_lesson_context, infer_kpi_prompt_scope, Classification, Manager,
+        apply_token_budget_strategy, classification_route_target, count_section_bullets,
+        estimate_token_budget, format_ghost_success_context, format_kpi_context,
+        format_kpi_fallback_context, format_lesson_context, format_lesson_fallback_context,
+        infer_kpi_prompt_scope, Classification, KpiPromptScope, Manager,
     };
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
     use crate::kpi::GhostSuccessRate;
@@ -1878,6 +2047,18 @@ mod tests {
     }
 
     #[test]
+    fn format_kpi_fallback_context_contains_scope_and_guidance() {
+        let scope = KpiPromptScope {
+            lane: Some("delivery".to_string()),
+            repo: "athena".to_string(),
+            risk_tier: Some("high".to_string()),
+        };
+        let section = format_kpi_fallback_context(&scope);
+        assert!(section.contains("athena/delivery/high"));
+        assert!(section.contains("conservative routing defaults"));
+    }
+
+    #[test]
     fn infer_kpi_prompt_scope_extracts_lane_repo_risk() {
         let recent = vec![("user".to_string(), "please use lane delivery".to_string())];
         let scope = infer_kpi_prompt_scope("for repo: athena risk: high", &recent);
@@ -1978,5 +2159,24 @@ mod tests {
         assert!(section.starts_with("\n\nRecent lessons:\n"));
         assert_eq!(section.matches("\n- ").count(), 5);
         assert!(!section.contains("not a lesson"));
+    }
+
+    #[test]
+    fn format_lesson_fallback_context_and_bullet_counter_work() {
+        let fallback = format_lesson_fallback_context();
+        assert!(fallback.contains("Recent lessons"));
+        assert_eq!(count_section_bullets(&fallback), 1);
+    }
+
+    #[test]
+    fn classification_route_target_reports_complex_ghost() {
+        let c = Classification::Complex {
+            ghost_name: "coder".to_string(),
+            goal: "g".to_string(),
+            context: "c".to_string(),
+        };
+        let (route_type, ghost) = classification_route_target(&c);
+        assert_eq!(route_type, "complex");
+        assert_eq!(ghost, Some("coder"));
     }
 }

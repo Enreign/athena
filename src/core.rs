@@ -1141,26 +1141,49 @@ async fn run_ticket_ci_monitor(
 ) -> Option<String> {
     let dedup_key = task_id.strip_prefix("ticket:")?;
     let pr_url = extract_pull_request_url(result)?;
+    let autopilot = &config.ticket_intake.ci_autopilot;
+    if !autopilot.enabled {
+        let disabled_status = "ci_monitor_disabled".to_string();
+        let _ = outcome_store.update_ticket_ci_monitor_status(dedup_key, &disabled_status);
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!(
+                "Ticket intake CI monitor skipped task_id={} status={}",
+                task_id, disabled_status
+            ),
+        );
+        return Some(disabled_status);
+    }
+
     let _ = outcome_store.update_ticket_ci_monitor_status(dedup_key, "monitoring");
     observer.log(
         ObserverCategory::TicketIntake,
         format!(
-            "Ticket intake CI monitor started task_id={} pr_url={}",
-            task_id, pr_url
+            "Ticket intake CI monitor started task_id={} pr_url={} auto_merge={} heal={} max_heal={}",
+            task_id,
+            pr_url,
+            autopilot.auto_merge,
+            autopilot.heal,
+            autopilot.max_heal_attempts
         ),
     );
 
     let repo_root = std::env::current_dir().ok()?;
+    let max_heal_attempts = if autopilot.heal {
+        autopilot.max_heal_attempts
+    } else {
+        0
+    };
     let report = crate::ci_monitor::monitor_pr_ci(
         &pr_url,
         None,
         &repo_root,
         config,
-        false,
-        false,
-        crate::ci_monitor::CI_POLL_INTERVAL_SECS,
-        crate::ci_monitor::CI_POLL_TIMEOUT_SECS,
-        0,
+        autopilot.auto_merge,
+        autopilot.heal,
+        autopilot.poll_interval_secs.max(5),
+        autopilot.timeout_secs.max(30),
+        max_heal_attempts,
     )
     .await;
     let mut ci_status = report.final_status.clone();
