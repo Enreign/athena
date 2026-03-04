@@ -155,6 +155,24 @@ const MIGRATIONS: &[&str] = &[
         ON session_activity_log(session_key, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_session_activity_type_time
         ON session_activity_log(event_type, created_at DESC);",
+    // v17: tool detail capture + execution trees + alert rules for session review
+    "ALTER TABLE session_activity_log ADD COLUMN tool_input TEXT;
+    ALTER TABLE session_activity_log ADD COLUMN tool_output TEXT;
+    ALTER TABLE session_activity_log ADD COLUMN parent_id INTEGER REFERENCES session_activity_log(id);
+    CREATE INDEX IF NOT EXISTS idx_session_activity_parent
+        ON session_activity_log(parent_id);
+    CREATE TABLE IF NOT EXISTS review_alert_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        target TEXT NOT NULL DEFAULT 'tool_name',
+        severity TEXT NOT NULL DEFAULT 'warn',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        chat_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled
+        ON review_alert_rules(enabled);",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

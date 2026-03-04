@@ -704,6 +704,9 @@ async fn command_help(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
         /dispatch <code>&lt;ghost&gt; &lt;goal&gt;</code> — Run an autonomous task
         /review <code>[summary|detailed] [hours]</code> — Review session activity
         /explain <code>[summary|detailed] [hours]</code> — Conceptual explanation of work
+        /watch <code>[seconds]</code> — Real-time activity stream
+        /search <code>&lt;query&gt;</code> — Search across all sessions
+        /alerts — Manage notification alert rules
         /help — This help message
 
         Send any message to chat with Athena.";
@@ -1101,6 +1104,224 @@ async fn command_explain(
     }
 }
 
+async fn command_search(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::render_search_results;
+
+    let query = text.strip_prefix("/search").unwrap_or("").trim();
+    if query.is_empty() {
+        return send_html(
+            bot,
+            chat_id,
+            "<b>Usage:</b> <code>/search &lt;query&gt;</code>\n\nSearch across all sessions for tool calls, messages, and activity.",
+        ).await;
+    }
+
+    let entries = state.handle.activity_log.search(query, 50).unwrap_or_default();
+    let html = render_search_results(&entries, query);
+    send_html(bot, chat_id, &html).await
+}
+
+async fn command_alerts(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::render_alert_rules;
+
+    let args: Vec<&str> = text.strip_prefix("/alerts").unwrap_or("").trim().splitn(5, ' ').collect();
+    let subcommand = args.first().copied().unwrap_or("");
+
+    match subcommand {
+        "add" => {
+            if args.len() < 3 {
+                return send_html(
+                    bot,
+                    chat_id,
+                    "<b>Usage:</b> <code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n\n\
+                     Targets: tool_name, summary, detail, tool_input, tool_output, ghost, event_type, any\n\
+                     Severity: info, warn, critical",
+                ).await;
+            }
+            let name = args[1];
+            let pattern = args[2];
+            let target = args.get(3).copied().unwrap_or("tool_name");
+            let severity = args.get(4).copied().unwrap_or("warn");
+            let chat_str = chat_id.0.to_string();
+
+            match state.handle.activity_log.add_alert_rule(name, pattern, target, severity, Some(&chat_str)) {
+                Ok(id) => {
+                    let html = format!(
+                        "✅ Alert rule <b>#{}</b> created: <code>{}</code> on <i>{}</i> [{}]",
+                        id, pattern, target, severity
+                    );
+                    send_html(bot, chat_id, &html).await
+                }
+                Err(e) => {
+                    let html = format!("<b>Error:</b> {}", escape_html(&e.to_string()));
+                    send_html(bot, chat_id, &html).await
+                }
+            }
+        }
+        "remove" | "rm" | "delete" => {
+            let id: i64 = match args.get(1).and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => {
+                    return send_html(bot, chat_id, "<b>Usage:</b> <code>/alerts remove &lt;id&gt;</code>").await;
+                }
+            };
+            match state.handle.activity_log.remove_alert_rule(id) {
+                Ok(true) => send_html(bot, chat_id, &format!("✅ Alert rule #{} removed.", id)).await,
+                Ok(false) => send_html(bot, chat_id, &format!("⚠️ Alert rule #{} not found.", id)).await,
+                Err(e) => send_html(bot, chat_id, &format!("<b>Error:</b> {}", escape_html(&e.to_string()))).await,
+            }
+        }
+        "toggle" => {
+            let id: i64 = match args.get(1).and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => {
+                    return send_html(bot, chat_id, "<b>Usage:</b> <code>/alerts toggle &lt;id&gt;</code>").await;
+                }
+            };
+            // Find current state and flip it
+            let rules = state.handle.activity_log.list_alert_rules().unwrap_or_default();
+            let current = rules.iter().find(|r| r.id == id);
+            let new_state = current.map(|r| !r.enabled).unwrap_or(true);
+            match state.handle.activity_log.toggle_alert_rule(id, new_state) {
+                Ok(true) => {
+                    let label = if new_state { "enabled" } else { "disabled" };
+                    send_html(bot, chat_id, &format!("✅ Alert rule #{} {}.", id, label)).await
+                }
+                Ok(false) => send_html(bot, chat_id, &format!("⚠️ Alert rule #{} not found.", id)).await,
+                Err(e) => send_html(bot, chat_id, &format!("<b>Error:</b> {}", escape_html(&e.to_string()))).await,
+            }
+        }
+        _ => {
+            // List all rules
+            let rules = state.handle.activity_log.list_alert_rules().unwrap_or_default();
+            let html = render_alert_rules(&rules);
+            send_html(bot, chat_id, &html).await
+        }
+    }
+}
+
+async fn command_watch(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg: &Message,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    let args: Vec<&str> = text.strip_prefix("/watch").unwrap_or("").trim().split_whitespace().collect();
+    let duration_secs: u64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(300);
+    let duration_secs = duration_secs.min(3600); // cap at 1 hour
+
+    let session_key = format!("telegram:{}:{}", session_user_id(msg), chat_id.0);
+    let activity_log = state.handle.activity_log.clone();
+    let bot_clone = bot.clone();
+
+    send_html(
+        bot,
+        chat_id,
+        &format!(
+            "👁 <b>Watch mode active</b> for {} seconds.\nNew activity will be streamed here in real-time.",
+            duration_secs
+        ),
+    ).await?;
+
+    // Spawn a background task that polls for new activity
+    tokio::spawn(async move {
+        let mut last_id: i64 = activity_log
+            .recent(&session_key, 1)
+            .ok()
+            .and_then(|e| e.last().map(|entry| entry.id))
+            .unwrap_or(0);
+
+        // Also track autonomous entries
+        let mut last_auto_id: i64 = activity_log
+            .recent("autonomous", 1)
+            .ok()
+            .and_then(|e| e.last().map(|entry| entry.id))
+            .unwrap_or(0);
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(duration_secs);
+
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Check for new session entries
+            let new_entries = activity_log.recent(&session_key, 20).unwrap_or_default();
+            for entry in &new_entries {
+                if entry.id > last_id {
+                    last_id = entry.id;
+                    let emoji = match entry.event_type.as_str() {
+                        "chat_in" => "💬",
+                        "chat_out" => "🤖",
+                        "tool_run" => "🔧",
+                        "task_start" => "🚀",
+                        "task_finish" => "✅",
+                        "task_fail" => "❌",
+                        _ => "•",
+                    };
+                    let mut html = format!("{} {}", emoji, escape_html(&entry.summary));
+                    if let Some(ref tool) = entry.tool_name {
+                        html.push_str(&format!(" [{}]", escape_html(tool)));
+                    }
+                    if let Some(ms) = entry.duration_ms {
+                        html.push_str(&format!(" <i>({}ms)</i>", ms));
+                    }
+                    if let Some(ref input) = entry.tool_input {
+                        let preview = if input.len() > 100 { &input[..100] } else { input };
+                        html.push_str(&format!("\n<code>{}</code>", escape_html(preview)));
+                    }
+                    let _ = bot_clone
+                        .send_message(chat_id, &html)
+                        .parse_mode(ParseMode::Html)
+                        .await;
+                }
+            }
+
+            // Check for new autonomous entries
+            let auto_entries = activity_log.recent("autonomous", 20).unwrap_or_default();
+            for entry in &auto_entries {
+                if entry.id > last_auto_id {
+                    last_auto_id = entry.id;
+                    let emoji = match entry.event_type.as_str() {
+                        "task_start" => "🚀",
+                        "task_finish" => "✅",
+                        "task_fail" => "❌",
+                        "tool_run" => "🔧",
+                        _ => "⚡",
+                    };
+                    let mut html = format!("[auto] {} {}", emoji, escape_html(&entry.summary));
+                    if let Some(ref ghost) = entry.ghost {
+                        html.push_str(&format!(" [{}]", escape_html(ghost)));
+                    }
+                    if let Some(ms) = entry.duration_ms {
+                        html.push_str(&format!(" <i>({}ms)</i>", ms));
+                    }
+                    let _ = bot_clone
+                        .send_message(chat_id, &html)
+                        .parse_mode(ParseMode::Html)
+                        .await;
+                }
+            }
+        }
+
+        let _ = bot_clone
+            .send_message(chat_id, "👁 Watch mode ended.")
+            .parse_mode(ParseMode::Html)
+            .await;
+    });
+
+    Ok(())
+}
+
 async fn command_cli(bot: &Bot, chat_id: ChatId, state: &TelegramState) -> ResponseResult<()> {
     let current = state
         .handle
@@ -1408,6 +1629,18 @@ async fn handle_slash_commands(
     }
     if text == "/cli_model" || text.starts_with("/cli_model ") {
         command_cli_model(bot, chat_id, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/search" || text.starts_with("/search ") {
+        command_search(bot, chat_id, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/alerts" || text.starts_with("/alerts ") {
+        command_alerts(bot, chat_id, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/watch" || text.starts_with("/watch ") {
+        command_watch(bot, chat_id, msg, text, state).await?;
         return Ok(true);
     }
     Ok(false)
@@ -2650,6 +2883,9 @@ pub async fn run_telegram(
         BotCommand::new("dispatch", "Dispatch autonomous task to ghost"),
         BotCommand::new("review", "Review session activity log"),
         BotCommand::new("explain", "Conceptual explanation of recent work"),
+        BotCommand::new("watch", "Real-time activity stream"),
+        BotCommand::new("search", "Search across all session activity"),
+        BotCommand::new("alerts", "Manage notification alert rules"),
     ];
     bot.set_my_commands(commands)
         .await

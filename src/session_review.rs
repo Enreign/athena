@@ -65,7 +65,29 @@ pub struct ActivityEntry {
     pub tool_name: Option<String>,
     pub task_id: Option<String>,
     pub duration_ms: Option<i64>,
+    pub tool_input: Option<String>,
+    pub tool_output: Option<String>,
+    pub parent_id: Option<i64>,
     pub created_at: String,
+}
+
+// ── Alert rules ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertRule {
+    pub id: i64,
+    pub name: String,
+    pub pattern: String,
+    pub target: String,
+    pub severity: String,
+    pub enabled: bool,
+    pub chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertMatch {
+    pub rule: AlertRule,
+    pub entry: ActivityEntry,
 }
 
 // ── Detail levels for review rendering ──────────────────────────────
@@ -97,6 +119,34 @@ pub struct ActivityLogStore {
     conn: Mutex<Connection>,
 }
 
+fn lock_conn(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    conn.lock()
+        .map_err(|e| AthenaError::Tool(format!("Failed to lock activity log store: {}", e)))
+}
+
+/// Helper to build an ActivityEntry from a row that selects all 13 columns.
+fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEntry> {
+    Ok(ActivityEntry {
+        id: row.get(0)?,
+        session_key: row.get(1)?,
+        event_type: row.get(2)?,
+        summary: row.get(3)?,
+        detail: row.get(4)?,
+        ghost: row.get(5)?,
+        tool_name: row.get(6)?,
+        task_id: row.get(7)?,
+        duration_ms: row.get(8)?,
+        tool_input: row.get(9)?,
+        tool_output: row.get(10)?,
+        parent_id: row.get(11)?,
+        created_at: row.get(12)?,
+    })
+}
+
+const SELECT_COLS: &str =
+    "id, session_key, event_type, summary, detail, ghost, tool_name, task_id, \
+     duration_ms, tool_input, tool_output, parent_id, created_at";
+
 impl ActivityLogStore {
     pub fn new(conn: Connection) -> Self {
         Self {
@@ -104,7 +154,7 @@ impl ActivityLogStore {
         }
     }
 
-    /// Record a session activity event.
+    /// Record a session activity event. Returns the inserted row id.
     pub fn record(
         &self,
         session_key: &str,
@@ -115,10 +165,8 @@ impl ActivityLogStore {
         tool_name: Option<&str>,
         task_id: Option<&str>,
         duration_ms: Option<i64>,
-    ) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock activity log store: {}", e))
-        })?;
+    ) -> Result<i64> {
+        let conn = lock_conn(&self.conn)?;
         conn.execute(
             "INSERT INTO session_activity_log
              (session_key, event_type, summary, detail, ghost, tool_name, task_id, duration_ms)
@@ -134,83 +182,128 @@ impl ActivityLogStore {
                 duration_ms,
             ],
         )?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Record a tool execution with full input/output capture.
+    pub fn record_tool(
+        &self,
+        session_key: &str,
+        tool_name: &str,
+        summary: &str,
+        tool_input: Option<&str>,
+        tool_output: Option<&str>,
+        ghost: Option<&str>,
+        task_id: Option<&str>,
+        duration_ms: Option<i64>,
+        parent_id: Option<i64>,
+    ) -> Result<i64> {
+        let conn = lock_conn(&self.conn)?;
+        conn.execute(
+            "INSERT INTO session_activity_log
+             (session_key, event_type, summary, tool_name, tool_input, tool_output,
+              ghost, task_id, duration_ms, parent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                session_key,
+                ActivityEventType::ToolRun.label(),
+                summary,
+                tool_name,
+                tool_input,
+                tool_output,
+                ghost,
+                task_id,
+                duration_ms,
+                parent_id,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     /// Get recent activity entries for a session, newest first.
     pub fn recent(&self, session_key: &str, limit: usize) -> Result<Vec<ActivityEntry>> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock activity log store: {}", e))
-        })?;
-        let mut stmt = conn.prepare(
-            "SELECT id, session_key, event_type, summary, detail, ghost, tool_name, task_id, duration_ms, created_at
-             FROM session_activity_log
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM session_activity_log
              WHERE session_key = ?1
              ORDER BY created_at DESC
              LIMIT ?2",
+            SELECT_COLS
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_key, limit as i64],
+            entry_from_row,
         )?;
-        let rows = stmt.query_map(rusqlite::params![session_key, limit as i64], |row| {
-            Ok(ActivityEntry {
-                id: row.get(0)?,
-                session_key: row.get(1)?,
-                event_type: row.get(2)?,
-                summary: row.get(3)?,
-                detail: row.get(4)?,
-                ghost: row.get(5)?,
-                tool_name: row.get(6)?,
-                task_id: row.get(7)?,
-                duration_ms: row.get(8)?,
-                created_at: row.get(9)?,
-            })
-        })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row?);
-        }
+        let mut entries: Vec<ActivityEntry> = rows.filter_map(|r| r.ok()).collect();
         entries.reverse(); // chronological order
         Ok(entries)
     }
 
     /// Get all activity entries across all sessions within the last N hours.
     pub fn recent_global(&self, hours: u32, limit: usize) -> Result<Vec<ActivityEntry>> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock activity log store: {}", e))
-        })?;
-        let mut stmt = conn.prepare(
-            "SELECT id, session_key, event_type, summary, detail, ghost, tool_name, task_id, duration_ms, created_at
-             FROM session_activity_log
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM session_activity_log
              WHERE created_at > datetime('now', ?1)
              ORDER BY created_at DESC
              LIMIT ?2",
-        )?;
+            SELECT_COLS
+        ))?;
         let age_param = format!("-{} hours", hours);
-        let rows = stmt.query_map(rusqlite::params![age_param, limit as i64], |row| {
-            Ok(ActivityEntry {
-                id: row.get(0)?,
-                session_key: row.get(1)?,
-                event_type: row.get(2)?,
-                summary: row.get(3)?,
-                detail: row.get(4)?,
-                ghost: row.get(5)?,
-                tool_name: row.get(6)?,
-                task_id: row.get(7)?,
-                duration_ms: row.get(8)?,
-                created_at: row.get(9)?,
-            })
-        })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row?);
-        }
+        let rows = stmt.query_map(
+            rusqlite::params![age_param, limit as i64],
+            entry_from_row,
+        )?;
+        let mut entries: Vec<ActivityEntry> = rows.filter_map(|r| r.ok()).collect();
+        entries.reverse();
+        Ok(entries)
+    }
+
+    /// Get child entries for a given parent (execution tree).
+    pub fn children_of(&self, parent_id: i64) -> Result<Vec<ActivityEntry>> {
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM session_activity_log
+             WHERE parent_id = ?1
+             ORDER BY created_at ASC",
+            SELECT_COLS
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![parent_id], entry_from_row)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Search across all sessions for entries matching a text pattern.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ActivityEntry>> {
+        let conn = lock_conn(&self.conn)?;
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM session_activity_log
+             WHERE summary LIKE ?1
+                OR detail LIKE ?1
+                OR tool_name LIKE ?1
+                OR tool_input LIKE ?1
+                OR tool_output LIKE ?1
+                OR ghost LIKE ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+            SELECT_COLS
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![pattern, limit as i64],
+            entry_from_row,
+        )?;
+        let mut entries: Vec<ActivityEntry> = rows.filter_map(|r| r.ok()).collect();
         entries.reverse();
         Ok(entries)
     }
 
     /// Count events by type within a time window.
     pub fn event_counts(&self, session_key: &str, hours: u32) -> Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock activity log store: {}", e))
-        })?;
+        let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT event_type, COUNT(*) as cnt
              FROM session_activity_log
@@ -222,18 +315,12 @@ impl ActivityLogStore {
         let rows = stmt.query_map(rusqlite::params![session_key, age_param], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
-        let mut counts = Vec::new();
-        for row in rows {
-            counts.push(row?);
-        }
-        Ok(counts)
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// Get distinct tools used in recent session activity.
     pub fn tools_used(&self, session_key: &str, hours: u32) -> Result<Vec<String>> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock activity log store: {}", e))
-        })?;
+        let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT DISTINCT tool_name
              FROM session_activity_log
@@ -246,23 +333,121 @@ impl ActivityLogStore {
         let rows = stmt.query_map(rusqlite::params![session_key, age_param], |row| {
             row.get::<_, String>(0)
         })?;
-        let mut tools = Vec::new();
-        for row in rows {
-            tools.push(row?);
-        }
-        Ok(tools)
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// Delete old activity entries (older than N days).
     pub fn cleanup(&self, max_age_days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(|e| {
-            AthenaError::Tool(format!("Failed to lock activity log store: {}", e))
-        })?;
+        let conn = lock_conn(&self.conn)?;
         let deleted = conn.execute(
             "DELETE FROM session_activity_log WHERE created_at < datetime('now', ?1)",
             rusqlite::params![format!("-{} days", max_age_days)],
         )?;
         Ok(deleted)
+    }
+
+    // ── Alert rule management ───────────────────────────────────────
+
+    pub fn add_alert_rule(
+        &self,
+        name: &str,
+        pattern: &str,
+        target: &str,
+        severity: &str,
+        chat_id: Option<&str>,
+    ) -> Result<i64> {
+        let conn = lock_conn(&self.conn)?;
+        conn.execute(
+            "INSERT INTO review_alert_rules (name, pattern, target, severity, chat_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![name, pattern, target, severity, chat_id],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn list_alert_rules(&self) -> Result<Vec<AlertRule>> {
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, pattern, target, severity, enabled, chat_id
+             FROM review_alert_rules
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AlertRule {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                pattern: row.get(2)?,
+                target: row.get(3)?,
+                severity: row.get(4)?,
+                enabled: row.get::<_, i64>(5)? != 0,
+                chat_id: row.get(6)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn remove_alert_rule(&self, rule_id: i64) -> Result<bool> {
+        let conn = lock_conn(&self.conn)?;
+        let deleted = conn.execute(
+            "DELETE FROM review_alert_rules WHERE id = ?1",
+            rusqlite::params![rule_id],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    pub fn toggle_alert_rule(&self, rule_id: i64, enabled: bool) -> Result<bool> {
+        let conn = lock_conn(&self.conn)?;
+        let updated = conn.execute(
+            "UPDATE review_alert_rules SET enabled = ?1 WHERE id = ?2",
+            rusqlite::params![enabled as i64, rule_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Check a new entry against all enabled alert rules.
+    pub fn check_alerts(&self, entry: &ActivityEntry) -> Result<Vec<AlertMatch>> {
+        let rules = self.list_alert_rules()?;
+        let mut matches = Vec::new();
+        for rule in rules {
+            if !rule.enabled {
+                continue;
+            }
+            let haystack = match rule.target.as_str() {
+                "tool_name" => entry.tool_name.as_deref().unwrap_or(""),
+                "summary" => &entry.summary,
+                "detail" => entry.detail.as_deref().unwrap_or(""),
+                "tool_input" => entry.tool_input.as_deref().unwrap_or(""),
+                "tool_output" => entry.tool_output.as_deref().unwrap_or(""),
+                "ghost" => entry.ghost.as_deref().unwrap_or(""),
+                "event_type" => &entry.event_type,
+                // "any" matches against all fields
+                _ => {
+                    let all = format!(
+                        "{} {} {} {} {} {}",
+                        entry.summary,
+                        entry.detail.as_deref().unwrap_or(""),
+                        entry.tool_name.as_deref().unwrap_or(""),
+                        entry.tool_input.as_deref().unwrap_or(""),
+                        entry.tool_output.as_deref().unwrap_or(""),
+                        entry.ghost.as_deref().unwrap_or(""),
+                    );
+                    if all.contains(&rule.pattern) {
+                        matches.push(AlertMatch {
+                            rule,
+                            entry: entry.clone(),
+                        });
+                    }
+                    continue;
+                }
+            };
+            if haystack.contains(&rule.pattern) {
+                matches.push(AlertMatch {
+                    rule,
+                    entry: entry.clone(),
+                });
+            }
+        }
+        Ok(matches)
     }
 }
 
@@ -298,6 +483,8 @@ fn render_summary(entries: &[ActivityEntry]) -> String {
         .filter(|e| e.event_type == "task_fail")
         .count();
 
+    let total_duration_ms: i64 = entries.iter().filter_map(|e| e.duration_ms).sum();
+
     let time_range = if entries.len() >= 2 {
         format!(
             "{} → {}",
@@ -329,7 +516,7 @@ fn render_summary(entries: &[ActivityEntry]) -> String {
     };
 
     let mut out = String::new();
-    out.push_str(&format!("<b>📋 Session Summary</b>\n"));
+    out.push_str("<b>📋 Session Summary</b>\n");
     out.push_str(&format!("⏱ {}\n\n", time_range));
     out.push_str(&format!(
         "💬 {} messages in, {} responses out\n",
@@ -341,6 +528,9 @@ fn render_summary(entries: &[ActivityEntry]) -> String {
             "🚀 {} tasks dispatched (✅{} ❌{})\n",
             tasks_started, tasks_ok, tasks_fail
         ));
+    }
+    if total_duration_ms > 0 {
+        out.push_str(&format!("⏱ Total processing: {}ms\n", total_duration_ms));
     }
     if !unique_tools.is_empty() {
         out.push_str(&format!("🛠 Tools: {}\n", unique_tools.join(", ")));
@@ -368,6 +558,16 @@ fn render_standard(entries: &[ActivityEntry]) -> String {
         if let Some(ms) = entry.duration_ms {
             line.push_str(&format!(" ({}ms)", ms));
         }
+        // Show tool input preview for tool_run entries
+        if entry.event_type == "tool_run" {
+            if let Some(ref input) = entry.tool_input {
+                let preview = truncate_str(input, 80);
+                line.push_str(&format!("\n  → <code>{}</code>", preview));
+            }
+        }
+        if entry.parent_id.is_some() {
+            line = format!("  ↳ {}", line);
+        }
         out.push_str(&line);
         out.push('\n');
     }
@@ -379,32 +579,88 @@ fn render_detailed(entries: &[ActivityEntry]) -> String {
     out.push_str("\n<b>📜 Detailed Log</b>\n\n");
     for entry in entries {
         let emoji = type_emoji(&entry.event_type);
+        let indent = if entry.parent_id.is_some() { "  ↳ " } else { "" };
         out.push_str(&format!(
-            "<b>{} [{}]</b> {}\n",
-            emoji, entry.created_at, entry.summary
+            "{}<b>{} [{}]</b> {}\n",
+            indent, emoji, entry.created_at, entry.summary
         ));
         if let Some(ref ghost) = entry.ghost {
-            out.push_str(&format!("  👻 Ghost: {}\n", ghost));
+            out.push_str(&format!("{}  👻 Ghost: {}\n", indent, ghost));
         }
         if let Some(ref tool) = entry.tool_name {
-            out.push_str(&format!("  🛠 Tool: {}\n", tool));
+            out.push_str(&format!("{}  🛠 Tool: {}\n", indent, tool));
         }
         if let Some(ref task_id) = entry.task_id {
-            out.push_str(&format!("  🆔 Task: {}\n", task_id));
+            out.push_str(&format!("{}  🆔 Task: {}\n", indent, task_id));
         }
         if let Some(ms) = entry.duration_ms {
-            out.push_str(&format!("  ⏱ Duration: {}ms\n", ms));
+            out.push_str(&format!("{}  ⏱ Duration: {}ms\n", indent, ms));
+        }
+        if let Some(ref input) = entry.tool_input {
+            let truncated = truncate_str(input, 300);
+            out.push_str(&format!("{}  📥 Input: <code>{}</code>\n", indent, truncated));
+        }
+        if let Some(ref output) = entry.tool_output {
+            let truncated = truncate_str(output, 500);
+            out.push_str(&format!("{}  📤 Output: <code>{}</code>\n", indent, truncated));
         }
         if let Some(ref detail) = entry.detail {
-            let truncated = if detail.len() > 500 {
-                format!("{}...", &detail[..500])
-            } else {
-                detail.clone()
-            };
-            out.push_str(&format!("  📝 {}\n", truncated));
+            let truncated = truncate_str(detail, 500);
+            out.push_str(&format!("{}  📝 {}\n", indent, truncated));
         }
         out.push('\n');
     }
+    out
+}
+
+/// Render search results.
+pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
+    if entries.is_empty() {
+        return format!("No results found for \"{}\".", query);
+    }
+    let mut out = format!(
+        "<b>🔍 Search results for \"{}\"</b> ({} matches)\n\n",
+        query,
+        entries.len()
+    );
+    for entry in entries.iter().take(30) {
+        let emoji = type_emoji(&entry.event_type);
+        let time = entry
+            .created_at
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or(&entry.created_at);
+        out.push_str(&format!(
+            "<code>{}</code> {} {} [{}]\n",
+            time, emoji, entry.summary, entry.session_key
+        ));
+        if let Some(ref tool) = entry.tool_name {
+            out.push_str(&format!("  🛠 {}", tool));
+            if let Some(ref input) = entry.tool_input {
+                out.push_str(&format!(": <code>{}</code>", truncate_str(input, 60)));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Render alert rules list.
+pub fn render_alert_rules(rules: &[AlertRule]) -> String {
+    if rules.is_empty() {
+        return "<b>🔔 Alert Rules</b>\n\nNo alert rules configured.\n\nUsage:\n<code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n<code>/alerts remove &lt;id&gt;</code>".to_string();
+    }
+    let mut out = format!("<b>🔔 Alert Rules</b> ({} total)\n\n", rules.len());
+    for rule in rules {
+        let status = if rule.enabled { "✅" } else { "⏸" };
+        out.push_str(&format!(
+            "{} <b>#{}</b> {} — <code>{}</code> on <i>{}</i> [{}]\n",
+            status, rule.id, rule.name, rule.pattern, rule.target, rule.severity
+        ));
+    }
+    out.push_str("\n<code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n");
+    out.push_str("<code>/alerts remove &lt;id&gt;</code>\n");
+    out.push_str("<code>/alerts toggle &lt;id&gt;</code>");
     out
 }
 
@@ -420,6 +676,18 @@ fn type_emoji(event_type: &str) -> &'static str {
         "memory_store" => "🧠",
         "pulse_delivered" => "📡",
         _ => "•",
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
@@ -440,11 +708,7 @@ pub async fn generate_explanation(
         .map(|e| {
             let mut line = format!("[{}] {} — {}", e.created_at, e.event_type, e.summary);
             if let Some(ref d) = e.detail {
-                let trunc = if d.len() > 300 {
-                    format!("{}...", &d[..300])
-                } else {
-                    d.clone()
-                };
+                let trunc = truncate_str(d, 300);
                 line.push_str(&format!(" | {}", trunc));
             }
             if let Some(ref g) = e.ghost {
@@ -452,6 +716,15 @@ pub async fn generate_explanation(
             }
             if let Some(ref t) = e.tool_name {
                 line.push_str(&format!(" [tool:{}]", t));
+            }
+            if let Some(ref input) = e.tool_input {
+                line.push_str(&format!(" input:{}", truncate_str(input, 150)));
+            }
+            if let Some(ref output) = e.tool_output {
+                line.push_str(&format!(" output:{}", truncate_str(output, 150)));
+            }
+            if e.parent_id.is_some() {
+                line = format!("  (sub) {}", line);
             }
             line
         })
@@ -605,10 +878,23 @@ mod tests {
                 tool_name TEXT,
                 task_id TEXT,
                 duration_ms INTEGER,
+                tool_input TEXT,
+                tool_output TEXT,
+                parent_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX idx_session_activity_session_time
-                ON session_activity_log(session_key, created_at DESC);",
+                ON session_activity_log(session_key, created_at DESC);
+            CREATE TABLE review_alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT 'tool_name',
+                severity TEXT NOT NULL DEFAULT 'warn',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                chat_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
         )
         .unwrap();
         ActivityLogStore::new(conn)
@@ -667,33 +953,107 @@ mod tests {
     }
 
     #[test]
-    fn test_event_counts() {
+    fn test_record_tool_with_details() {
         let store = test_store();
-        for _ in 0..3 {
-            store
-                .record(
-                    "s1",
-                    ActivityEventType::ChatIn,
-                    "msg",
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
-        }
+        let parent_id = store
+            .record(
+                "s1",
+                ActivityEventType::AutonomousTaskStart,
+                "Task started",
+                None,
+                Some("coder"),
+                None,
+                Some("task-1"),
+                None,
+            )
+            .unwrap();
+
+        let child_id = store
+            .record_tool(
+                "s1",
+                "shell",
+                "git status",
+                Some("git status --porcelain"),
+                Some("M src/main.rs\n?? new_file.txt"),
+                Some("coder"),
+                Some("task-1"),
+                Some(120),
+                Some(parent_id),
+            )
+            .unwrap();
+
+        let entries = store.recent("s1", 10).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let tool_entry = entries.iter().find(|e| e.id == child_id).unwrap();
+        assert_eq!(tool_entry.tool_input.as_deref(), Some("git status --porcelain"));
+        assert_eq!(tool_entry.parent_id, Some(parent_id));
+
+        // Test children_of
+        let children = store.children_of(parent_id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, child_id);
+    }
+
+    #[test]
+    fn test_search() {
+        let store = test_store();
         store
             .record(
                 "s1",
+                ActivityEventType::ChatIn,
+                "Asked about deployment",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .record(
+                "s2",
                 ActivityEventType::ToolRun,
-                "tool",
+                "Ran build command",
                 None,
                 None,
                 Some("shell"),
                 None,
                 None,
             )
+            .unwrap();
+        store
+            .record_tool(
+                "s2",
+                "shell",
+                "git push",
+                Some("git push origin main"),
+                Some("Everything up-to-date"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = store.search("deployment", 10).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let results = store.search("git push", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].tool_input.as_deref().unwrap().contains("git push"));
+    }
+
+    #[test]
+    fn test_event_counts() {
+        let store = test_store();
+        for _ in 0..3 {
+            store
+                .record("s1", ActivityEventType::ChatIn, "msg", None, None, None, None, None)
+                .unwrap();
+        }
+        store
+            .record("s1", ActivityEventType::ToolRun, "tool", None, None, Some("shell"), None, None)
             .unwrap();
 
         let counts = store.event_counts("s1", 24).unwrap();
@@ -704,44 +1064,67 @@ mod tests {
     fn test_tools_used() {
         let store = test_store();
         store
-            .record(
-                "s1",
-                ActivityEventType::ToolRun,
-                "a",
-                None,
-                None,
-                Some("shell"),
-                None,
-                None,
-            )
+            .record("s1", ActivityEventType::ToolRun, "a", None, None, Some("shell"), None, None)
             .unwrap();
         store
-            .record(
-                "s1",
-                ActivityEventType::ToolRun,
-                "b",
-                None,
-                None,
-                Some("git"),
-                None,
-                None,
-            )
+            .record("s1", ActivityEventType::ToolRun, "b", None, None, Some("git"), None, None)
             .unwrap();
         store
-            .record(
-                "s1",
-                ActivityEventType::ToolRun,
-                "c",
-                None,
-                None,
-                Some("shell"),
-                None,
-                None,
-            )
+            .record("s1", ActivityEventType::ToolRun, "c", None, None, Some("shell"), None, None)
             .unwrap();
 
         let tools = store.tools_used("s1", 24).unwrap();
         assert_eq!(tools, vec!["git", "shell"]);
+    }
+
+    #[test]
+    fn test_alert_rules() {
+        let store = test_store();
+        let id = store
+            .add_alert_rule("sensitive files", ".env", "tool_input", "critical", None)
+            .unwrap();
+
+        let rules = store.list_alert_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "sensitive files");
+
+        // Test alert matching
+        let entry = ActivityEntry {
+            id: 1,
+            session_key: "s1".into(),
+            event_type: "tool_run".into(),
+            summary: "Read file".into(),
+            detail: None,
+            ghost: None,
+            tool_name: Some("read_file".into()),
+            task_id: None,
+            duration_ms: None,
+            tool_input: Some("cat .env".into()),
+            tool_output: Some("SECRET_KEY=abc".into()),
+            parent_id: None,
+            created_at: "2025-01-01 10:00:00".into(),
+        };
+
+        let matches = store.check_alerts(&entry).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule.severity, "critical");
+
+        // Non-matching entry
+        let safe_entry = ActivityEntry {
+            tool_input: Some("cat README.md".into()),
+            ..entry
+        };
+        let matches = store.check_alerts(&safe_entry).unwrap();
+        assert_eq!(matches.len(), 0);
+
+        // Toggle and remove
+        store.toggle_alert_rule(id, false).unwrap();
+        let rules = store.list_alert_rules().unwrap();
+        assert!(!rules[0].enabled);
+
+        store.remove_alert_rule(id).unwrap();
+        let rules = store.list_alert_rules().unwrap();
+        assert!(rules.is_empty());
     }
 
     #[test]
@@ -757,6 +1140,9 @@ mod tests {
                 tool_name: None,
                 task_id: None,
                 duration_ms: None,
+                tool_input: None,
+                tool_output: None,
+                parent_id: None,
                 created_at: "2025-01-01 10:00:00".into(),
             },
             ActivityEntry {
@@ -769,6 +1155,9 @@ mod tests {
                 tool_name: Some("shell".into()),
                 task_id: None,
                 duration_ms: Some(50),
+                tool_input: Some("ls -la".into()),
+                tool_output: Some("total 42\ndrwxr-xr-x ...".into()),
+                parent_id: None,
                 created_at: "2025-01-01 10:01:00".into(),
             },
             ActivityEntry {
@@ -781,6 +1170,9 @@ mod tests {
                 tool_name: None,
                 task_id: None,
                 duration_ms: Some(800),
+                tool_input: None,
+                tool_output: None,
+                parent_id: None,
                 created_at: "2025-01-01 10:02:00".into(),
             },
         ];
@@ -793,11 +1185,38 @@ mod tests {
         let standard = render_review(&entries, ReviewDetail::Standard);
         assert!(standard.contains("Timeline"));
         assert!(standard.contains("shell"));
+        assert!(standard.contains("ls -la")); // tool input preview
+
+        let detailed = render_review(&entries, ReviewDetail::Detailed);
+        assert!(detailed.contains("Input:"));
+        assert!(detailed.contains("Output:"));
     }
 
     #[test]
     fn test_render_empty() {
         let result = render_review(&[], ReviewDetail::Summary);
         assert!(result.contains("No activity"));
+    }
+
+    #[test]
+    fn test_render_search_results() {
+        let entries = vec![ActivityEntry {
+            id: 1,
+            session_key: "s1".into(),
+            event_type: "tool_run".into(),
+            summary: "Ran deploy".into(),
+            detail: None,
+            ghost: None,
+            tool_name: Some("shell".into()),
+            task_id: None,
+            duration_ms: None,
+            tool_input: Some("deploy.sh".into()),
+            tool_output: None,
+            parent_id: None,
+            created_at: "2025-01-01 10:00:00".into(),
+        }];
+        let result = render_search_results(&entries, "deploy");
+        assert!(result.contains("1 matches"));
+        assert!(result.contains("deploy.sh"));
     }
 }

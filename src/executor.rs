@@ -17,6 +17,7 @@ use crate::mcp::McpRegistry;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::self_heal;
+use crate::session_review::{ActivityEventType, ActivityLogStore};
 use crate::strategy::{self, StatusSender, TaskContract};
 use crate::tool_usage::ToolUsageStore;
 use crate::tools::ToolRegistry;
@@ -142,6 +143,7 @@ pub struct Executor {
     loop_guard: ToolLoopGuard,
     #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
+    activity_log: Option<Arc<ActivityLogStore>>,
 }
 
 impl Executor {
@@ -159,6 +161,7 @@ impl Executor {
         usage_store: Arc<ToolUsageStore>,
         observer: ObserverHandle,
         langfuse: SharedLangfuse,
+        activity_log: Option<Arc<ActivityLogStore>>,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
         Self {
@@ -175,6 +178,7 @@ impl Executor {
             observer,
             loop_guard: ToolLoopGuard::new(&loop_guard_config),
             langfuse,
+            activity_log,
         }
     }
 
@@ -407,6 +411,42 @@ impl Executor {
                     duration_ms
                 ),
             );
+
+            // Record tool call details to activity log
+            if let Some(ref activity_log) = self.activity_log {
+                let input_str = serde_json::to_string(&params).unwrap_or_default();
+                let input_truncated = if input_str.len() > 2000 {
+                    &input_str[..input_str.floor_char_boundary(2000)]
+                } else {
+                    &input_str
+                };
+                let output_str = match &result {
+                    Ok(r) => &r.output,
+                    Err(e) => &e.to_string(),
+                };
+                let output_truncated = if output_str.len() > 2000 {
+                    &output_str[..output_str.floor_char_boundary(2000)]
+                } else {
+                    output_str
+                };
+                let summary = format!(
+                    "{} {} ({:.0}ms)",
+                    tool_name,
+                    if success { "ok" } else { "FAIL" },
+                    duration_ms
+                );
+                let _ = activity_log.record_tool(
+                    docker.session_id(),
+                    tool_name,
+                    &summary,
+                    Some(input_truncated),
+                    Some(output_truncated),
+                    None, // ghost is set at the task level
+                    None,
+                    Some(duration_ms as i64),
+                    None, // parent_id could be set by caller
+                );
+            }
         }
 
         let output = match result {

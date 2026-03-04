@@ -242,6 +242,7 @@ impl AthenaCore {
             metrics.clone(),
             langfuse.clone(),
             observer.clone(),
+            activity_log.clone(),
         );
         let persona_soul_for_reentry = config.persona.soul.clone();
 
@@ -649,6 +650,7 @@ fn build_manager(
     metrics: SharedMetrics,
     langfuse: SharedLangfuse,
     observer: ObserverHandle,
+    activity_log: Arc<ActivityLogStore>,
 ) -> Arc<Manager> {
     let manager = Arc::new(Manager::new(
         config,
@@ -666,6 +668,7 @@ fn build_manager(
         metrics,
         langfuse,
         observer.clone(),
+        activity_log,
     ));
     if let Some(dt_path) = manager.dynamic_tools_path() {
         crate::dynamic_tools::spawn_hot_reload(

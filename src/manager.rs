@@ -21,6 +21,7 @@ use crate::mood::MoodState;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes;
 use crate::strategy::{StatusSender, TaskContract};
+use crate::session_review::ActivityLogStore;
 use crate::tool_usage::ToolUsageStore;
 
 /// A single step in a direct execution fast path.
@@ -160,6 +161,7 @@ impl Manager {
         metrics: SharedMetrics,
         langfuse: SharedLangfuse,
         observer: ObserverHandle,
+        activity_log: Arc<ActivityLogStore>,
     ) -> Self {
         let dynamic_tools_path = config.manager.resolve_dynamic_tools_path();
         let mcp_registry = crate::mcp::McpRegistry::from_config(&config.mcp, observer.clone());
@@ -177,6 +179,7 @@ impl Manager {
             usage_store.clone(),
             observer.clone(),
             langfuse.clone(),
+            Some(activity_log),
         );
 
         // Discover host tools for direct execution fast path
