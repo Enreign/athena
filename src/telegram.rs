@@ -702,6 +702,8 @@ async fn command_help(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
         /ghosts — List active ghosts
         /memories — List saved memories
         /dispatch <code>&lt;ghost&gt; &lt;goal&gt;</code> — Run an autonomous task
+        /review <code>[summary|detailed] [hours]</code> — Review session activity
+        /explain <code>[summary|detailed] [hours]</code> — Conceptual explanation of work
         /help — This help message
 
         Send any message to chat with Athena.";
@@ -1018,6 +1020,87 @@ async fn command_session(
     send_html(bot, chat_id, &html).await
 }
 
+async fn command_review(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg: &Message,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::{render_review, ReviewDetail};
+
+    // Parse detail level from argument: /review [summary|standard|detailed] [hours]
+    let args: Vec<&str> = text.strip_prefix("/review").unwrap_or("").trim().split_whitespace().collect();
+    let detail = args.first().map(|a| ReviewDetail::from_str_loose(a)).unwrap_or(ReviewDetail::Standard);
+    let hours: u32 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(24);
+
+    let session_key = format!("telegram:{}:{}", session_user_id(msg), chat_id.0);
+
+    let entries = match state.handle.activity_log.recent(&session_key, 200) {
+        Ok(e) => e,
+        Err(e) => {
+            let html = format!("<b>Error loading activity log:</b> {}", escape_html(&e.to_string()));
+            return send_html(bot, chat_id, &html).await;
+        }
+    };
+
+    // Also include autonomous task entries
+    let auto_entries = state.handle.activity_log.recent("autonomous", 100).unwrap_or_default();
+
+    let mut all_entries = entries;
+    all_entries.extend(auto_entries);
+    all_entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    // Filter to requested time window
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
+    let filtered: Vec<_> = all_entries.into_iter().filter(|e| e.created_at >= cutoff_str).collect();
+
+    let review = render_review(&filtered, detail);
+    send_html(bot, chat_id, &review).await
+}
+
+async fn command_explain(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg: &Message,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::{generate_explanation, ReviewDetail};
+
+    // Parse: /explain [summary|standard|detailed] [hours]
+    let args: Vec<&str> = text.strip_prefix("/explain").unwrap_or("").trim().split_whitespace().collect();
+    let detail = args.first().map(|a| ReviewDetail::from_str_loose(a)).unwrap_or(ReviewDetail::Standard);
+    let hours: u32 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(24);
+
+    let session_key = format!("telegram:{}:{}", session_user_id(msg), chat_id.0);
+
+    let _ = send_html(bot, chat_id, "<i>Generating explanation...</i>").await;
+
+    let entries = state.handle.activity_log.recent(&session_key, 200).unwrap_or_default();
+    let auto_entries = state.handle.activity_log.recent("autonomous", 100).unwrap_or_default();
+
+    let mut all_entries = entries;
+    all_entries.extend(auto_entries);
+    all_entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
+    let filtered: Vec<_> = all_entries.into_iter().filter(|e| e.created_at >= cutoff_str).collect();
+
+    match generate_explanation(&filtered, state.handle.llm.as_ref(), detail).await {
+        Ok(explanation) => {
+            let html = format!("<b>🧠 Session Explanation</b>\n\n{}", escape_html(&explanation));
+            send_html(bot, chat_id, &html).await
+        }
+        Err(e) => {
+            let html = format!("<b>Error generating explanation:</b> {}", escape_html(&e.to_string()));
+            send_html(bot, chat_id, &html).await
+        }
+    }
+}
+
 async fn command_cli(bot: &Bot, chat_id: ChatId, state: &TelegramState) -> ResponseResult<()> {
     let current = state
         .handle
@@ -1293,6 +1376,14 @@ async fn handle_slash_commands(
     }
     if text == "/session" {
         command_session(bot, chat_id, msg, state).await?;
+        return Ok(true);
+    }
+    if text == "/review" || text.starts_with("/review ") {
+        command_review(bot, chat_id, msg, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/explain" || text.starts_with("/explain ") {
+        command_explain(bot, chat_id, msg, text, state).await?;
         return Ok(true);
     }
     if text == "/cli" {
@@ -2557,6 +2648,8 @@ pub async fn run_telegram(
         BotCommand::new("ghosts", "List active ghosts"),
         BotCommand::new("memories", "List saved memories"),
         BotCommand::new("dispatch", "Dispatch autonomous task to ghost"),
+        BotCommand::new("review", "Review session activity log"),
+        BotCommand::new("explain", "Conceptual explanation of recent work"),
     ];
     bot.set_my_commands(commands)
         .await

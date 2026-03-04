@@ -32,6 +32,7 @@ mod reason_codes;
 mod scheduler;
 mod secrets;
 mod self_heal;
+mod session_review;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;

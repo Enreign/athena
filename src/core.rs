@@ -26,6 +26,7 @@ use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
 use crate::ticket_intake::{self, TicketIntakeStore, TicketProvider};
+use crate::session_review::{ActivityEventType, ActivityLogStore};
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
@@ -127,6 +128,7 @@ pub struct CoreHandle {
     pub delivered_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Pulse>>>,
     pub auto_tx: mpsc::Sender<AutonomousTask>,
     pub metrics: SharedMetrics,
+    pub activity_log: Arc<ActivityLogStore>,
 }
 
 impl CoreHandle {
@@ -199,6 +201,7 @@ struct CoreRuntimeHandles {
     outcome_store: Arc<TaskOutcomeStore>,
     cron_engine: Arc<CronEngine>,
     metrics: SharedMetrics,
+    activity_log: Arc<ActivityLogStore>,
 }
 
 impl AthenaCore {
@@ -224,6 +227,7 @@ impl AthenaCore {
             outcome_store,
             cron_engine,
             metrics,
+            activity_log,
         } = init_runtime_handles(&config, memory.clone(), llm.clone())?;
         let manager = build_manager(
             &config,
@@ -260,6 +264,7 @@ impl AthenaCore {
             langfuse.clone(),
             outcome_store,
             config.ticket_intake.mock_dispatch,
+            activity_log.clone(),
         );
 
         Ok(CoreHandle {
@@ -276,6 +281,7 @@ impl AthenaCore {
             delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
             auto_tx,
             metrics,
+            activity_log,
         })
     }
 }
@@ -317,6 +323,7 @@ fn spawn_core_loops(
     _langfuse: SharedLangfuse,
     outcome_store: Arc<TaskOutcomeStore>,
     mock_ticket_intake_dispatch: bool,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     spawn_core_event_loop(
         rx,
@@ -327,6 +334,7 @@ fn spawn_core_loops(
         observer.clone(),
         memory.clone(),
         persona_soul_for_reentry,
+        activity_log.clone(),
     );
     spawn_autonomous_task_consumer(
         auto_rx,
@@ -338,6 +346,7 @@ fn spawn_core_loops(
         memory,
         outcome_store,
         mock_ticket_intake_dispatch,
+        activity_log,
     );
 }
 
@@ -358,6 +367,7 @@ fn init_runtime_handles(
     let (auto_tx, auto_rx) = mpsc::channel::<AutonomousTask>(32);
     let usage_store = create_usage_store(config)?;
     let outcome_store = create_task_outcome_store(config)?;
+    let activity_log = create_activity_log_store(config)?;
     expire_stale_started_tasks(&outcome_store, &observer);
 
     spawn_housekeeping_loops(
@@ -403,6 +413,7 @@ fn init_runtime_handles(
         outcome_store,
         cron_engine,
         metrics,
+        activity_log,
     })
 }
 
@@ -680,6 +691,7 @@ fn spawn_core_event_loop(
     observer: ObserverHandle,
     memory: Arc<MemoryStore>,
     persona_soul: Option<String>,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -695,6 +707,7 @@ fn spawn_core_event_loop(
                     observer.clone(),
                     memory.clone(),
                     persona_soul.clone(),
+                    activity_log.clone(),
                 )
                 .instrument(request_span),
             );
@@ -851,6 +864,7 @@ async fn handle_core_request(
     observer: ObserverHandle,
     memory: Arc<MemoryStore>,
     persona_soul: Option<String>,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     activity.touch();
     let session_key = req.session.session_key();
@@ -858,6 +872,19 @@ async fn handle_core_request(
         ObserverCategory::ChatIn,
         format!("{} \"{}\"", session_key, truncate_obs(&req.input, 80)),
     ));
+
+    // Log incoming chat message
+    let _ = activity_log.record(
+        &session_key,
+        ActivityEventType::ChatIn,
+        &truncate_obs(&req.input, 200),
+        Some(&req.input),
+        None,
+        None,
+        None,
+        None,
+    );
+
     if should_block_chat_input(&req, &prompt_scanner, &observer, &session_key).await {
         return;
     }
@@ -870,6 +897,7 @@ async fn handle_core_request(
     let bridge_handle = spawn_status_bridge(status_rx, req.event_tx.clone());
 
     tracing::debug!("Calling manager.handle()");
+    let start = std::time::Instant::now();
     let result = manager
         .handle(
             &req.input,
@@ -878,6 +906,7 @@ async fn handle_core_request(
             Some(&status_tx),
         )
         .await;
+    let elapsed_ms = start.elapsed().as_millis() as i64;
 
     drop(status_tx);
     let _ = bridge_handle.await;
@@ -892,6 +921,19 @@ async fn handle_core_request(
                 )
                 .with_details(truncate_obs(&response, 100)),
             );
+
+            // Log outgoing response
+            let _ = activity_log.record(
+                &session_key,
+                ActivityEventType::ChatOut,
+                &format!("Response ({} chars)", response.len()),
+                Some(&truncate_obs(&response, 1000)),
+                None,
+                None,
+                None,
+                Some(elapsed_ms),
+            );
+
             let _ = req.event_tx.send(CoreEvent::Response(response)).await;
         }
         Err(e) => {
@@ -928,6 +970,7 @@ fn spawn_autonomous_task_consumer(
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
     mock_ticket_intake_dispatch: bool,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     tokio::spawn(async move {
         while let Some(task) = auto_rx.recv().await {
@@ -939,6 +982,7 @@ fn spawn_autonomous_task_consumer(
             let memory = memory.clone();
             let outcome_store = outcome_store.clone();
             let mock_ticket_intake_dispatch = mock_ticket_intake_dispatch;
+            let activity_log = activity_log.clone();
             tokio::spawn(async move {
                 execute_autonomous_task(
                     task,
@@ -950,6 +994,7 @@ fn spawn_autonomous_task_consumer(
                     memory,
                     outcome_store,
                     mock_ticket_intake_dispatch,
+                    activity_log,
                 )
                 .await;
             });
@@ -967,6 +1012,7 @@ async fn execute_autonomous_task(
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
     mock_ticket_intake_dispatch: bool,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     let confirmer = AutoConfirmer;
     expire_stale_started_tasks(&outcome_store, &observer);
@@ -978,6 +1024,20 @@ async fn execute_autonomous_task(
     let goal_summary = truncate_obs(&task.goal, 120);
     record_autonomous_task_start(&outcome_store, &task_id, &task);
     log_autonomous_dispatch(&observer, &task, &ghost_label);
+
+    // Log task start to activity log (use "autonomous" as session key for background tasks)
+    let activity_session_key = "autonomous";
+    let _ = activity_log.record(
+        activity_session_key,
+        ActivityEventType::AutonomousTaskStart,
+        &goal_summary,
+        Some(&task.context),
+        Some(&ghost_label),
+        None,
+        Some(&task_id),
+        None,
+    );
+
     introspect::inc_active_tasks();
 
     if maybe_handle_mock_ticket_intake_dispatch(
@@ -1017,7 +1077,38 @@ async fn execute_autonomous_task(
         introspect::dec_active_tasks();
         return;
     }
+    let task_start = std::time::Instant::now();
     let manager_result = run_manager_autonomous_task(&manager, &task, &confirmer).await;
+    let task_elapsed_ms = task_start.elapsed().as_millis() as i64;
+
+    // Log task outcome to activity log
+    match &manager_result {
+        Ok(result) => {
+            let _ = activity_log.record(
+                activity_session_key,
+                ActivityEventType::AutonomousTaskFinish,
+                &format!("{} completed ({} chars)", ghost_label, result.len()),
+                Some(&truncate_obs(result, 500)),
+                Some(&ghost_label),
+                None,
+                Some(&task_id),
+                Some(task_elapsed_ms),
+            );
+        }
+        Err(err) => {
+            let _ = activity_log.record(
+                activity_session_key,
+                ActivityEventType::AutonomousTaskFail,
+                &format!("{} failed: {}", ghost_label, truncate_obs(&err.to_string(), 200)),
+                Some(&err.to_string()),
+                Some(&ghost_label),
+                None,
+                Some(&task_id),
+                Some(task_elapsed_ms),
+            );
+        }
+    }
+
     finalize_autonomous_task_run(
         &task,
         &task_id,
@@ -1778,6 +1869,18 @@ fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
     Ok(Arc::new(TaskOutcomeStore::new(conn)))
+}
+
+fn create_activity_log_store(config: &Config) -> Result<Arc<ActivityLogStore>> {
+    let db_path = config.db_path().map_err(|e| {
+        crate::error::AthenaError::Config(format!(
+            "Failed to resolve DB path for activity log store: {}",
+            e
+        ))
+    })?;
+    let conn = rusqlite::Connection::open(&db_path)?;
+    let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    Ok(Arc::new(ActivityLogStore::new(conn)))
 }
 
 fn create_ticket_intake_store(config: &Config) -> Result<Arc<TicketIntakeStore>> {

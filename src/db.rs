@@ -138,6 +138,23 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE ticket_intake_log ADD COLUMN ci_monitor_status TEXT;",
     // v15: record selected coding CLI for tool-level routing KPIs
     "ALTER TABLE autonomous_task_outcomes ADD COLUMN cli_tool_used TEXT;",
+    // v16: session activity log for review & explainability
+    "CREATE TABLE IF NOT EXISTS session_activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        detail TEXT,
+        ghost TEXT,
+        tool_name TEXT,
+        task_id TEXT,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_activity_session_time
+        ON session_activity_log(session_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_session_activity_type_time
+        ON session_activity_log(event_type, created_at DESC);",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {
