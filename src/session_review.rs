@@ -533,10 +533,10 @@ fn render_summary(entries: &[ActivityEntry]) -> String {
         out.push_str(&format!("⏱ Total processing: {}ms\n", total_duration_ms));
     }
     if !unique_tools.is_empty() {
-        out.push_str(&format!("🛠 Tools: {}\n", unique_tools.join(", ")));
+        out.push_str(&format!("🛠 Tools: {}\n", escape_html(&unique_tools.join(", "))));
     }
     if !unique_ghosts.is_empty() {
-        out.push_str(&format!("👻 Ghosts: {}\n", unique_ghosts.join(", ")));
+        out.push_str(&format!("👻 Ghosts: {}\n", escape_html(&unique_ghosts.join(", "))));
     }
     out
 }
@@ -551,9 +551,9 @@ fn render_standard(entries: &[ActivityEntry]) -> String {
             .split_whitespace()
             .nth(1)
             .unwrap_or(&entry.created_at);
-        let mut line = format!("<code>{}</code> {} {}", time, emoji, entry.summary);
+        let mut line = format!("<code>{}</code> {} {}", time, emoji, escape_html(&entry.summary));
         if let Some(ref ghost) = entry.ghost {
-            line.push_str(&format!(" [{}]", ghost));
+            line.push_str(&format!(" [{}]", escape_html(ghost)));
         }
         if let Some(ms) = entry.duration_ms {
             line.push_str(&format!(" ({}ms)", ms));
@@ -562,7 +562,7 @@ fn render_standard(entries: &[ActivityEntry]) -> String {
         if entry.event_type == "tool_run" {
             if let Some(ref input) = entry.tool_input {
                 let preview = truncate_str(input, 80);
-                line.push_str(&format!("\n  → <code>{}</code>", preview));
+                line.push_str(&format!("\n  → <code>{}</code>", escape_html(&preview)));
             }
         }
         if entry.parent_id.is_some() {
@@ -582,31 +582,31 @@ fn render_detailed(entries: &[ActivityEntry]) -> String {
         let indent = if entry.parent_id.is_some() { "  ↳ " } else { "" };
         out.push_str(&format!(
             "{}<b>{} [{}]</b> {}\n",
-            indent, emoji, entry.created_at, entry.summary
+            indent, emoji, escape_html(&entry.created_at), escape_html(&entry.summary)
         ));
         if let Some(ref ghost) = entry.ghost {
-            out.push_str(&format!("{}  👻 Ghost: {}\n", indent, ghost));
+            out.push_str(&format!("{}  👻 Ghost: {}\n", indent, escape_html(ghost)));
         }
         if let Some(ref tool) = entry.tool_name {
-            out.push_str(&format!("{}  🛠 Tool: {}\n", indent, tool));
+            out.push_str(&format!("{}  🛠 Tool: {}\n", indent, escape_html(tool)));
         }
         if let Some(ref task_id) = entry.task_id {
-            out.push_str(&format!("{}  🆔 Task: {}\n", indent, task_id));
+            out.push_str(&format!("{}  🆔 Task: {}\n", indent, escape_html(task_id)));
         }
         if let Some(ms) = entry.duration_ms {
             out.push_str(&format!("{}  ⏱ Duration: {}ms\n", indent, ms));
         }
         if let Some(ref input) = entry.tool_input {
             let truncated = truncate_str(input, 300);
-            out.push_str(&format!("{}  📥 Input: <code>{}</code>\n", indent, truncated));
+            out.push_str(&format!("{}  📥 Input: <code>{}</code>\n", indent, escape_html(&truncated)));
         }
         if let Some(ref output) = entry.tool_output {
             let truncated = truncate_str(output, 500);
-            out.push_str(&format!("{}  📤 Output: <code>{}</code>\n", indent, truncated));
+            out.push_str(&format!("{}  📤 Output: <code>{}</code>\n", indent, escape_html(&truncated)));
         }
         if let Some(ref detail) = entry.detail {
             let truncated = truncate_str(detail, 500);
-            out.push_str(&format!("{}  📝 {}\n", indent, truncated));
+            out.push_str(&format!("{}  📝 {}\n", indent, escape_html(&truncated)));
         }
         out.push('\n');
     }
@@ -620,7 +620,7 @@ pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
     }
     let mut out = format!(
         "<b>🔍 Search results for \"{}\"</b> ({} matches)\n\n",
-        query,
+        escape_html(query),
         entries.len()
     );
     for entry in entries.iter().take(30) {
@@ -632,12 +632,12 @@ pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
             .unwrap_or(&entry.created_at);
         out.push_str(&format!(
             "<code>{}</code> {} {} [{}]\n",
-            time, emoji, entry.summary, entry.session_key
+            time, emoji, escape_html(&entry.summary), escape_html(&entry.session_key)
         ));
         if let Some(ref tool) = entry.tool_name {
-            out.push_str(&format!("  🛠 {}", tool));
+            out.push_str(&format!("  🛠 {}", escape_html(tool)));
             if let Some(ref input) = entry.tool_input {
-                out.push_str(&format!(": <code>{}</code>", truncate_str(input, 60)));
+                out.push_str(&format!(": <code>{}</code>", escape_html(&truncate_str(input, 60))));
             }
             out.push('\n');
         }
@@ -655,7 +655,8 @@ pub fn render_alert_rules(rules: &[AlertRule]) -> String {
         let status = if rule.enabled { "✅" } else { "⏸" };
         out.push_str(&format!(
             "{} <b>#{}</b> {} — <code>{}</code> on <i>{}</i> [{}]\n",
-            status, rule.id, rule.name, rule.pattern, rule.target, rule.severity
+            status, rule.id, escape_html(&rule.name), escape_html(&rule.pattern),
+            escape_html(&rule.target), escape_html(&rule.severity)
         ));
     }
     out.push_str("\n<code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n");
@@ -677,6 +678,13 @@ fn type_emoji(event_type: &str) -> &'static str {
         "pulse_delivered" => "📡",
         _ => "•",
     }
+}
+
+/// Escape HTML special characters for safe embedding in Telegram HTML messages.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn truncate_str(s: &str, max: usize) -> String {

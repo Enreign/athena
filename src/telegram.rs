@@ -1276,13 +1276,34 @@ async fn command_watch(
                         html.push_str(&format!(" <i>({}ms)</i>", ms));
                     }
                     if let Some(ref input) = entry.tool_input {
-                        let preview = if input.len() > 100 { &input[..100] } else { input };
+                        let preview = if input.len() > 100 {
+                            &input[..input.floor_char_boundary(100)]
+                        } else {
+                            input
+                        };
                         html.push_str(&format!("\n<code>{}</code>", escape_html(preview)));
                     }
                     let _ = bot_clone
                         .send_message(chat_id, &html)
                         .parse_mode(ParseMode::Html)
                         .await;
+
+                    // Check alert rules against this entry
+                    if let Ok(alerts) = activity_log.check_alerts(entry) {
+                        for alert in alerts {
+                            let alert_html = format!(
+                                "🔔 <b>Alert:</b> {} [{}]\n  Pattern <code>{}</code> matched on {}",
+                                escape_html(&alert.rule.name),
+                                escape_html(&alert.rule.severity),
+                                escape_html(&alert.rule.pattern),
+                                escape_html(&alert.rule.target),
+                            );
+                            let _ = bot_clone
+                                .send_message(chat_id, &alert_html)
+                                .parse_mode(ParseMode::Html)
+                                .await;
+                        }
+                    }
                 }
             }
 
@@ -1309,6 +1330,23 @@ async fn command_watch(
                         .send_message(chat_id, &html)
                         .parse_mode(ParseMode::Html)
                         .await;
+
+                    // Check alert rules against this entry
+                    if let Ok(alerts) = activity_log.check_alerts(entry) {
+                        for alert in alerts {
+                            let alert_html = format!(
+                                "🔔 <b>Alert:</b> {} [{}]\n  Pattern <code>{}</code> matched on {}",
+                                escape_html(&alert.rule.name),
+                                escape_html(&alert.rule.severity),
+                                escape_html(&alert.rule.pattern),
+                                escape_html(&alert.rule.target),
+                            );
+                            let _ = bot_clone
+                                .send_message(chat_id, &alert_html)
+                                .parse_mode(ParseMode::Html)
+                                .await;
+                        }
+                    }
                 }
             }
         }

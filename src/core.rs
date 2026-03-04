@@ -1030,7 +1030,7 @@ async fn execute_autonomous_task(
 
     // Log task start to activity log (use "autonomous" as session key for background tasks)
     let activity_session_key = "autonomous";
-    let _ = activity_log.record(
+    let task_start_id = activity_log.record(
         activity_session_key,
         ActivityEventType::AutonomousTaskStart,
         &goal_summary,
@@ -1039,7 +1039,10 @@ async fn execute_autonomous_task(
         None,
         Some(&task_id),
         None,
-    );
+    ).ok();
+
+    // Set activity context on executor so tool calls get proper attribution
+    manager.set_activity_context(&ghost_label, activity_session_key, task_start_id);
 
     introspect::inc_active_tasks();
 

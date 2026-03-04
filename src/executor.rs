@@ -144,6 +144,17 @@ pub struct Executor {
     #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
     activity_log: Option<Arc<ActivityLogStore>>,
+    /// Current ghost name + session key for activity log attribution.
+    /// Set by `run()`, cleared after. Protected by Mutex for interior mutability.
+    activity_context: Mutex<Option<ActivityContext>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivityContext {
+    ghost: String,
+    session_key: String,
+    /// Row id of the parent task_start entry for execution tree linking.
+    parent_id: Option<i64>,
 }
 
 impl Executor {
@@ -179,6 +190,30 @@ impl Executor {
             loop_guard: ToolLoopGuard::new(&loop_guard_config),
             langfuse,
             activity_log,
+            activity_context: Mutex::new(None),
+        }
+    }
+
+    /// Set activity context for the current ghost run (ghost name + session key).
+    pub fn set_activity_context(
+        &self,
+        ghost: &str,
+        session_key: &str,
+        parent_id: Option<i64>,
+    ) {
+        if let Ok(mut ctx) = self.activity_context.lock() {
+            *ctx = Some(ActivityContext {
+                ghost: ghost.to_string(),
+                session_key: session_key.to_string(),
+                parent_id,
+            });
+        }
+    }
+
+    /// Clear activity context after a ghost run completes.
+    pub fn clear_activity_context(&self) {
+        if let Ok(mut ctx) = self.activity_context.lock() {
+            *ctx = None;
         }
     }
 
@@ -194,6 +229,14 @@ impl Executor {
         trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         tracing::info!(ghost = %ghost.name, goal = %contract.goal, "Starting executor");
+
+        // Set activity context so tool calls are attributed to this ghost.
+        // Session key is set to "autonomous" by default; callers can override
+        // via set_activity_context() before calling run().
+        let has_context = self.activity_context.lock().ok().map_or(false, |g| g.is_some());
+        if !has_context {
+            self.set_activity_context(&ghost.name, "autonomous", None);
+        }
 
         let run_span = trace.map(|t| t.span("ghost_run", Some(&contract.goal)));
 
@@ -285,6 +328,7 @@ impl Executor {
     }
 
     async fn close_session(&self, session: DockerSession) {
+        self.clear_activity_context();
         self.loop_guard.clear_session(session.session_id());
         if let Err(e) = session.close().await {
             tracing::warn!("Failed to close container: {}", e);
@@ -420,14 +464,15 @@ impl Executor {
                 } else {
                     &input_str
                 };
-                let output_str = match &result {
-                    Ok(r) => &r.output,
-                    Err(e) => &e.to_string(),
+                // Bind output to a local to avoid dangling temporary reference
+                let output_owned = match &result {
+                    Ok(r) => r.output.clone(),
+                    Err(e) => e.to_string(),
                 };
-                let output_truncated = if output_str.len() > 2000 {
-                    &output_str[..output_str.floor_char_boundary(2000)]
+                let output_truncated = if output_owned.len() > 2000 {
+                    &output_owned[..output_owned.floor_char_boundary(2000)]
                 } else {
-                    output_str
+                    &output_owned
                 };
                 let summary = format!(
                     "{} {} ({:.0}ms)",
@@ -435,16 +480,24 @@ impl Executor {
                     if success { "ok" } else { "FAIL" },
                     duration_ms
                 );
+                // Pull ghost, session key, and parent_id from activity context
+                let ctx = self.activity_context.lock().ok().and_then(|g| g.clone());
+                let session_key = ctx
+                    .as_ref()
+                    .map(|c| c.session_key.as_str())
+                    .unwrap_or(docker.session_id());
+                let ghost = ctx.as_ref().map(|c| c.ghost.as_str());
+                let parent_id = ctx.as_ref().and_then(|c| c.parent_id);
                 let _ = activity_log.record_tool(
-                    docker.session_id(),
+                    session_key,
                     tool_name,
                     &summary,
                     Some(input_truncated),
                     Some(output_truncated),
-                    None, // ghost is set at the task level
+                    ghost,
                     None,
                     Some(duration_ms as i64),
-                    None, // parent_id could be set by caller
+                    parent_id,
                 );
             }
         }

@@ -262,6 +262,11 @@ impl Manager {
         &self.host_workspace
     }
 
+    /// Set activity context on the executor for tool call attribution.
+    pub fn set_activity_context(&self, ghost: &str, session_key: &str, parent_id: Option<i64>) {
+        self.executor.set_activity_context(ghost, session_key, parent_id);
+    }
+
     /// Handle a user message: classify, delegate or answer directly
     #[tracing::instrument(skip(self, session, confirmer, status_tx), fields(input_len = user_input.len()))]
     pub async fn handle(
