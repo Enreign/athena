@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
+    pub openai_api: OpenAiApiConfig,
+    #[serde(default)]
     pub ollama: OllamaConfig,
     #[serde(default, alias = "ouath")]
     pub openai: Option<OpenAiConfig>,
@@ -105,6 +107,76 @@ impl Default for LlmConfig {
 
 fn default_provider() -> String {
     "openai".into()
+}
+
+#[derive(Deserialize, Clone)]
+pub struct OpenAiApiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_openai_api_bind")]
+    pub bind: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_openai_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_openai_api_principal")]
+    pub principal: String,
+    #[serde(default = "default_openai_api_requests_per_minute")]
+    pub requests_per_minute: u32,
+    #[serde(default = "default_openai_api_burst")]
+    pub burst: u32,
+    #[serde(default)]
+    pub advertised_models: Vec<String>,
+}
+
+impl std::fmt::Debug for OpenAiApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiApiConfig")
+            .field("enabled", &self.enabled)
+            .field("bind", &self.bind)
+            .field("api_key", &"[REDACTED]")
+            .field("api_key_env", &self.api_key_env)
+            .field("principal", &self.principal)
+            .field("requests_per_minute", &self.requests_per_minute)
+            .field("burst", &self.burst)
+            .field("advertised_models", &self.advertised_models)
+            .finish()
+    }
+}
+
+impl Default for OpenAiApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_openai_api_bind(),
+            api_key: None,
+            api_key_env: default_openai_api_key_env(),
+            principal: default_openai_api_principal(),
+            requests_per_minute: default_openai_api_requests_per_minute(),
+            burst: default_openai_api_burst(),
+            advertised_models: Vec::new(),
+        }
+    }
+}
+
+fn default_openai_api_bind() -> String {
+    "127.0.0.1:8787".into()
+}
+
+fn default_openai_api_key_env() -> String {
+    "ATHENA_OPENAI_API_KEY".into()
+}
+
+fn default_openai_api_principal() -> String {
+    "self".into()
+}
+
+fn default_openai_api_requests_per_minute() -> u32 {
+    120
+}
+
+fn default_openai_api_burst() -> u32 {
+    30
 }
 
 #[derive(Deserialize, Clone)]
@@ -1114,6 +1186,7 @@ impl Default for Config {
         Self {
             runtime: RuntimeConfig::default(),
             llm: LlmConfig::default(),
+            openai_api: OpenAiApiConfig::default(),
             ollama: OllamaConfig::default(),
             openai: Some(OpenAiConfig::default()),
             openrouter: None,
@@ -1250,6 +1323,10 @@ impl Config {
         let mut labels = Vec::new();
         if self.github.token.is_some() && std::env::var("GH_TOKEN").is_err() {
             labels.push("github.token".to_string());
+        }
+        if self.openai_api.api_key.is_some() && std::env::var(&self.openai_api.api_key_env).is_err()
+        {
+            labels.push("openai_api.api_key".to_string());
         }
         if self.telegram.token.is_some() && std::env::var("ATHENA_TELEGRAM_TOKEN").is_err() {
             labels.push("telegram.token".to_string());

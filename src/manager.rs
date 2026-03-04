@@ -590,6 +590,10 @@ impl Manager {
         ghost.role == GhostRole::Coordinator || ghost.name.eq_ignore_ascii_case("coordinator")
     }
 
+    pub fn ghost_names(&self) -> Vec<String> {
+        self.ghosts.iter().map(|g| g.name.clone()).collect()
+    }
+
     fn find_pipeline_ghost(&self, role: GhostRole, fallback_name: &str) -> Option<&GhostConfig> {
         self.ghosts
             .iter()

@@ -7,10 +7,11 @@ use crate::config::{Config, GhostConfig};
 use crate::confirm::{AutoConfirmer, Confirmer};
 use crate::embeddings::Embedder;
 use crate::error::Result;
+use crate::ghost_policy::{self, GhostPolicyAction, GhostPolicyScope, GhostPolicyThresholds};
 use crate::heartbeat;
 use crate::introspect::{self, SharedMetrics, SystemMetrics};
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
-use crate::kpi::TaskOutcomeStore;
+use crate::kpi::{self, TaskOutcomeStore};
 use crate::langfuse::SharedLangfuse;
 use crate::llm::LlmProvider;
 use crate::manager::Manager;
@@ -30,6 +31,11 @@ use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
 const STALE_STARTED_REASON: &str = "stale_started";
+const GHOST_SPECIALIZATION_MIN_SAMPLES: u64 = 3;
+const GHOST_SPECIALIZATION_CONFIDENCE_THRESHOLD: f64 = 0.05;
+const GHOST_SPECIALIZATION_ROLLBACK_MIN_SAMPLES: u64 = 3;
+const GHOST_SPECIALIZATION_MAX_ALLOWED_REGRESSION: f64 = 0.08;
+const GHOST_SPECIALIZATION_STABILITY_WINDOW: usize = 3;
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
@@ -262,7 +268,7 @@ impl AthenaCore {
             config.ticket_intake.mock_dispatch,
         );
 
-        Ok(CoreHandle {
+        let handle = CoreHandle {
             tx,
             ghosts: Arc::new(ghosts),
             memory,
@@ -276,8 +282,18 @@ impl AthenaCore {
             delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
             auto_tx,
             metrics,
-        })
+        };
+
+        maybe_spawn_openai_api(&config, &handle).await?;
+
+        Ok(handle)
     }
+}
+
+async fn maybe_spawn_openai_api(config: &Config, handle: &CoreHandle) -> Result<()> {
+    crate::openai_api::spawn_openai_api(config.openai_api.clone(), handle.clone())
+        .await
+        .map_err(|e| crate::error::AthenaError::Tool(e.to_string()))
 }
 
 async fn init_llm_stack(
@@ -958,7 +974,7 @@ fn spawn_autonomous_task_consumer(
 }
 
 async fn execute_autonomous_task(
-    task: AutonomousTask,
+    mut task: AutonomousTask,
     manager: Arc<Manager>,
     config: Config,
     prompt_scanner: Arc<PromptScanner>,
@@ -974,7 +990,9 @@ async fn execute_autonomous_task(
         .task_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let ghost_label = task.ghost.clone().unwrap_or_else(|| "auto".into());
+    let selected_ghost =
+        resolve_autonomous_task_ghost(&mut task, manager.as_ref(), &config, &observer);
+    let ghost_label = selected_ghost.unwrap_or_else(|| "auto".into());
     let goal_summary = truncate_obs(&task.goal, 120);
     record_autonomous_task_start(&outcome_store, &task_id, &task);
     log_autonomous_dispatch(&observer, &task, &ghost_label);
@@ -1051,6 +1069,251 @@ async fn run_manager_autonomous_task(
             confirmer,
         )
         .await
+}
+
+fn resolve_autonomous_task_ghost(
+    task: &mut AutonomousTask,
+    manager: &Manager,
+    config: &Config,
+    observer: &ObserverHandle,
+) -> Option<String> {
+    if let Some(explicit) = task.ghost.clone() {
+        log_ghost_specialization_decision(
+            observer,
+            task,
+            &explicit,
+            "explicit",
+            0,
+            None,
+            None,
+            "explicit ghost requested; specialization bypassed",
+        );
+        return Some(explicit);
+    }
+
+    let available_ghosts = manager.ghost_names();
+    let Some(baseline_ghost) = select_default_autonomous_ghost(&available_ghosts) else {
+        log_ghost_specialization_decision(
+            observer,
+            task,
+            "auto",
+            "no_ghosts_configured",
+            0,
+            None,
+            None,
+            "no configured ghosts available",
+        );
+        return None;
+    };
+
+    let outcome =
+        match evaluate_autonomous_ghost_selection(config, task, &available_ghosts, &baseline_ghost)
+        {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                task.ghost = Some(baseline_ghost.clone());
+                log_ghost_specialization_decision(
+                    observer,
+                    task,
+                    &baseline_ghost,
+                    "fallback_on_policy_error",
+                    0,
+                    None,
+                    None,
+                    &format!("policy evaluation error: {}", e),
+                );
+                return Some(baseline_ghost);
+            }
+        };
+
+    task.ghost = Some(outcome.selected_ghost.clone());
+    log_ghost_specialization_decision(
+        observer,
+        task,
+        &outcome.selected_ghost,
+        outcome.selection_mode,
+        outcome.sample_count,
+        outcome.success_rate,
+        outcome.confidence_gap,
+        &outcome.rationale,
+    );
+    Some(outcome.selected_ghost)
+}
+
+#[derive(Debug, Clone)]
+struct GhostSelectionOutcome {
+    selected_ghost: String,
+    selection_mode: &'static str,
+    sample_count: u64,
+    success_rate: Option<f64>,
+    confidence_gap: Option<f64>,
+    rationale: String,
+}
+
+fn evaluate_autonomous_ghost_selection(
+    config: &Config,
+    task: &AutonomousTask,
+    available_ghosts: &[String],
+    baseline_ghost: &str,
+) -> Result<GhostSelectionOutcome> {
+    let thresholds = GhostPolicyThresholds {
+        min_samples: GHOST_SPECIALIZATION_MIN_SAMPLES,
+        confidence_threshold: GHOST_SPECIALIZATION_CONFIDENCE_THRESHOLD,
+        rollback_min_samples: GHOST_SPECIALIZATION_ROLLBACK_MIN_SAMPLES,
+        max_allowed_regression: GHOST_SPECIALIZATION_MAX_ALLOWED_REGRESSION,
+        stability_window: GHOST_SPECIALIZATION_STABILITY_WINDOW,
+    };
+    let scope = GhostPolicyScope {
+        repo: task.repo.clone(),
+        lane: task.lane.clone(),
+        risk_tier: Some(task.risk_tier.clone()),
+    };
+    let decision = resolve_ghost_policy_decision(
+        config,
+        &scope,
+        available_ghosts,
+        baseline_ghost,
+        &thresholds,
+    )?;
+    Ok(ghost_selection_outcome_from_decision(decision))
+}
+
+fn ghost_selection_outcome_from_decision(
+    decision: ghost_policy::GhostPolicyDecision,
+) -> GhostSelectionOutcome {
+    let selection_mode = match &decision.action {
+        GhostPolicyAction::Promote { .. } => "promote",
+        GhostPolicyAction::Rollback { .. } => "rollback",
+        GhostPolicyAction::KeepDefault => "fallback_default",
+    };
+    let selected_metrics = if decision.selected_ghost == decision.baseline_ghost {
+        decision.explanation.baseline_metrics.as_ref()
+    } else {
+        decision
+            .explanation
+            .candidate_stats
+            .iter()
+            .find(|c| c.ghost == decision.selected_ghost)
+            .and_then(|c| c.overall.as_ref())
+    };
+    let sample_count = selected_metrics.map(|m| m.tasks_started).unwrap_or(0);
+    let success_rate = selected_metrics.map(|m| m.success_rate);
+    let confidence_gap = if decision.selected_ghost == decision.baseline_ghost {
+        None
+    } else {
+        decision
+            .explanation
+            .candidate_stats
+            .iter()
+            .find(|c| c.ghost == decision.selected_ghost)
+            .and_then(|c| c.score_margin_vs_baseline)
+    };
+
+    GhostSelectionOutcome {
+        selected_ghost: decision.selected_ghost,
+        selection_mode,
+        sample_count,
+        success_rate,
+        confidence_gap,
+        rationale: decision.explanation.reason_codes.join("|"),
+    }
+}
+
+fn resolve_ghost_policy_decision(
+    config: &Config,
+    scope: &GhostPolicyScope,
+    available_ghosts: &[String],
+    baseline_ghost: &str,
+    thresholds: &GhostPolicyThresholds,
+) -> Result<ghost_policy::GhostPolicyDecision> {
+    let conn = kpi::open_connection(config)?;
+    let overall_metrics = kpi::query_ghost_policy_metrics(
+        &conn,
+        &scope.repo,
+        Some(&scope.lane),
+        scope.risk_tier.as_deref(),
+    )?;
+    let recent_metrics = kpi::query_recent_ghost_policy_metrics(
+        &conn,
+        &scope.repo,
+        Some(&scope.lane),
+        scope.risk_tier.as_deref(),
+        thresholds.stability_window,
+    )?;
+    let previous_selected = kpi::query_last_selected_ghost(
+        &conn,
+        &scope.repo,
+        Some(&scope.lane),
+        scope.risk_tier.as_deref(),
+    )?;
+
+    Ok(ghost_policy::evaluate_ghost_policy(
+        scope.clone(),
+        available_ghosts,
+        baseline_ghost,
+        previous_selected.as_deref(),
+        thresholds.clone(),
+        &overall_metrics,
+        &recent_metrics,
+    ))
+}
+
+fn select_default_autonomous_ghost(available_ghosts: &[String]) -> Option<String> {
+    if available_ghosts.iter().any(|g| g == "coder") {
+        Some("coder".to_string())
+    } else {
+        available_ghosts.first().cloned()
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "compact specialization telemetry payload"
+)]
+fn log_ghost_specialization_decision(
+    observer: &ObserverHandle,
+    task: &AutonomousTask,
+    selected_ghost: &str,
+    selection_mode: &str,
+    sample_count: u64,
+    success_rate: Option<f64>,
+    confidence_gap: Option<f64>,
+    rationale: &str,
+) {
+    let success_rate_text = success_rate
+        .map(|v| format!("{:.4}", v))
+        .unwrap_or_else(|| "n/a".to_string());
+    let confidence_gap_text = confidence_gap
+        .map(|v| format!("{:.4}", v))
+        .unwrap_or_else(|| "n/a".to_string());
+
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!(
+            "Ghost specialization lane={} repo={} risk={} selected_ghost={} selection_mode={} sample_count={} success_rate={} confidence_gap={} rationale={}",
+            task.lane,
+            task.repo,
+            task.risk_tier,
+            selected_ghost,
+            selection_mode,
+            sample_count,
+            success_rate_text,
+            confidence_gap_text,
+            rationale
+        ),
+    );
+    tracing::info!(
+        lane = %task.lane,
+        repo = %task.repo,
+        risk = %task.risk_tier,
+        selected_ghost = %selected_ghost,
+        selection_mode = %selection_mode,
+        sample_count,
+        success_rate = %success_rate_text,
+        confidence_gap = %confidence_gap_text,
+        rationale = %rationale,
+        "Ghost specialization decision"
+    );
 }
 
 #[allow(

@@ -12,6 +12,22 @@ profile = "container_strict"
 [llm]
 provider = "openai"
 
+# OpenAI-compatible API server (for IDE/client integrations).
+# Disabled by default; when enabled, Athena exposes:
+# - GET  /v1/models
+# - POST /v1/chat/completions
+[openai_api]
+enabled = false
+bind = "127.0.0.1:8787"
+# Set a bearer key in env (recommended):
+# export ATHENA_OPENAI_API_KEY="change-me"
+api_key_env = "ATHENA_OPENAI_API_KEY"
+principal = "self"
+requests_per_minute = 120
+burst = 30
+# Optional explicit model IDs to advertise (defaults include "athena", current model, and ghost IDs).
+# advertised_models = ["athena", "athena/coder", "athena/scout"]
+
 # Fully local profile (copy into your active config):
 # [runtime]
 # profile = "local_only"
