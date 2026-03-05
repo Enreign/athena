@@ -1,5 +1,4 @@
 mod ci_monitor;
-mod code_index;
 mod config;
 mod confirm;
 mod context_budget;

@@ -1053,6 +1053,17 @@ impl MemoryStore {
         Ok(turns)
     }
 
+    /// Count total turns for a session.
+    pub fn turn_count(&self, session_key: &str) -> Result<usize> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE session_key = ?1",
+            rusqlite::params![session_key],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Delete old conversation turns (older than N days).
     pub fn cleanup_conversations(&self, max_age_days: i64) -> Result<usize> {
         let conn = self.conn()?;

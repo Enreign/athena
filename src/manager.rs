@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, GhostConfig, GhostRole};
 use crate::confirm::Confirmer;
-use crate::context_budget::{
-    self, ClassifierContextPlan, ContextAssemblyMetrics, ContextBudgetPlan, ContextTier,
-};
+use crate::context_budget::{self, ContextAssemblyMetrics};
 use crate::core::{CoreEvent, SessionContext};
 use crate::doctor;
 use crate::dynamic_tools::{self, DynamicTool};
@@ -282,8 +280,8 @@ impl Manager {
 
         // Get recent conversation context BEFORE saving current turn
         // Use adaptive budget to determine how many turns to fetch
-        let classifier_plan =
-            context_budget::infer_classifier_plan(user_input, 0);
+        let turn_count = self.memory.turn_count(&session_key).unwrap_or(0);
+        let classifier_plan = context_budget::infer_classifier_plan(user_input, turn_count);
         let recent = self
             .memory
             .recent_turns(&session_key, classifier_plan.recent_turns_limit)
@@ -315,7 +313,7 @@ impl Manager {
         let enriched = build_enriched_query(&recent, user_input);
 
         // Start context assembly timer
-        let mut ctx_timer = ContextAssemblyMetrics::start(ContextTier::Full);
+        let mut ctx_timer = ContextAssemblyMetrics::start();
 
         // Embed enriched query on blocking thread — only if classifier plan needs memories
         let embed_started = Instant::now();
@@ -399,11 +397,16 @@ impl Manager {
 
         let ctx_metrics = ctx_timer.finish();
         tracing::info!(
-            tier = ?ctx_metrics.tier,
             total_ms = ctx_metrics.total_ms,
             sources_loaded = ctx_metrics.sources_loaded,
             sources_skipped = ctx_metrics.sources_skipped,
-            "Context assembly complete (adaptive budget)"
+            memory_search_ms = ?ctx_metrics.memory_search_ms,
+            embedding_ms = ?ctx_metrics.embedding_ms,
+            kpi_ms = ?ctx_metrics.kpi_ms,
+            memory_limit = classifier_plan.memory_limit,
+            load_kpi = classifier_plan.load_kpi,
+            load_lessons = classifier_plan.load_lessons,
+            "Context assembly complete (adaptive classifier budget)"
         );
 
         // Classify the request (pass conversation history for context)
