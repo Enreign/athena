@@ -32,3 +32,8 @@ docs/maintainability-baseline.json
 # Session artifacts and dev scratch notes
 docs/autopilot-e2e-smoke-2026-03-03-retry.md
 docs/lane-test-note.md
+
+# Vaultwarden integration scripts — not for public release
+scripts/athena-with-vaultwarden.sh
+docs/secrets-vaultwarden.md
+.env.vaultwarden.example
