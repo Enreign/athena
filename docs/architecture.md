@@ -28,7 +28,7 @@ graph TB
     subgraph Execution
         MGR[Manager]
         EXEC[Executor]
-        STRAT[Strategy<br/>react / plan-act / direct]
+        STRAT[Strategy<br/>react / code]
         TR[ToolRegistry]
         DOCKER[DockerSession]
     end
@@ -102,7 +102,7 @@ stateDiagram-v2
     [*] --> Idle
 
     Idle --> Precheck : task dispatched
-    Precheck --> Done : direct tool completion
+    Precheck --> Done : direct tool completion (precheck path)
     Precheck --> StrategyLoop : needs multi-step
 
     StrategyLoop --> ToolCall : LLM selects tool

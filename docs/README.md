@@ -48,6 +48,10 @@ Documentation index for the Athena multi-agent orchestration system.
 | [rust-audit-2026-03-02.md](rust-audit-2026-03-02.md) | Rust dependency security audit — 2026-03-02 |
 | [security-attestation.md](security-attestation.md) | `athena doctor --security` attestation schema, samples, and CI interpretation guide |
 | [openai-compatible-api.md](openai-compatible-api.md) | OpenAI-compatible API setup, supported fields, and documented deviations |
+| [mcp-integration.md](mcp-integration.md) | MCP server/tool configuration, namespacing, allowlists, and troubleshooting |
+| [session-review-explainability.md](session-review-explainability.md) | Session activity log, explainability workflow, and Telegram activity commands |
+| [ghost-specialization.md](ghost-specialization.md) | KPI-driven autonomous ghost selection policy and decision telemetry |
+| [prompt-scanner.md](prompt-scanner.md) | Input-layer prompt scanner modes, thresholds, allowlists, and override behavior |
 | [lane-test-note.md](lane-test-note.md) | Notes on KPI lane test coverage |
 | [parsing-hardening-plan.md](parsing-hardening-plan.md) | Plan for hardening LLM-output parsing |
 

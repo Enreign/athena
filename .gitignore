@@ -15,3 +15,20 @@ hello.txt
 __pycache__/
 *.pyc
 .context/
+
+# Internal planning docs — not for public release
+docs/orchestration-layer-100-plan.md
+docs/conductor-athena-gap-analysis.md
+docs/lny-30-epic-rollout.md
+docs/parsing-hardening-plan.md
+
+# Dated security audits — rotate, don't publish
+docs/rust-audit-2026-03-02.md
+
+# Machine-generated CI artifacts — no public value
+docs/hygiene-baseline.json
+docs/maintainability-baseline.json
+
+# Session artifacts and dev scratch notes
+docs/autopilot-e2e-smoke-2026-03-03-retry.md
+docs/lane-test-note.md
