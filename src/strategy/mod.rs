@@ -1,5 +1,6 @@
 pub mod code;
 pub mod react;
+pub mod scout;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -62,6 +63,7 @@ pub fn strategy_from_config(name: &str) -> Result<Box<dyn LoopStrategy>> {
     match name {
         "react" => Ok(Box::new(react::ReactStrategy)),
         "code" => Ok(Box::new(code::CodeStrategy)),
+        "scout" => Ok(Box::new(scout::ScoutStrategy)),
         other => Err(AthenaError::Config(format!("Unknown strategy: {}", other))),
     }
 }

@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, GhostConfig, GhostRole};
 use crate::confirm::Confirmer;
+use crate::context_budget::{
+    self, ClassifierContextPlan, ContextAssemblyMetrics, ContextBudgetPlan, ContextTier,
+};
 use crate::core::{CoreEvent, SessionContext};
 use crate::doctor;
 use crate::dynamic_tools::{self, DynamicTool};
@@ -278,9 +281,12 @@ impl Manager {
         let session_key = session.session_key();
 
         // Get recent conversation context BEFORE saving current turn
+        // Use adaptive budget to determine how many turns to fetch
+        let classifier_plan =
+            context_budget::infer_classifier_plan(user_input, 0);
         let recent = self
             .memory
-            .recent_turns(&session_key, 20)
+            .recent_turns(&session_key, classifier_plan.recent_turns_limit)
             .unwrap_or_default();
 
         // Save user turn
@@ -308,8 +314,18 @@ impl Manager {
         let (conversation_summary, recent_messages) = summarize_conversation(&recent);
         let enriched = build_enriched_query(&recent, user_input);
 
-        // Embed enriched query on blocking thread to avoid stalling tokio
-        let query_embedding = embed_blocking(&self.embedder, &enriched).await;
+        // Start context assembly timer
+        let mut ctx_timer = ContextAssemblyMetrics::start(ContextTier::Full);
+
+        // Embed enriched query on blocking thread — only if classifier plan needs memories
+        let embed_started = Instant::now();
+        let query_embedding = if classifier_plan.memory_limit > 0 {
+            embed_blocking(&self.embedder, &enriched).await
+        } else {
+            ctx_timer.record_skipped();
+            None
+        };
+        ctx_timer.record_embedding(embed_started.elapsed().as_millis());
 
         // Start Langfuse trace for this chat request
         let lf_trace = self.langfuse.as_ref().map(|lf| {
@@ -323,17 +339,30 @@ impl Manager {
             )
         });
 
-        // Load relevant memories via hybrid search (keyword + semantic)
-        let mem_span = lf_trace
-            .as_ref()
-            .map(|t| t.span("memory_retrieval", Some(user_input)));
-        let memories = self
-            .memory
-            .search_hybrid(user_input, query_embedding.as_deref(), 10)
-            .unwrap_or_default();
-        if let Some(s) = mem_span {
-            s.end(Some(&format!("{} memories found", memories.len())));
-        }
+        // Load relevant memories via hybrid search — gated on classifier budget
+        let mem_started = Instant::now();
+        let memories = if classifier_plan.memory_limit > 0 {
+            let mem_span = lf_trace
+                .as_ref()
+                .map(|t| t.span("memory_retrieval", Some(user_input)));
+            let mems = self
+                .memory
+                .search_hybrid(
+                    user_input,
+                    query_embedding.as_deref(),
+                    classifier_plan.memory_limit,
+                )
+                .unwrap_or_default();
+            if let Some(s) = mem_span {
+                s.end(Some(&format!("{} memories found", mems.len())));
+            }
+            ctx_timer.record_loaded();
+            mems
+        } else {
+            ctx_timer.record_skipped();
+            Vec::new()
+        };
+        ctx_timer.record_memory_search(mem_started.elapsed().as_millis());
 
         let memory_context = format_memory_context(&memories);
         let user_context_section = self.build_user_profile_section(&session.user_id);
@@ -341,11 +370,25 @@ impl Manager {
         let metrics_section = self.build_metrics_section();
         let mood_section = self.build_mood_section();
         let relationship_section = self.build_relationship_section(&session.user_id);
+
+        // Build routing context — gated on classifier budget
         let routing_context_started = Instant::now();
-        let routing_context = self
-            .build_routing_prompt_context(user_input, &recent_messages)
-            .await;
+        let routing_context = if classifier_plan.load_kpi || classifier_plan.load_lessons {
+            ctx_timer.record_loaded();
+            self.build_routing_prompt_context(user_input, &recent_messages)
+                .await
+        } else {
+            ctx_timer.record_skipped();
+            RoutingPromptContext {
+                scope: infer_kpi_prompt_scope(user_input, &recent_messages),
+                kpi_context: String::new(),
+                lesson_context: String::new(),
+                kpi_available: false,
+                lesson_count: 0,
+            }
+        };
         let routing_context_ms = routing_context_started.elapsed().as_millis();
+        ctx_timer.record_kpi(routing_context_ms);
         if routing_context_ms > ROUTING_CONTEXT_LATENCY_WARN_MS {
             tracing::warn!(
                 routing_context_ms,
@@ -353,6 +396,15 @@ impl Manager {
                 "Routing context build latency exceeded threshold"
             );
         }
+
+        let ctx_metrics = ctx_timer.finish();
+        tracing::info!(
+            tier = ?ctx_metrics.tier,
+            total_ms = ctx_metrics.total_ms,
+            sources_loaded = ctx_metrics.sources_loaded,
+            sources_skipped = ctx_metrics.sources_skipped,
+            "Context assembly complete (adaptive budget)"
+        );
 
         // Classify the request (pass conversation history for context)
         let classify_gen = lf_trace.as_ref().map(|t| {
