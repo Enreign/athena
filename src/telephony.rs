@@ -145,35 +145,49 @@ fn mulaw_decode(byte: u8) -> i16 {
     if sign == 0 { sample } else { -sample }
 }
 
-/// Encode 16-bit PCM sample to mulaw byte.
+/// Encode 16-bit PCM sample to mulaw byte (ITU-T G.711).
 fn mulaw_encode(sample: i16) -> u8 {
-    const BIAS: i16 = 0x84;
-    const MAX: i16 = 0x7FFF;
+    // Exponent lookup: maps (biased_sample >> 7) → exponent 0..7.
+    // Covers biased magnitudes 0..32767 in ranges 0..127, 128..255, ..., 16384..32767.
+    #[rustfmt::skip]
+    const EXP_LUT: [u8; 256] = [
+        0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3,
+        4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    ];
+
+    const BIAS: i32 = 0x84;
+    const CLIP: i32 = 32767;
 
     let sign: u8;
-    let mut sample = sample;
-    if sample < 0 {
+    let mut s = sample as i32;
+    if s < 0 {
         sign = 0x80;
-        sample = -sample;
+        s = -s;
     } else {
         sign = 0;
     }
-    if sample > MAX {
-        sample = MAX;
-    }
-    sample += BIAS;
-
-    let mut exponent: u8 = 7;
-    let mut mask: i16 = 0x4000;
-    while exponent > 0 {
-        if (sample & mask) != 0 {
-            break;
-        }
-        exponent -= 1;
-        mask >>= 1;
+    s += BIAS;
+    // Clip after adding bias (G.711 standard behavior)
+    if s > CLIP {
+        s = CLIP;
     }
 
-    let mantissa = ((sample >> (exponent as i16 + 3)) & 0x0F) as u8;
+    let exponent = EXP_LUT[(s >> 7) as usize];
+    let mantissa = ((s >> (exponent as i32 + 3)) & 0x0F) as u8;
     !(sign | (exponent << 4) | mantissa)
 }
 
@@ -321,65 +335,93 @@ async fn synthesize_speech(
 }
 
 /// Parse a WAV file and return f32 PCM samples (mono, resampled to target_rate if needed).
+///
+/// Parses the chunk tree properly to support non-standard WAV headers (e.g. extended fmt,
+/// extra metadata chunks before data) produced by some TTS servers.
 fn wav_to_f32_mono(wav_bytes: &[u8], target_rate: u32) -> Result<Vec<f32>, String> {
-    if wav_bytes.len() < 44 {
+    if wav_bytes.len() < 12 {
         return Err("WAV too short".into());
     }
-    let channels = u16::from_le_bytes([wav_bytes[22], wav_bytes[23]]) as usize;
-    let src_rate = u32::from_le_bytes([
-        wav_bytes[24],
-        wav_bytes[25],
-        wav_bytes[26],
-        wav_bytes[27],
-    ]);
-    let bits = u16::from_le_bytes([wav_bytes[34], wav_bytes[35]]);
+    if &wav_bytes[0..4] != b"RIFF" || &wav_bytes[8..12] != b"WAVE" {
+        return Err("Not a RIFF/WAVE file".into());
+    }
 
-    // Find data chunk
-    let mut pos = 12;
-    while pos + 8 < wav_bytes.len() {
-        let chunk_id = &wav_bytes[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes([
+    let mut channels: Option<usize> = None;
+    let mut src_rate: Option<u32> = None;
+    let mut bits: Option<u16> = None;
+    let mut pcm_data: Option<&[u8]> = None;
+
+    // Walk all chunks starting at byte 12
+    let mut pos = 12usize;
+    while pos + 8 <= wav_bytes.len() {
+        let id = &wav_bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([
             wav_bytes[pos + 4],
             wav_bytes[pos + 5],
             wav_bytes[pos + 6],
             wav_bytes[pos + 7],
         ]) as usize;
-        if chunk_id == b"data" {
-            let end = std::cmp::min(pos + 8 + chunk_size, wav_bytes.len());
-            let data = &wav_bytes[pos + 8..end];
-            let samples: Vec<f32> = match bits {
-                16 => data
-                    .chunks_exact(2 * channels)
-                    .map(|frame| {
-                        let s = i16::from_le_bytes([frame[0], frame[1]]);
-                        s as f32 / 32768.0
-                    })
-                    .collect(),
-                _ => return Err(format!("Unsupported WAV bit depth: {}", bits)),
-            };
+        let data_start = pos + 8;
+        let data_end = data_start.saturating_add(size).min(wav_bytes.len());
 
-            if src_rate != target_rate && src_rate > 0 {
-                let ratio = src_rate as f64 / target_rate as f64;
-                let out_len = (samples.len() as f64 / ratio) as usize;
-                let mut resampled = Vec::with_capacity(out_len);
-                for i in 0..out_len {
-                    let src_idx = i as f64 * ratio;
-                    let idx = src_idx as usize;
-                    let frac = src_idx - idx as f64;
-                    let s0 = samples.get(idx).copied().unwrap_or(0.0);
-                    let s1 = samples.get(idx + 1).copied().unwrap_or(s0);
-                    resampled.push(s0 + (s1 - s0) * frac as f32);
-                }
-                return Ok(resampled);
-            }
-            return Ok(samples);
+        if id == b"fmt " && size >= 16 {
+            let chunk = &wav_bytes[data_start..data_end];
+            channels = Some(u16::from_le_bytes([chunk[2], chunk[3]]) as usize);
+            src_rate = Some(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
+            bits = Some(u16::from_le_bytes([chunk[14], chunk[15]]));
+        } else if id == b"data" {
+            pcm_data = Some(&wav_bytes[data_start..data_end]);
         }
-        pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 {
-            pos += 1;
+
+        // Both chunks found — no need to keep scanning
+        if channels.is_some() && pcm_data.is_some() {
+            break;
         }
+
+        // Advance: WAV chunks are word-aligned (pad byte if odd size)
+        pos = data_start + size + (size % 2);
     }
-    Err("WAV data chunk not found".into())
+
+    let channels = channels.ok_or("WAV fmt chunk not found")?;
+    let src_rate = src_rate.ok_or("WAV fmt chunk not found")?;
+    let bits = bits.ok_or("WAV fmt chunk not found")?;
+    let data = pcm_data.ok_or("WAV data chunk not found")?;
+
+    if channels == 0 {
+        return Err("WAV has 0 channels".into());
+    }
+
+    let samples: Vec<f32> = match bits {
+        16 => data
+            .chunks_exact(2 * channels)
+            .map(|frame| {
+                let s = i16::from_le_bytes([frame[0], frame[1]]);
+                s as f32 / 32768.0
+            })
+            .collect(),
+        _ => return Err(format!("Unsupported WAV bit depth: {}", bits)),
+    };
+
+    if samples.is_empty() {
+        return Ok(samples);
+    }
+
+    if src_rate != target_rate && src_rate > 0 {
+        let ratio = src_rate as f64 / target_rate as f64;
+        let out_len = (samples.len() as f64 / ratio) as usize;
+        let mut resampled = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            let src_idx = i as f64 * ratio;
+            let idx = src_idx as usize;
+            let frac = src_idx - idx as f64;
+            let s0 = samples.get(idx).copied().unwrap_or(0.0);
+            let s1 = samples.get(idx + 1).copied().unwrap_or(s0);
+            resampled.push(s0 + (s1 - s0) * frac as f32);
+        }
+        return Ok(resampled);
+    }
+
+    Ok(samples)
 }
 
 // ── Shared App State ─────────────────────────────────────────────────
@@ -440,7 +482,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let mut in_speech = false;
     let mut silence_frames: u32 = 0;
 
-    let silence_threshold = (state.config.vad_silence_ms as u32) / 20;
+    // How many 20ms frames must be silent before we consider speech done.
+    // Minimum 1 to avoid triggering on every non-speech frame.
+    let silence_threshold = ((state.config.vad_silence_ms as u32) / 20).max(1);
 
     // Try to initialize VAD
     let vad_path = state
@@ -717,9 +761,10 @@ async fn process_utterance(
         return;
     }
 
-    // Truncate long responses for phone (conversations should be concise)
-    let voice_response = if full_response.len() > 500 {
-        let truncated = &full_response[..500];
+    // Truncate long responses for phone (conversations should be concise).
+    // Use char boundary to avoid panicking on multibyte characters.
+    let voice_response = if full_response.chars().count() > 500 {
+        let truncated: String = full_response.chars().take(500).collect();
         match truncated.rfind(". ") {
             Some(pos) => format!("{}.", &truncated[..pos]),
             None => format!("{}...", truncated),
@@ -847,4 +892,214 @@ pub async fn run_telephony(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── mulaw codec ──────────────────────────────────────────────────
+
+    /// Encoding then decoding should approximate the original value.
+    /// mulaw has ~5-bit mantissa precision so allow ±2% error.
+    #[test]
+    fn mulaw_roundtrip_sine() {
+        for i in 0..=100i32 {
+            let original = (i * 327) as i16; // 0..32700 range
+            let encoded = mulaw_encode(original);
+            let decoded = mulaw_decode(encoded);
+            let err = (decoded as i32 - original as i32).abs();
+            let tolerance = (original.abs() as i32 / 20).max(10);
+            assert!(
+                err <= tolerance,
+                "roundtrip error too large: original={}, decoded={}, err={}",
+                original,
+                decoded,
+                err
+            );
+        }
+    }
+
+    /// Negative values should round-trip with the same precision.
+    #[test]
+    fn mulaw_roundtrip_negative() {
+        for i in 0..=100i32 {
+            let original = -((i * 327) as i16);
+            let encoded = mulaw_encode(original);
+            let decoded = mulaw_decode(encoded);
+            let err = (decoded as i32 - original as i32).abs();
+            let tolerance = (original.abs() as i32 / 20).max(10);
+            assert!(
+                err <= tolerance,
+                "roundtrip error too large: original={}, decoded={}, err={}",
+                original,
+                decoded,
+                err
+            );
+        }
+    }
+
+    /// MAX i16 sample must not panic (regression for i16 overflow bug).
+    #[test]
+    fn mulaw_encode_max_no_overflow() {
+        let _ = mulaw_encode(i16::MAX);
+        let _ = mulaw_encode(i16::MIN);
+    }
+
+    /// Silence (0) should encode/decode cleanly.
+    #[test]
+    fn mulaw_silence() {
+        let encoded = mulaw_encode(0);
+        let decoded = mulaw_decode(encoded);
+        // mulaw silence decodes to a small value due to BIAS, not exactly 0
+        assert!(
+            decoded.abs() < 200,
+            "silence decoded to unexpected value: {}",
+            decoded
+        );
+    }
+
+    /// mulaw_to_f32 output must be within [-1, 1].
+    #[test]
+    fn mulaw_to_f32_bounds() {
+        let all_bytes: Vec<u8> = (0u8..=255).collect();
+        for &s in mulaw_to_f32(&all_bytes).iter() {
+            assert!(
+                s >= -1.0 && s <= 1.0,
+                "mulaw_to_f32 out of [-1,1]: {}",
+                s
+            );
+        }
+    }
+
+    // ── pcm_to_wav / wav_to_f32_mono roundtrip ────────────────────────
+
+    fn make_test_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+        pcm_to_wav(samples, sample_rate)
+    }
+
+    #[test]
+    fn wav_roundtrip_silence() {
+        let silence = vec![0.0f32; 160];
+        let wav = make_test_wav(&silence, 8000);
+        let decoded = wav_to_f32_mono(&wav, 8000).unwrap();
+        assert_eq!(decoded.len(), silence.len());
+        for s in &decoded {
+            assert!(s.abs() < 1e-4, "silence not silent: {}", s);
+        }
+    }
+
+    #[test]
+    fn wav_roundtrip_sine_8khz() {
+        let samples: Vec<f32> = (0..800)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 8000.0).sin() * 0.5)
+            .collect();
+        let wav = make_test_wav(&samples, 8000);
+        let decoded = wav_to_f32_mono(&wav, 8000).unwrap();
+        assert_eq!(decoded.len(), samples.len());
+        let max_err = samples
+            .iter()
+            .zip(&decoded)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_err < 0.001, "WAV roundtrip error too large: {}", max_err);
+    }
+
+    #[test]
+    fn wav_header_magic() {
+        let wav = make_test_wav(&[0.0; 8], 8000);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[36..40], b"data");
+    }
+
+    #[test]
+    fn wav_rejects_short_input() {
+        assert!(wav_to_f32_mono(&[0u8; 10], 8000).is_err());
+    }
+
+    #[test]
+    fn wav_rejects_non_riff() {
+        let mut bad = vec![0u8; 44];
+        bad[0..4].copy_from_slice(b"OGG "); // not RIFF
+        assert!(wav_to_f32_mono(&bad, 8000).is_err());
+    }
+
+    // ── resampling ────────────────────────────────────────────────────
+
+    /// Downsampling from 24kHz to 8kHz should produce 1/3 as many samples.
+    #[test]
+    fn wav_resampling_24k_to_8k() {
+        let samples: Vec<f32> = (0..2400).map(|i| (i as f32 / 2400.0).sin()).collect();
+        let wav = make_test_wav(&samples, 24000);
+        let decoded = wav_to_f32_mono(&wav, 8000).unwrap();
+        let expected_len = 2400 / 3;
+        let tolerance = 5usize;
+        assert!(
+            decoded.len().abs_diff(expected_len) <= tolerance,
+            "resampled length {} far from expected {}",
+            decoded.len(),
+            expected_len
+        );
+    }
+
+    /// When src_rate == target_rate, no resampling should occur.
+    #[test]
+    fn wav_no_resampling_same_rate() {
+        let samples: Vec<f32> = (0..160).map(|i| i as f32 / 160.0).collect();
+        let wav = make_test_wav(&samples, 16000);
+        let decoded = wav_to_f32_mono(&wav, 16000).unwrap();
+        assert_eq!(decoded.len(), samples.len());
+    }
+
+    // ── VAD silence threshold ─────────────────────────────────────────
+
+    /// vad_silence_ms less than one frame period (20ms) must still give threshold >= 1.
+    #[test]
+    fn vad_silence_threshold_minimum_one() {
+        for ms in [0u64, 1, 10, 19] {
+            let threshold = ((ms as u32) / 20).max(1);
+            assert_eq!(threshold, 1, "threshold for {}ms should be 1", ms);
+        }
+        // 20ms should give exactly 1
+        assert_eq!(((20u32) / 20).max(1), 1);
+        // 800ms (default) should give 40
+        assert_eq!(((800u32) / 20).max(1), 40);
+    }
+
+    // ── response truncation ───────────────────────────────────────────
+
+    /// Truncation must not panic on multibyte (emoji) content.
+    #[test]
+    fn truncate_multibyte_no_panic() {
+        // 501 emoji = well over 500 bytes but exactly 501 chars
+        let long: String = std::iter::repeat('🎙').take(501).collect();
+        // Replicate truncation logic from process_utterance
+        let voice_response = if long.chars().count() > 500 {
+            let truncated: String = long.chars().take(500).collect();
+            match truncated.rfind(". ") {
+                Some(pos) => format!("{}.", &truncated[..pos]),
+                None => format!("{}...", truncated),
+            }
+        } else {
+            long.clone()
+        };
+        assert!(voice_response.ends_with("..."));
+        assert!(voice_response.chars().count() <= 503); // 500 + "..."
+    }
+
+    /// ASCII input under 500 chars should be returned unmodified.
+    #[test]
+    fn truncate_short_string_unchanged() {
+        let short = "Hello world.".to_string();
+        let voice_response = if short.chars().count() > 500 {
+            unreachable!()
+        } else {
+            short.clone()
+        };
+        assert_eq!(voice_response, short);
+    }
 }
