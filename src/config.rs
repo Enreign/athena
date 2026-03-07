@@ -329,6 +329,87 @@ fn default_zen_url() -> String {
     "https://opencode.ai/zen/v1".into()
 }
 
+trait OpenAiCompatibleOrchestratorConfig {
+    fn url(&self) -> &str;
+    fn api_key(&self) -> &Option<String>;
+    fn classifier_model(&self) -> &Option<String>;
+    fn temperature(&self) -> f32;
+    fn max_tokens(&self) -> u32;
+    fn context_window(&self) -> u64;
+}
+
+impl OpenAiCompatibleOrchestratorConfig for OpenRouterConfig {
+    fn url(&self) -> &str {
+        &self.url
+    }
+    fn api_key(&self) -> &Option<String> {
+        &self.api_key
+    }
+    fn classifier_model(&self) -> &Option<String> {
+        &self.classifier_model
+    }
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+    fn max_tokens(&self) -> u32 {
+        self.max_tokens
+    }
+    fn context_window(&self) -> u64 {
+        self.context_window
+    }
+}
+
+impl OpenAiCompatibleOrchestratorConfig for ZenConfig {
+    fn url(&self) -> &str {
+        &self.url
+    }
+    fn api_key(&self) -> &Option<String> {
+        &self.api_key
+    }
+    fn classifier_model(&self) -> &Option<String> {
+        &self.classifier_model
+    }
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+    fn max_tokens(&self) -> u32 {
+        self.max_tokens
+    }
+    fn context_window(&self) -> u64 {
+        self.context_window
+    }
+}
+
+fn build_openai_compatible_orchestrator<C: OpenAiCompatibleOrchestratorConfig>(
+    cfg: &C,
+    fallback: &Arc<dyn LlmProvider>,
+    api_key_env: &str,
+    missing_key_msg: &str,
+    label: &str,
+) -> Result<Arc<dyn LlmProvider>> {
+    match cfg.classifier_model() {
+        Some(model) => {
+            let api_key = cfg
+                .api_key()
+                .clone()
+                .or_else(|| std::env::var(api_key_env).ok())
+                .ok_or_else(|| AthenaError::Config(missing_key_msg.into()))?;
+            Ok(Arc::new(OpenAiCompatibleClient::new(
+                OpenAiCompatibleConfig {
+                    url: cfg.url().to_string(),
+                    api_key,
+                    model: model.clone(),
+                    temperature: cfg.temperature(),
+                    max_tokens: cfg.max_tokens(),
+                    context_window: cfg.context_window(),
+                },
+                label,
+            )))
+        }
+        None => Ok(fallback.clone()),
+    }
+}
+
 #[derive(Deserialize, Clone)]
 pub struct TelegramConfig {
     /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
@@ -1777,91 +1858,75 @@ impl Config {
         fallback: &Arc<dyn LlmProvider>,
     ) -> Result<Arc<dyn LlmProvider>> {
         match provider {
-            "ollama" => match &self.ollama.classifier_model {
-                Some(model) => {
-                    let mut cfg = self.ollama.clone();
-                    cfg.model = model.clone();
-                    Ok(Arc::new(OllamaClient::new(cfg)))
-                }
-                None => Ok(fallback.clone()),
-            },
-            "openai" | "ouath" => {
-                let cfg = self.openai.clone().unwrap_or_default();
-                match &cfg.classifier_model {
-                    Some(model) => {
-                        let mut cloned = cfg.clone();
-                        cloned.model = model.clone();
-                        Ok(Arc::new(OpenAiClient::new(cloned)))
-                    }
-                    None => Ok(fallback.clone()),
-                }
-            }
-            "openrouter" => {
-                let cfg = self.openrouter.as_ref().ok_or_else(|| {
-                    AthenaError::Config(
-                        "provider = \"openrouter\" but [openrouter] section is missing".into(),
-                    )
-                })?;
-                match &cfg.classifier_model {
-                    Some(model) => {
-                        let api_key = cfg
-                            .api_key
-                            .clone()
-                            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                            .ok_or_else(|| {
-                                AthenaError::Config(
-                                    "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)"
-                                        .into(),
-                                )
-                            })?;
-                        Ok(Arc::new(OpenAiCompatibleClient::new(
-                            OpenAiCompatibleConfig {
-                                url: cfg.url.clone(),
-                                api_key,
-                                model: model.clone(),
-                                temperature: cfg.temperature,
-                                max_tokens: cfg.max_tokens,
-                                context_window: cfg.context_window,
-                            },
-                            "OpenRouter/orchestrator",
-                        )))
-                    }
-                    None => Ok(fallback.clone()),
-                }
-            }
-            "zen" => {
-                let cfg = self.zen.as_ref().ok_or_else(|| {
-                    AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
-                })?;
-                match &cfg.classifier_model {
-                    Some(model) => {
-                        let api_key = cfg
-                            .api_key
-                            .clone()
-                            .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
-                            .ok_or_else(|| {
-                                AthenaError::Config(
-                                    "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)"
-                                        .into(),
-                                )
-                            })?;
-                        Ok(Arc::new(OpenAiCompatibleClient::new(
-                            OpenAiCompatibleConfig {
-                                url: cfg.url.clone(),
-                                api_key,
-                                model: model.clone(),
-                                temperature: cfg.temperature,
-                                max_tokens: cfg.max_tokens,
-                                context_window: cfg.context_window,
-                            },
-                            "Zen/orchestrator",
-                        )))
-                    }
-                    None => Ok(fallback.clone()),
-                }
-            }
+            "ollama" => self.build_orchestrator_ollama(fallback),
+            "openai" | "ouath" => self.build_orchestrator_openai(fallback),
+            "openrouter" => self.build_orchestrator_openrouter(fallback),
+            "zen" => self.build_orchestrator_zen(fallback),
             _ => Ok(fallback.clone()),
         }
+    }
+
+    fn build_orchestrator_ollama(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        match &self.ollama.classifier_model {
+            Some(model) => {
+                let mut cfg = self.ollama.clone();
+                cfg.model = model.clone();
+                Ok(Arc::new(OllamaClient::new(cfg)))
+            }
+            None => Ok(fallback.clone()),
+        }
+    }
+
+    fn build_orchestrator_openai(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        let cfg = self.openai.clone().unwrap_or_default();
+        match &cfg.classifier_model {
+            Some(model) => {
+                let mut cloned = cfg.clone();
+                cloned.model = model.clone();
+                Ok(Arc::new(OpenAiClient::new(cloned)))
+            }
+            None => Ok(fallback.clone()),
+        }
+    }
+
+    fn build_orchestrator_openrouter(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        let cfg = self.openrouter.as_ref().ok_or_else(|| {
+            AthenaError::Config(
+                "provider = \"openrouter\" but [openrouter] section is missing".into(),
+            )
+        })?;
+        build_openai_compatible_orchestrator(
+            cfg,
+            fallback,
+            "OPENROUTER_API_KEY",
+            "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)",
+            "OpenRouter/orchestrator",
+        )
+    }
+
+    fn build_orchestrator_zen(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        let cfg = self.zen.as_ref().ok_or_else(|| {
+            AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
+        })?;
+        build_openai_compatible_orchestrator(
+            cfg,
+            fallback,
+            "OPENCODE_API_KEY",
+            "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)",
+            "Zen/orchestrator",
+        )
     }
 
     /// Resolve the db path, expanding ~ to home dir
