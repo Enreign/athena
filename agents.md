@@ -78,6 +78,7 @@ Before opening a PR or submitting a patch:
 7. Run `scripts/maintainability_check.py` if you changed core architecture or tool behavior.
 8. After each bigger change, run the relevant tests and report results without using the phrase "Tests not run." If tests fail, fix the issues and iterate until they pass.
 9. If there is a suggestion to run a command, run it.
+10. **Update the wiki** when relevant. Clone `https://github.com/Enreign/athena.wiki.git`, edit the appropriate page, commit, and push. Update the wiki when you: change CLI flags or commands, add/remove config keys, change LLM provider auth, change the security model or autonomy ladder, add/remove observability event types, change memory system behavior, fix a non-obvious bug others are likely to hit (add to Troubleshooting), or change the architecture in a meaningful way. The wiki is the primary reference for users — keep it accurate.
 
 Review expectations:
 - No hardcoded credentials or tokens.
