@@ -240,6 +240,7 @@ listen_port = 8089
 stt_url = "http://localhost:8787/v1/audio/transcriptions"
 # stt_api_key = "..."                           # only needed for cloud STT
 stt_model = "whisper-large-v3"
+# stt_language = "en"                            # force language (omit for auto-detect)
 
 # TTS: use any OpenAI-compatible TTS API
 # Option 1: Piper TTS (self-hosted, free) — pip install piper-tts
@@ -255,6 +256,7 @@ greeting = "Hello, this is Athena. How can I help you?"
 
 # Voice Activity Detection (Silero VAD — free, local, ONNX)
 # Download model: curl -L -o ~/.athena/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+# vad_enabled = true                           # set false to force energy-only detection
 # vad_model_path = "~/.athena/silero_vad.onnx"  # auto-detected if omitted
 vad_silence_ms = 800                             # ms of silence before end-of-speech
 vad_threshold = 0.5                              # speech probability threshold (0.0 - 1.0)

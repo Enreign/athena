@@ -2,12 +2,13 @@
 """
 Dead code gate for Athena.
 
-Runs `cargo check` (and optionally `cargo check --features telegram`) and
-fails if ANY dead_code warnings are emitted.  Call from CI after the normal
-`cargo check` step so incremental caches are warm.
+Runs `cargo check` (and optionally `cargo check --features telegram` and/or
+`cargo check --features telephony`) and fails if ANY dead_code warnings are
+emitted.  Call from CI after the normal `cargo check` step so incremental
+caches are warm.
 
 Usage:
-    ./scripts/dead_code_check.py [--telegram]
+    ./scripts/dead_code_check.py [--telegram] [--telephony]
 
 Exit codes:
     0  – no dead code
@@ -40,12 +41,15 @@ def run_check(extra_args: list[str]) -> tuple[bool, list[str]]:
 
 def main() -> int:
     use_telegram = "--telegram" in sys.argv
+    use_telephony = "--telephony" in sys.argv
 
     checks = [
         ("default", []),
     ]
     if use_telegram:
         checks.append(("telegram feature", ["--features", "telegram"]))
+    if use_telephony:
+        checks.append(("telephony feature", ["--features", "telephony"]))
 
     all_clean = True
 

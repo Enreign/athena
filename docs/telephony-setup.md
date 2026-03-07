@@ -12,22 +12,26 @@ Phone call support for Athena via Twilio Media Streams.
                                   │  /media-stream ─▶ WebSocket          │
                                   │    ├─ Silero VAD (speech detection)  │
                                   │    ├─ Whisper STT (transcription)    │
-                                  │    ├─ LLM (response generation)     │
-                                  │    └─ TTS (speech synthesis)        │
+                                  │    ├─ LLM (response generation)      │
+                                  │    └─ TTS (speech synthesis)         │
                                   └──────────────────────────────────────┘
 ```
+
+> **Local testing without Twilio:** Steps 1–3 and 7 are sufficient to run and
+> talk to Athena locally using `scripts/local_call.py`. Steps 4–6 are only
+> needed if you want real phone calls via a Twilio number.
 
 ---
 
 ## Prerequisites
 
-| Component | Purpose | Options |
-|-----------|---------|---------|
-| Twilio account | Phone number + Media Streams | [twilio.com/try-twilio](https://www.twilio.com/try-twilio) (free trial) |
-| STT server | Speech-to-Text | faster-whisper-server, whisper.cpp, Groq (free tier) |
-| TTS server | Text-to-Speech | Piper TTS, Kokoro TTS, OpenAI TTS |
-| Silero VAD model | Voice Activity Detection | ~2MB ONNX file, runs locally |
-| Public URL | Twilio webhook reachability | ngrok, Cloudflare Tunnel, or public server |
+| Component | Purpose | Required for |
+|-----------|---------|--------------|
+| STT server | Speech-to-Text | Local + Twilio |
+| TTS server | Text-to-Speech | Local + Twilio |
+| Silero VAD model | Voice Activity Detection | Local + Twilio |
+| Twilio account | Phone number + Media Streams | Twilio only |
+| Public URL (ngrok) | Twilio webhook reachability | Twilio only |
 
 ---
 
@@ -46,18 +50,31 @@ Verify: `ls -lh ~/.athena/silero_vad.onnx` — should be ~2MB.
 Pick one:
 
 **Option A — faster-whisper-server (recommended, self-hosted, free)**
+
+Requires Python ≥ 3.10. On macOS with system Python 3.9, install Python 3.11 first:
+
 ```bash
-pip install faster-whisper-server
-faster-whisper-server --model Systran/faster-whisper-large-v3 --port 8787
+brew install python@3.11
+pip3.11 install faster-whisper-server
+
+# Workaround for a pip-install bug: the package expects pyproject.toml in site-packages
+echo '[project]
+name = "faster-whisper-server"
+version = "0.0.2"' > "$(pip3.11 show faster-whisper-server | grep Location | cut -d' ' -f2)/pyproject.toml"
+
+# Model is a positional argument (not --model)
+faster-whisper-server Systran/faster-whisper-large-v3 --port 8787
 ```
 
 **Option B — whisper.cpp (self-hosted, free)**
+
+See [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for build instructions, then:
 ```bash
-# Build whisper.cpp, then:
 ./server -m models/ggml-large-v3.bin --port 8787
 ```
 
 **Option C — Groq (cloud, free tier)**
+
 No server needed — just set the URL and API key in config:
 ```toml
 stt_url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -68,44 +85,38 @@ stt_api_key = "gsk_..."   # or ATHENA_STT_API_KEY env var
 
 Pick one:
 
-**Option A — Piper TTS (self-hosted, free)**
+**Option A — Kokoro TTS via Docker (self-hosted, free)**
+
+[remsky/kokoro-fastapi](https://github.com/remsky/kokoro-fastapi) provides an OpenAI-compatible `/v1/audio/speech` endpoint:
+
 ```bash
-pip install piper-tts
-# See piper-tts docs for server mode
+docker run -d -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.2
 ```
 
-**Option B — Kokoro TTS (self-hosted, free)**
-```bash
-pip install kokoro
-# Start with OpenAI-compatible endpoint on port 8880
+Then set in config:
+```toml
+tts_url   = "http://localhost:8880/v1/audio/speech"
+tts_model = "kokoro"
+tts_voice = "af_heart"
 ```
 
-**Option C — OpenAI TTS (cloud, $0.015/1K chars)**
+> **Note:** `piper-tts` and `kokoro` (pip packages) are CLI synthesis tools only —
+> neither has a built-in HTTP server mode. An OpenAI-compatible HTTP server is required.
+
+**Option B — OpenAI TTS (cloud, $0.015/1K chars)**
 ```toml
 tts_url = "https://api.openai.com/v1/audio/speech"
 tts_api_key = "sk-..."   # or ATHENA_TTS_API_KEY env var
 ```
 
-## Step 4: Expose Athena with a Public URL
+## Step 4: Configure Athena
 
-Twilio needs to reach your server. Use ngrok for local development:
-
-```bash
-ngrok http 8089
-# Note the https://xxxx.ngrok.io URL
-```
-
-## Step 5: Configure Athena
-
-Add to your `config.toml`:
+Add to your `~/.athena/config.toml`:
 
 ```toml
 [telephony]
-twilio_account_sid = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-twilio_auth_token  = "your_auth_token_here"
 listen_host = "0.0.0.0"
 listen_port = 8089
-public_url = "https://xxxx.ngrok.io"     # from Step 4
 
 # STT (adjust to match your choice from Step 2)
 stt_url   = "http://localhost:8787/v1/audio/transcriptions"
@@ -113,13 +124,20 @@ stt_model = "whisper-large-v3"
 
 # TTS (adjust to match your choice from Step 3)
 tts_url   = "http://localhost:8880/v1/audio/speech"
-tts_model = "tts-1"
-tts_voice = "alloy"
+tts_model = "kokoro"
+tts_voice = "af_heart"
 
 # Optional tuning
 greeting       = "Hello, this is Athena. How can I help you?"
 vad_silence_ms = 800    # ms of silence before end-of-speech (lower = faster, more false positives)
 vad_threshold  = 0.5    # speech probability threshold (higher = stricter)
+vad_enabled    = true   # set false to use energy-only detection (no Silero VAD)
+stt_language   = "en"   # optional hint (reduces language mis-detect, speeds up tiny/base models)
+
+# Required only for Twilio integration (Steps 5-7):
+# twilio_account_sid = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# twilio_auth_token  = "your_auth_token_here"
+# public_url         = "https://xxxx.ngrok.io"
 ```
 
 Credentials can also be set via environment variables:
@@ -130,15 +148,7 @@ export ATHENA_STT_API_KEY="..."        # only if using cloud STT
 export ATHENA_TTS_API_KEY="..."        # only if using cloud TTS
 ```
 
-## Step 6: Configure Twilio
-
-1. Go to **Twilio Console** → **Phone Numbers** → **Manage** → select your number
-2. Under **Voice Configuration**:
-   - Set **"A call comes in"** webhook to: `https://xxxx.ngrok.io/voice`
-   - Method: **HTTP POST**
-3. Save
-
-## Step 7: Build and Run
+## Step 5: Build and Run
 
 ```bash
 cargo run --features telephony -- telephony
@@ -150,11 +160,75 @@ Athena Telephony Server
   Listening on 0.0.0.0:8089
   Voice webhook: /voice
   Media stream:  /media-stream
-  Public URL:    https://xxxx.ngrok.io
-  Configure Twilio voice webhook to: https://xxxx.ngrok.io/voice
 ```
 
-## Step 8: Test
+---
+
+## Local Testing Without Twilio
+
+The `/media-stream` WebSocket endpoint has no authentication. You can connect to it
+directly, bypassing Twilio entirely, using the included simulator script.
+
+**Requirements:** `sox` (`brew install sox`) and `websockets` (`pip3.11 install websockets`).
+
+```bash
+# Terminal 1 — server with transcript logging:
+RUST_LOG=athena::telephony=debug cargo run --features telephony -- telephony
+
+# Terminal 2 — start a local call:
+python3.11 scripts/local_call.py
+```
+
+The script:
+- Sends a Twilio-format `connected` → `start` handshake over WebSocket
+- Streams your mic audio as mulaw 8kHz media events (identical to what Twilio sends)
+- Plays Athena's audio responses through your speaker via `sox`
+- Handles barge-in (`clear` events) and end-of-turn (`mark` events)
+
+Transcripts and LLM responses appear in the server log (`Transcript: "..."`).
+
+Optional flags:
+```bash
+python3.11 scripts/local_call.py --url ws://localhost:8089/media-stream
+python3.11 scripts/local_call.py --mic-gain 2.0 --mic-gate-hold-ms 400
+python3.11 scripts/local_call.py --barge-in
+```
+
+---
+
+## Twilio Integration (Steps 6–8)
+
+Skip these steps if you only need local testing.
+
+## Step 6: Expose Athena with a Public URL
+
+Twilio needs to reach your server. Use ngrok for local development:
+
+```bash
+brew install ngrok/ngrok/ngrok
+
+# ngrok requires a free account — sign up at https://dashboard.ngrok.com/signup
+# then add your authtoken (one-time setup):
+ngrok config add-authtoken <your-authtoken>
+
+ngrok http 8089
+# Note the https://xxxx.ngrok.io URL
+```
+
+Then add to your config:
+```toml
+public_url = "https://xxxx.ngrok.io"
+```
+
+## Step 7: Configure Twilio
+
+1. Go to **Twilio Console** → **Phone Numbers** → **Manage** → select your number
+2. Under **Voice Configuration**:
+   - Set **"A call comes in"** webhook to: `https://xxxx.ngrok.io/voice`
+   - Method: **HTTP POST**
+3. Save
+
+## Step 8: Test with a Real Call
 
 Call your Twilio phone number. You should hear the greeting, then be able to have a conversation.
 
@@ -164,9 +238,14 @@ Call your Twilio phone number. You should hear the greeting, then be able to hav
 
 ### Webhook Authentication
 
-When `twilio_auth_token` is configured (recommended), Athena validates the `X-Twilio-Signature` HMAC-SHA1 header on every `/voice` request. Unauthenticated requests receive a `403 Forbidden` response.
+When `twilio_auth_token` is configured (recommended), Athena validates the
+`X-Twilio-Signature` HMAC-SHA1 header on every `/voice` request. Unauthenticated
+requests receive a `403 Forbidden` response.
 
 If the token is omitted, signature validation is skipped (useful for local development).
+
+Note: `/media-stream` (WebSocket) has no authentication — it relies on the `/voice`
+TwiML handshake to gate access in production.
 
 ### Payload Limits
 
@@ -193,11 +272,14 @@ Users can interrupt Athena mid-response by speaking. When speech is detected dur
 | No answer / timeout | Twilio can't reach `/voice` | Check ngrok is running, URL matches Twilio config |
 | `403 Forbidden` in Twilio logs | Signature mismatch | Verify `twilio_auth_token` matches Twilio Console, check `public_url` matches exactly |
 | Greeting plays but no response | STT server not running or unreachable | Check `stt_url` is accessible: `curl http://localhost:8787/health` |
-| Garbled / silent response | TTS server not running | Check `tts_url` is accessible |
+| Garbled / silent response | TTS server not running | Check `tts_url` is accessible: `curl http://localhost:8880/health` |
 | "I couldn't hear that clearly" | STT transcription failed | Check STT server logs, ensure audio is reaching the server |
+| Wrong language / gibberish transcript | STT language auto-detected incorrectly | Set `stt_language = "en"` (or your language) in config |
 | Very slow response | VAD model not found, using energy fallback | Download Silero VAD model (Step 1) |
 | Cuts off mid-word | `vad_silence_ms` too low | Increase to 800-1000ms |
 | Long pauses before response | `vad_silence_ms` too high | Decrease to 500-600ms |
+| `local_call.py`: no audio in | sox can't open mic | Run `sox -d -t raw - \| xxd \| head` to test mic access |
+| `local_call.py`: no audio out | sox can't open speaker | Run `echo test \| sox -t raw -r 8000 -e mu-law -c 1 - -d` to test |
 
 ### Logs
 
@@ -205,6 +287,11 @@ Run with debug logging for full audio pipeline visibility:
 
 ```bash
 RUST_LOG=athena::telephony=debug cargo run --features telephony -- telephony
+```
+
+You should see per-utterance timings like:
+```
+Utterance timings: queue=0ms, stt=620ms, llm=5400ms, tts_synth=2100ms, tts_encode=12ms, tts_send=4ms, total=8136ms
 ```
 
 ---
@@ -218,11 +305,14 @@ Quick validation for reviewing telephony PRs:
 # Build with telephony feature
 cargo build --features telephony
 
-# Run all telephony unit tests (21 tests)
+# Run all telephony unit tests
 cargo test --features telephony telephony::
 
-# Expected: mulaw codec, WAV roundtrip, Twilio signature validation,
-# payload limits, response cap, truncation safety — all pass
+# Dead code gate
+python3 scripts/dead_code_check.py --telephony
+
+# Wiring checks
+python3 scripts/wiring_check.py
 ```
 
 ### Local Smoke Test (no Twilio needed)
@@ -244,15 +334,14 @@ curl -X POST http://localhost:8089/voice
 curl -X POST http://localhost:8089/voice
 # Expected: "Forbidden" (403) — no X-Twilio-Signature header
 
-# 5. Verify WebSocket endpoint accepts upgrade
-# Use websocat or wscat:
-wscat -c ws://localhost:8089/media-stream
-# Expected: connection opens (send {"event":"connected"} to test)
+# 5. Full voice conversation test (no Twilio needed)
+python3.11 scripts/local_call.py
+# Speak into mic — verify greeting plays, speech is transcribed, response is spoken
 ```
 
 ### End-to-End Test (requires Twilio)
 
-1. Configure Twilio + ngrok + STT + TTS (Steps 1-6 above)
+1. Configure Twilio + ngrok + STT + TTS (Steps 4-7 above)
 2. Call the Twilio number
 3. Verify:
    - [ ] Greeting plays on answer

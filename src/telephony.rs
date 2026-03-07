@@ -9,7 +9,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -30,6 +32,13 @@ use crate::core::{CoreEvent, CoreHandle, SessionContext};
 
 /// Twilio sends 20ms audio chunks at 8kHz mulaw = 160 bytes per chunk.
 const MULAW_CHUNK_SAMPLES: usize = 160;
+/// Silero VAD v5 requires fixed-size windows: 256 samples @ 8 kHz, 512 @ 16 kHz.
+const VAD_WINDOW_SAMPLES_8KHZ: usize = 256;
+const VAD_WINDOW_SAMPLES_16KHZ: usize = 512;
+/// Conservative energy fallback for low-level local mic audio.
+/// Helps when the ONNX VAD misses obviously voiced chunks from the simulator.
+const ENERGY_SPEECH_THRESHOLD: f32 = 0.00005;
+const ENERGY_PEAK_THRESHOLD: f32 = 0.03;
 /// Maximum audio buffer before forced flush (60 seconds of 8kHz audio).
 const MAX_AUDIO_BUFFER_SAMPLES: usize = 8000 * 60;
 /// Minimum speech samples before we bother sending to STT (0.5s).
@@ -46,10 +55,8 @@ const MAX_RESPONSE_CHARS: usize = 2_000;
 /// Runs locally — no API calls, no cost.
 struct SileroVad {
     session: ort::session::Session,
-    /// LSTM hidden state (h)
-    h: ndarray::Array3<f32>,
-    /// LSTM cell state (c)
-    c: ndarray::Array3<f32>,
+    /// Recurrent state tensor for the ONNX model.
+    state: ndarray::Array3<f32>,
     sample_rate: u32,
     threshold: f32,
 }
@@ -60,14 +67,13 @@ impl SileroVad {
             .with_intra_threads(1)?
             .commit_from_file(model_path)?;
 
-        // Silero VAD v5 uses 2 layers, 64 units for LSTM state
-        let h = ndarray::Array3::<f32>::zeros((2, 1, 64));
-        let c = ndarray::Array3::<f32>::zeros((2, 1, 64));
+        // The distributed ONNX model exposes a single recurrent state tensor
+        // with shape [2, batch, 128].
+        let state = ndarray::Array3::<f32>::zeros((2, 1, 128));
 
         Ok(Self {
             session,
-            h,
-            c,
+            state,
             sample_rate,
             threshold,
         })
@@ -80,18 +86,16 @@ impl SileroVad {
         let audio_len = audio.len();
         let audio_arr =
             ndarray::Array2::from_shape_vec((1, audio_len), audio.to_vec())?;
-        let sr_arr = ndarray::Array1::from_vec(vec![self.sample_rate as i64]);
+        let sr_arr = ndarray::arr0(self.sample_rate as i64);
 
         let audio_tensor = Tensor::from_array(audio_arr)?;
         let sr_tensor = Tensor::from_array(sr_arr)?;
-        let h_tensor = Tensor::from_array(self.h.clone())?;
-        let c_tensor = Tensor::from_array(self.c.clone())?;
+        let state_tensor = Tensor::from_array(self.state.clone())?;
 
         let outputs = self.session.run(ort::inputs![
             "input" => audio_tensor,
             "sr" => sr_tensor,
-            "h" => h_tensor,
-            "c" => c_tensor,
+            "state" => state_tensor,
         ])?;
 
         // Extract speech probability
@@ -99,21 +103,12 @@ impl SileroVad {
             .try_extract_array::<f32>()?;
         let speech_prob = prob_arr.as_slice().unwrap_or(&[0.0])[0];
 
-        // Update LSTM states from outputs
-        if let Ok(hn_arr) = outputs[1].try_extract_array::<f32>() {
-            if let Some(slice) = hn_arr.as_slice() {
-                if slice.len() == self.h.len() {
-                    if let Some(h_slice) = self.h.as_slice_mut() {
-                        h_slice.copy_from_slice(slice);
-                    }
-                }
-            }
-        }
-        if let Ok(cn_arr) = outputs[2].try_extract_array::<f32>() {
-            if let Some(slice) = cn_arr.as_slice() {
-                if slice.len() == self.c.len() {
-                    if let Some(c_slice) = self.c.as_slice_mut() {
-                        c_slice.copy_from_slice(slice);
+        // Update recurrent state from the second output ("stateN").
+        if let Ok(state_arr) = outputs[1].try_extract_array::<f32>() {
+            if let Some(slice) = state_arr.as_slice() {
+                if slice.len() == self.state.len() {
+                    if let Some(state_slice) = self.state.as_slice_mut() {
+                        state_slice.copy_from_slice(slice);
                     }
                 }
             }
@@ -134,8 +129,14 @@ impl SileroVad {
 
     /// Reset LSTM states (call between utterances).
     fn reset(&mut self) {
-        self.h.fill(0.0);
-        self.c.fill(0.0);
+        self.state.fill(0.0);
+    }
+
+    fn window_size(&self) -> usize {
+        match self.sample_rate {
+            8000 => VAD_WINDOW_SAMPLES_8KHZ,
+            _ => VAD_WINDOW_SAMPLES_16KHZ,
+        }
     }
 }
 
@@ -212,6 +213,25 @@ fn f32_to_mulaw(data: &[f32]) -> Vec<u8> {
         .collect()
 }
 
+fn frame_energy(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32
+}
+
+fn frame_peak_abs(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0f32, f32::max)
+}
+
+fn energy_is_speech(samples: &[f32]) -> bool {
+    frame_energy(samples) >= ENERGY_SPEECH_THRESHOLD
+        || frame_peak_abs(samples) >= ENERGY_PEAK_THRESHOLD
+}
+
 /// Encode f32 PCM [-1, 1] as 16-bit LE WAV in memory (for STT upload).
 fn pcm_to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let num_samples = samples.len() as u32;
@@ -256,14 +276,18 @@ async fn transcribe_audio(
         .clone()
         .or_else(|| std::env::var("ATHENA_STT_API_KEY").ok());
     let stt_model = config.stt_model.as_deref().unwrap_or("whisper-large-v3");
+    let stt_language = config.stt_language.as_deref();
 
     let part = reqwest::multipart::Part::bytes(wav_bytes)
         .file_name("audio.wav")
         .mime_str("audio/wav")
         .map_err(|e| format!("MIME error: {}", e))?;
-    let form = reqwest::multipart::Form::new()
+    let mut form = reqwest::multipart::Form::new()
         .part("file", part)
         .text("model", stt_model.to_string());
+    if let Some(lang) = stt_language {
+        form = form.text("language", lang.to_string());
+    }
 
     let client = reqwest::Client::new();
     let mut req = client.post(stt_url).multipart(form);
@@ -470,8 +494,13 @@ fn validate_twilio_signature(
     use hmac::{Hmac, Mac};
     type HmacSha1 = Hmac<sha1::Sha1>;
 
-    let mut mac =
-        HmacSha1::new_from_slice(token.as_bytes()).expect("HMAC accepts any key length");
+    let mut mac = match HmacSha1::new_from_slice(token.as_bytes()) {
+        Ok(mac) => mac,
+        Err(err) => {
+            warn!("Twilio signature HMAC init failed: {err}");
+            return false;
+        }
+    };
     mac.update(data.as_bytes());
     let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
@@ -489,6 +518,11 @@ fn validate_twilio_signature(
 struct AppState {
     core: CoreHandle,
     config: TelephonyConfig,
+}
+
+struct QueuedUtterance {
+    audio: Vec<f32>,
+    queued_at: Instant,
 }
 
 // ── HTTP Handlers ────────────────────────────────────────────────────
@@ -575,6 +609,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let mut call_sid = String::new();
     let mut vad: Option<SileroVad> = None;
     let mut audio_buffer: Vec<f32> = Vec::new();
+    let mut vad_input_buffer: Vec<f32> = Vec::new();
     let mut in_speech = false;
     let mut silence_frames: u32 = 0;
     let mut greeting_sent = false;
@@ -583,40 +618,46 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let tts_cancel = Arc::new(AtomicBool::new(false));
     // Track whether TTS is currently playing so we know when to barge-in.
     let tts_playing = Arc::new(AtomicBool::new(false));
+    // The initial greeting is not bargable. Ignore inbound audio until it ends.
+    let greeting_playing = Arc::new(AtomicBool::new(false));
 
     // Serialized utterance processing: use a channel so only one
     // process_utterance runs at a time (prevents interleaved audio).
     let (utterance_tx, mut utterance_rx) =
-        tokio::sync::mpsc::channel::<Vec<f32>>(4);
+        tokio::sync::mpsc::channel::<QueuedUtterance>(4);
 
     // How many 20ms frames must be silent before we consider speech done.
     // Minimum 1 to avoid triggering on every non-speech frame.
     let silence_threshold = ((state.config.vad_silence_ms as u32) / 20).max(1);
 
-    // Try to initialize VAD
-    let vad_path = state
-        .config
-        .vad_model_path
-        .clone()
-        .unwrap_or_else(|| {
-            let home = dirs::home_dir().unwrap_or_default();
-            home.join(".athena")
-                .join("silero_vad.onnx")
-                .to_string_lossy()
-                .into_owned()
-        });
+    // Try to initialize VAD (optional)
+    if state.config.vad_enabled {
+        let vad_path = state
+            .config
+            .vad_model_path
+            .clone()
+            .unwrap_or_else(|| {
+                let home = dirs::home_dir().unwrap_or_default();
+                home.join(".athena")
+                    .join("silero_vad.onnx")
+                    .to_string_lossy()
+                    .into_owned()
+            });
 
-    match SileroVad::new(&vad_path, state.config.sample_rate, state.config.vad_threshold) {
-        Ok(v) => {
-            info!("Silero VAD loaded from {}", vad_path);
-            vad = Some(v);
+        match SileroVad::new(&vad_path, state.config.sample_rate, state.config.vad_threshold) {
+            Ok(v) => {
+                info!("Silero VAD loaded from {}", vad_path);
+                vad = Some(v);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load Silero VAD from {}: {}. Falling back to energy-based detection.",
+                    vad_path, e
+                );
+            }
         }
-        Err(e) => {
-            warn!(
-                "Failed to load Silero VAD from {}: {}. Falling back to energy-based detection.",
-                vad_path, e
-            );
-        }
+    } else {
+        info!("Silero VAD disabled; using energy-based detection only");
     }
 
     info!("Twilio Media Stream connected");
@@ -628,6 +669,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         let config_clone = state.config.clone();
         let tts_cancel_clone = tts_cancel.clone();
         let tts_playing_clone = tts_playing.clone();
+        let greeting_playing_clone = greeting_playing.clone();
         // call_sid isn't known yet — we'll capture it via a shared reference.
         let call_sid_holder: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
         let call_sid_for_processor = call_sid_holder.clone();
@@ -639,11 +681,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         let sid_holder_main = sid_holder.clone();
 
         tokio::spawn(async move {
-            while let Some(buffer) = utterance_rx.recv().await {
+            while let Some(utterance) = utterance_rx.recv().await {
+                let queue_delay = utterance.queued_at.elapsed();
                 let csid = call_sid_for_processor.lock().await.clone();
                 let sid = sid_for_processor.lock().await.clone();
                 process_utterance(
-                    buffer,
+                    utterance.audio,
                     &sender_clone,
                     &core_clone,
                     &config_clone,
@@ -651,6 +694,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     &csid,
                     &tts_cancel_clone,
                     &tts_playing_clone,
+                    queue_delay,
                 )
                 .await;
             }
@@ -710,7 +754,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         let greeting = state.config.greeting.clone();
                         let playing = tts_playing.clone();
                         let cancel = tts_cancel.clone();
+                        let greeting_playing = greeting_playing.clone();
                         tokio::spawn(async move {
+                            greeting_playing.store(true, Ordering::Relaxed);
                             if let Err(e) = send_tts_response(
                                 &sender_clone,
                                 &config_clone,
@@ -722,11 +768,19 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                             .await
                             {
                                 error!("Failed to send greeting: {}", e);
+                                greeting_playing.store(false, Ordering::Relaxed);
                             }
                         });
                     }
                 }
                 "media" => {
+                    if greeting_playing_clone.load(Ordering::Relaxed) {
+                        // Do not allow the initial greeting to be interrupted.
+                        // This avoids cutting off the first prompt due to room
+                        // noise, speaker bleed, or VAD warm-up artifacts.
+                        continue;
+                    }
+
                     let payload = match event["media"]["payload"].as_str() {
                         Some(p) if p.len() <= MAX_MEDIA_PAYLOAD_BYTES => p,
                         Some(p) => {
@@ -744,13 +798,51 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
                     let pcm = mulaw_to_f32(&mulaw_bytes);
 
-                    let is_speech = if let Some(ref mut v) = vad {
-                        v.is_speech(&pcm)
+                    let vad_is_speech = if let Some(ref mut v) = vad {
+                        vad_input_buffer.extend_from_slice(&pcm);
+                        let window_size = v.window_size();
+                        let mut saw_window = false;
+                        let mut saw_speech = false;
+                        let mut saw_non_speech = false;
+
+                        while vad_input_buffer.len() >= window_size {
+                            let window = &vad_input_buffer[..window_size];
+                            saw_window = true;
+                            if v.is_speech(window) {
+                                saw_speech = true;
+                            } else {
+                                saw_non_speech = true;
+                            }
+                            vad_input_buffer.drain(..window_size);
+                        }
+
+                        if saw_speech {
+                            true
+                        } else if saw_window {
+                            !saw_non_speech
+                        } else {
+                            in_speech
+                        }
                     } else {
-                        let energy: f32 =
-                            pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len().max(1) as f32;
-                        energy > 0.001
+                        false
                     };
+                    let frame_energy = frame_energy(&pcm);
+                    let frame_peak = frame_peak_abs(&pcm);
+                    let energy_is_speech = energy_is_speech(&pcm);
+                    let is_speech = vad_is_speech || energy_is_speech;
+
+                    debug!(
+                        vad_is_speech,
+                        energy_is_speech,
+                        is_speech,
+                        in_speech,
+                        silence_frames,
+                        frame_energy,
+                        frame_peak,
+                        audio_buffer_len = audio_buffer.len(),
+                        vad_buffer_len = vad_input_buffer.len(),
+                        "Processed inbound media frame"
+                    );
 
                     if is_speech {
                         // Barge-in: if TTS is playing and user starts speaking, cancel it.
@@ -772,7 +864,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         }
 
                         if !in_speech {
-                            debug!("Speech started");
+                            debug!(audio_buffer_len = audio_buffer.len(), "Speech started");
                             in_speech = true;
                         }
                         silence_frames = 0;
@@ -786,11 +878,23 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                             if let Some(ref mut v) = vad {
                                 v.reset();
                             }
-                            let _ = utterance_tx.send(buffer).await;
+                            vad_input_buffer.clear();
+                            let _ = utterance_tx
+                                .send(QueuedUtterance {
+                                    audio: buffer,
+                                    queued_at: Instant::now(),
+                                })
+                                .await;
                         }
                     } else if in_speech {
                         audio_buffer.extend_from_slice(&pcm);
                         silence_frames += 1;
+                        debug!(
+                            silence_frames,
+                            silence_threshold,
+                            audio_buffer_len = audio_buffer.len(),
+                            "Silence frame while in speech"
+                        );
 
                         if silence_frames >= silence_threshold {
                             debug!(
@@ -802,10 +906,21 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                             if let Some(ref mut v) = vad {
                                 v.reset();
                             }
+                            vad_input_buffer.clear();
 
                             if audio_buffer.len() >= MIN_SPEECH_SAMPLES {
                                 let buffer = std::mem::take(&mut audio_buffer);
-                                let _ = utterance_tx.send(buffer).await;
+                                info!(
+                                    "Queued utterance for STT: {} samples ({:.1}s)",
+                                    buffer.len(),
+                                    buffer.len() as f32 / state.config.sample_rate as f32
+                                );
+                                let _ = utterance_tx
+                                    .send(QueuedUtterance {
+                                        audio: buffer,
+                                        queued_at: Instant::now(),
+                                    })
+                                    .await;
                             } else {
                                 debug!(
                                     "Discarding short utterance ({} samples)",
@@ -824,6 +939,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     // When TTS playback finishes, Twilio sends back our mark.
                     if event["mark"]["name"].as_str() == Some("response_end") {
                         tts_playing.store(false, Ordering::Relaxed);
+                        greeting_playing_clone.store(false, Ordering::Relaxed);
                     }
                     debug!("Mark event: {:?}", event["mark"]);
                 }
@@ -847,15 +963,19 @@ async fn process_utterance(
     call_sid: &str,
     tts_cancel: &AtomicBool,
     tts_playing: &AtomicBool,
+    queue_delay: Duration,
 ) {
+    let overall_start = Instant::now();
     info!(
-        "Processing utterance: {} samples ({:.1}s)",
+        "Processing utterance: {} samples ({:.1}s) [queued {}ms ago]",
         audio.len(),
-        audio.len() as f32 / config.sample_rate as f32
+        audio.len() as f32 / config.sample_rate as f32,
+        queue_delay.as_millis()
     );
 
     let wav = pcm_to_wav(&audio, config.sample_rate);
 
+    let stt_start = Instant::now();
     let transcript = match transcribe_audio(wav, config).await {
         Ok(t) => t,
         Err(e) => {
@@ -873,14 +993,15 @@ async fn process_utterance(
             return;
         }
     };
+    let stt_ms = stt_start.elapsed().as_millis();
 
     let transcript = transcript.trim().to_string();
     if transcript.is_empty() {
-        debug!("Empty transcript, skipping");
+        debug!("Empty transcript, skipping (stt_ms={}ms)", stt_ms);
         return;
     }
 
-    info!("Transcript: \"{}\"", transcript);
+    info!("Transcript: \"{}\" (stt_ms={}ms)", transcript, stt_ms);
 
     let session = SessionContext {
         platform: "phone".to_string(),
@@ -906,6 +1027,7 @@ async fn process_utterance(
         }
     };
 
+    let llm_start = Instant::now();
     let mut full_response = String::new();
     while let Some(event) = event_rx.recv().await {
         match event {
@@ -937,8 +1059,10 @@ async fn process_utterance(
             _ => {}
         }
     }
+    let llm_ms = llm_start.elapsed().as_millis();
 
     if full_response.is_empty() {
+        info!("LLM produced empty response (llm_ms={}ms)", llm_ms);
         return;
     }
 
@@ -957,14 +1081,35 @@ async fn process_utterance(
     info!(
         "LLM response ({} chars): \"{}\"",
         voice_response.len(),
-        &voice_response[..voice_response.len().min(80)]
+        voice_response
     );
 
-    if let Err(e) =
-        send_tts_response(sender, config, stream_sid, &voice_response, tts_cancel, tts_playing)
-            .await
+    match send_tts_response(
+        sender,
+        config,
+        stream_sid,
+        &voice_response,
+        tts_cancel,
+        tts_playing,
+    )
+    .await
     {
-        error!("Failed to send TTS response: {}", e);
+        Ok(tts) => {
+            let total_ms = overall_start.elapsed().as_millis();
+            info!(
+                "Utterance timings: queue={}ms, stt={}ms, llm={}ms, tts_synth={}ms, tts_encode={}ms, tts_send={}ms, total={}ms",
+                queue_delay.as_millis(),
+                stt_ms,
+                llm_ms,
+                tts.synth_ms,
+                tts.encode_ms,
+                tts.send_ms,
+                total_ms
+            );
+        }
+        Err(e) => {
+            error!("Failed to send TTS response: {}", e);
+        }
     }
 }
 
@@ -972,6 +1117,12 @@ async fn process_utterance(
 ///
 /// Checks `cancel` between chunks to support barge-in. If cancelled, stops
 /// sending and returns early. Sets `playing` to true while sending.
+struct TtsTimings {
+    synth_ms: u128,
+    encode_ms: u128,
+    send_ms: u128,
+}
+
 async fn send_tts_response(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     config: &TelephonyConfig,
@@ -979,27 +1130,38 @@ async fn send_tts_response(
     text: &str,
     cancel: &AtomicBool,
     playing: &AtomicBool,
-) -> Result<(), String> {
+) -> Result<TtsTimings, String> {
     let stream_sid = stream_sid.ok_or("No stream SID")?;
 
     // Clear any previous cancellation before we start.
     cancel.store(false, Ordering::Relaxed);
     playing.store(true, Ordering::Relaxed);
 
+    let synth_start = Instant::now();
     let wav_bytes = synthesize_speech(text, config).await?;
+    let synth_ms = synth_start.elapsed().as_millis();
+
+    let encode_start = Instant::now();
     let pcm = wav_to_f32_mono(&wav_bytes, config.sample_rate)?;
     let mulaw = f32_to_mulaw(&pcm);
+    let encode_ms = encode_start.elapsed().as_millis();
 
     let chunk_size = MULAW_CHUNK_SAMPLES;
     let mut sender_guard = sender.lock().await;
     let mut sent = 0usize;
 
+    let send_start = Instant::now();
     for chunk in mulaw.chunks(chunk_size) {
         // Barge-in check: stop sending if the user started speaking.
         if cancel.load(Ordering::Relaxed) {
             info!("TTS playback cancelled by barge-in after {} bytes", sent);
             playing.store(false, Ordering::Relaxed);
-            return Ok(());
+            let send_ms = send_start.elapsed().as_millis();
+            return Ok(TtsTimings {
+                synth_ms,
+                encode_ms,
+                send_ms,
+            });
         }
 
         let payload = base64::engine::general_purpose::STANDARD.encode(chunk);
@@ -1021,6 +1183,8 @@ async fn send_tts_response(
         sent += chunk.len();
     }
 
+    let send_ms = send_start.elapsed().as_millis();
+
     // Mark event so we know when playback finishes
     let mark_msg = serde_json::json!({
         "event": "mark",
@@ -1041,7 +1205,11 @@ async fn send_tts_response(
     // But if the mark never arrives, we should eventually time out — handled by
     // the next speech event's barge-in logic.
 
-    Ok(())
+    Ok(TtsTimings {
+        synth_ms,
+        encode_ms,
+        send_ms,
+    })
 }
 
 // ── Public Entry Point ───────────────────────────────────────────────
@@ -1057,7 +1225,7 @@ pub struct SystemInfo {
 pub async fn run_telephony(
     core: CoreHandle,
     config: TelephonyConfig,
-    _system_info: SystemInfo,
+    system_info: SystemInfo,
 ) -> anyhow::Result<()> {
     if config.stt_url.is_none() {
         anyhow::bail!(
@@ -1088,6 +1256,14 @@ pub async fn run_telephony(
     info!("  Listening on {}", addr);
     info!("  Voice webhook: /voice");
     info!("  Media stream:  /media-stream");
+    info!(
+        "  LLM:           {} (temp={}, max_tokens={})",
+        system_info.provider, system_info.temperature, system_info.max_tokens
+    );
+    debug!(
+        startup_age = ?system_info.started_at.elapsed(),
+        "Telephony system info initialized"
+    );
     if let Some(ref url) = config.public_url {
         info!("  Public URL:    {}", url);
         info!("  Configure Twilio voice webhook to: {}/voice", url);
@@ -1275,6 +1451,17 @@ mod tests {
         assert_eq!(((20u32) / 20).max(1), 1);
         // 800ms (default) should give 40
         assert_eq!(((800u32) / 20).max(1), 40);
+    }
+
+    #[test]
+    fn energy_fallback_ignores_silence() {
+        assert!(!energy_is_speech(&[0.0; 160]));
+    }
+
+    #[test]
+    fn energy_fallback_detects_loud_frame() {
+        let voiced = vec![0.02f32; 160];
+        assert!(energy_is_speech(&voiced));
     }
 
     // ── response truncation ───────────────────────────────────────────

@@ -39,6 +39,7 @@ pub struct Config {
     pub persona: PersonaConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[cfg(feature = "telephony")]
     #[serde(default)]
     pub telephony: TelephonyConfig,
     #[serde(default)]
@@ -358,6 +359,8 @@ pub struct TelegramConfig {
     pub stt_api_key: Option<String>,
     /// STT model name (default: whisper-large-v3)
     pub stt_model: Option<String>,
+    /// STT language hint (e.g. "en", "pl"; omit for auto-detect)
+    pub stt_language: Option<String>,
     /// Text-to-speech API URL (e.g. http://localhost:8880/v1/audio/speech)
     pub tts_url: Option<String>,
     /// TTS API key (or set ATHENA_TTS_API_KEY env var)
@@ -384,6 +387,7 @@ impl std::fmt::Debug for TelegramConfig {
             .field("stt_url", &self.stt_url)
             .field("stt_api_key", &"[REDACTED]")
             .field("stt_model", &self.stt_model)
+            .field("stt_language", &self.stt_language)
             .field("tts_url", &self.tts_url)
             .field("tts_api_key", &"[REDACTED]")
             .field("tts_model", &self.tts_model)
@@ -407,6 +411,7 @@ impl Default for TelegramConfig {
             stt_url: None,
             stt_api_key: None,
             stt_model: None,
+            stt_language: None,
             tts_url: None,
             tts_api_key: None,
             tts_model: None,
@@ -434,25 +439,36 @@ fn default_planning_timeout() -> u64 {
 
 // ── Telephony (Twilio phone calls) ──────────────────────────────────
 
+#[cfg(feature = "telephony")]
 fn default_telephony_listen_port() -> u16 {
     8089
 }
+#[cfg(feature = "telephony")]
 fn default_telephony_listen_host() -> String {
     "0.0.0.0".into()
 }
+#[cfg(feature = "telephony")]
 fn default_vad_silence_ms() -> u64 {
     800
 }
+#[cfg(feature = "telephony")]
 fn default_vad_threshold() -> f32 {
     0.5
 }
+#[cfg(feature = "telephony")]
+fn default_vad_enabled() -> bool {
+    true
+}
+#[cfg(feature = "telephony")]
 fn default_telephony_sample_rate() -> u32 {
     8000
 }
+#[cfg(feature = "telephony")]
 fn default_greeting() -> String {
     "Hello, this is Athena. How can I help you?".into()
 }
 
+#[cfg(feature = "telephony")]
 #[derive(Deserialize, Clone)]
 pub struct TelephonyConfig {
     /// Twilio Account SID (or ATHENA_TWILIO_ACCOUNT_SID env var)
@@ -475,6 +491,8 @@ pub struct TelephonyConfig {
     pub stt_api_key: Option<String>,
     /// STT model name (default: whisper-large-v3)
     pub stt_model: Option<String>,
+    /// STT language hint (e.g. "en", "pl"; omit for auto-detect)
+    pub stt_language: Option<String>,
     /// TTS API URL (e.g. http://localhost:8880/v1/audio/speech)
     pub tts_url: Option<String>,
     /// TTS API key (or ATHENA_TTS_API_KEY env var)
@@ -492,6 +510,9 @@ pub struct TelephonyConfig {
     /// VAD speech probability threshold (0.0 - 1.0)
     #[serde(default = "default_vad_threshold")]
     pub vad_threshold: f32,
+    /// Enable Silero VAD (if false, use energy-based detection only)
+    #[serde(default = "default_vad_enabled")]
+    pub vad_enabled: bool,
     /// Path to Silero VAD ONNX model file
     pub vad_model_path: Option<String>,
     /// Audio sample rate (Twilio sends 8000 Hz mulaw)
@@ -499,6 +520,7 @@ pub struct TelephonyConfig {
     pub sample_rate: u32,
 }
 
+#[cfg(feature = "telephony")]
 impl std::fmt::Debug for TelephonyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelephonyConfig")
@@ -509,16 +531,19 @@ impl std::fmt::Debug for TelephonyConfig {
             .field("listen_port", &self.listen_port)
             .field("public_url", &self.public_url)
             .field("stt_url", &self.stt_url)
+            .field("stt_language", &self.stt_language)
             .field("tts_url", &self.tts_url)
             .field("greeting", &self.greeting)
             .field("vad_silence_ms", &self.vad_silence_ms)
             .field("vad_threshold", &self.vad_threshold)
+            .field("vad_enabled", &self.vad_enabled)
             .field("vad_model_path", &self.vad_model_path)
             .field("sample_rate", &self.sample_rate)
             .finish()
     }
 }
 
+#[cfg(feature = "telephony")]
 impl Default for TelephonyConfig {
     fn default() -> Self {
         Self {
@@ -531,6 +556,7 @@ impl Default for TelephonyConfig {
             stt_url: None,
             stt_api_key: None,
             stt_model: None,
+            stt_language: None,
             tts_url: None,
             tts_api_key: None,
             tts_model: None,
@@ -538,6 +564,7 @@ impl Default for TelephonyConfig {
             greeting: default_greeting(),
             vad_silence_ms: default_vad_silence_ms(),
             vad_threshold: default_vad_threshold(),
+            vad_enabled: default_vad_enabled(),
             vad_model_path: None,
             sample_rate: default_telephony_sample_rate(),
         }
@@ -1331,6 +1358,7 @@ impl Default for Config {
             ghosts: default_ghosts(),
             persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
+            #[cfg(feature = "telephony")]
             telephony: TelephonyConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),

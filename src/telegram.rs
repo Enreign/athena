@@ -144,6 +144,7 @@ async fn transcribe_voice(
         .or_else(|| std::env::var("ATHENA_STT_API_KEY").ok())
         .ok_or("STT API key not configured. Set stt_api_key or ATHENA_STT_API_KEY env var.")?;
     let stt_model = config.stt_model.as_deref().unwrap_or("whisper-large-v3");
+    let stt_language = config.stt_language.as_deref();
 
     // Download voice file from Telegram
     let file = bot
@@ -168,9 +169,12 @@ async fn transcribe_voice(
         .file_name("voice.ogg")
         .mime_str("audio/ogg")
         .map_err(|e| format!("Failed to set voice MIME type: {}", e))?;
-    let form = reqwest::multipart::Form::new()
+    let mut form = reqwest::multipart::Form::new()
         .part("file", part)
         .text("model", stt_model.to_string());
+    if let Some(lang) = stt_language {
+        form = form.text("language", lang.to_string());
+    }
 
     let client = reqwest::Client::new();
     let resp = client
