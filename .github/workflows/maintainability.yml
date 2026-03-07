@@ -52,3 +52,8 @@ jobs:
       - name: Maintainability regression check
         run: |
           ./scripts/maintainability_check.py
+
+      - name: Cargo audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit
