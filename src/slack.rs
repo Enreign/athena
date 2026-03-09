@@ -74,6 +74,10 @@ fn escape_mrkdwn(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('*', "\u{2217}")  // asterisk operator (prevents bold)
+        .replace('_', "\u{FF3F}")  // fullwidth low line (prevents italic)
+        .replace('~', "\u{223C}")  // tilde operator (prevents strikethrough)
+        .replace('`', "\u{2018}")  // left single quotation (prevents code)
 }
 
 /// Format a duration in seconds as human-readable (e.g., "2h 15m").
@@ -743,7 +747,10 @@ async fn forward_slack_events(
                     .await;
             }
             CoreEvent::StreamChunk(chunk) => {
-                stream_buffer.push_str(&chunk);
+                // Cap buffer at 100KB to prevent OOM from unbounded responses
+                if stream_buffer.len() < 100_000 {
+                    stream_buffer.push_str(&chunk);
+                }
                 let now = tokio::time::Instant::now();
                 if now.duration_since(last_edit) >= edit_interval {
                     let display = stream_preview(&stream_buffer);
@@ -828,8 +835,9 @@ async fn dispatch_to_core(
     let events = match state.handle.chat(session_ctx, &text, confirmer).await {
         Ok(rx) => rx,
         Err(e) => {
+            tracing::error!(error = %e, "Core dispatch failed");
             let content = SlackMessageContent::new()
-                .with_text(format!("_Error: {}_", escape_mrkdwn(&e.to_string())));
+                .with_text("_An internal error occurred._".to_string());
             let _ = api_session
                 .chat_update(&SlackApiChatUpdateRequest::new(
                     channel.clone(),
@@ -877,8 +885,9 @@ async fn dispatch_to_core_with_followup(
     let events = match state.handle.chat(session_ctx, &text, confirmer).await {
         Ok(rx) => rx,
         Err(e) => {
+            tracing::error!(error = %e, "Core dispatch failed");
             let content = SlackMessageContent::new()
-                .with_text(format!("_Error: {}_", escape_mrkdwn(&e.to_string())));
+                .with_text("_An internal error occurred._".to_string());
             let _ = api_session
                 .chat_update(&SlackApiChatUpdateRequest::new(
                     channel.clone(),
@@ -1184,7 +1193,7 @@ async fn command_memories(
             for m in &memories {
                 out.push_str(&format!(
                     "`[{}]` *{}* — {}\n",
-                    escape_mrkdwn(&m.id[..8]),
+                    escape_mrkdwn(m.id.get(..8).unwrap_or(&m.id)),
                     escape_mrkdwn(&m.category),
                     escape_mrkdwn(&m.content)
                 ));
@@ -1291,8 +1300,8 @@ async fn command_dispatch(
 
     match state.handle.dispatch_task(task).await {
         Err(e) => {
-            let text = format!("_Failed to dispatch: {}_", escape_mrkdwn(&e.to_string()));
-            send_mrkdwn(session, channel, thread_ts, &text).await
+            tracing::error!(error = %e, "Failed to dispatch task");
+            send_mrkdwn(session, channel, thread_ts, "_Failed to dispatch task._").await
         }
         Ok(task_id) => {
             let label = ghost_name.unwrap_or_else(|| "auto".into());
@@ -1327,8 +1336,8 @@ async fn command_review(
     let entries = match state.handle.activity_log.recent(&session_key, 200) {
         Ok(e) => e,
         Err(e) => {
-            let text = format!("*Error loading activity log:* {}", escape_mrkdwn(&e.to_string()));
-            return send_mrkdwn(session, channel, thread_ts, &text).await;
+            tracing::error!(error = %e, "Failed to load activity log");
+            return send_mrkdwn(session, channel, thread_ts, "_Failed to load activity log._").await;
         }
     };
     let auto_entries = state
@@ -1411,11 +1420,8 @@ async fn command_explain(
             send_mrkdwn(session, channel, thread_ts, &text).await
         }
         Err(e) => {
-            let text = format!(
-                "*Error generating explanation:* {}",
-                escape_mrkdwn(&e.to_string())
-            );
-            send_mrkdwn(session, channel, thread_ts, &text).await
+            tracing::error!(error = %e, "Failed to generate explanation");
+            send_mrkdwn(session, channel, thread_ts, "_Failed to generate explanation._").await
         }
     }
 }
@@ -1498,7 +1504,10 @@ async fn command_alerts(
                     send_mrkdwn(session, channel, thread_ts, &text).await
                 }
                 Err(e) => {
-                    let text = format!("*Error:* {}", escape_mrkdwn(&e.to_string()));
+                    let text = {
+                        tracing::error!(error = %e, "Alert operation failed");
+                        "_An error occurred._".to_string()
+                    };
                     send_mrkdwn(session, channel, thread_ts, &text).await
                 }
             }
@@ -1540,7 +1549,10 @@ async fn command_alerts(
                         session,
                         channel,
                         thread_ts,
-                        &format!("*Error:* {}", escape_mrkdwn(&e.to_string())),
+                        &{
+                        tracing::error!(error = %e, "Alert operation failed");
+                        "_An error occurred._".to_string()
+                    },
                     )
                     .await
                 }
@@ -1591,7 +1603,10 @@ async fn command_alerts(
                         session,
                         channel,
                         thread_ts,
-                        &format!("*Error:* {}", escape_mrkdwn(&e.to_string())),
+                        &{
+                        tracing::error!(error = %e, "Alert operation failed");
+                        "_An error occurred._".to_string()
+                    },
                     )
                     .await
                 }
@@ -1817,7 +1832,7 @@ async fn command_jobs(
                         .unwrap_or_else(|| "-".to_string());
                     out.push_str(&format!(
                         "`[{}]` *{}* ({})\n  next: {} — {}\n",
-                        escape_mrkdwn(&j.id[..8]),
+                        escape_mrkdwn(j.id.get(..8).unwrap_or(&j.id)),
                         escape_mrkdwn(&j.name),
                         status,
                         escape_mrkdwn(&next),
@@ -2053,6 +2068,25 @@ async fn handle_slash_command(
     let session = state.client.open_session(&state.bot_token);
     let channel_str = channel.to_string();
     let user_str = user_id.to_string();
+
+    if !is_authorized(&channel_str, &state.config) {
+        tracing::debug!(channel = %channel_str, "Ignoring slash command from unauthorized channel");
+        return;
+    }
+
+    // Rate limit slash commands (except help/status which are read-only)
+    {
+        let now = tokio::time::Instant::now();
+        let mut map = state.last_request.lock().await;
+        if should_rate_limit(
+            map.get(&channel_str).copied(),
+            now,
+            tokio::time::Duration::from_secs(5),
+        ) {
+            return;
+        }
+        map.insert(channel_str.clone(), now);
+    }
 
     // Parse subcommand and args
     let trimmed = text.trim();
@@ -2340,6 +2374,20 @@ async fn handle_app_mention(
         return Ok(());
     }
 
+    // Rate limit mentions
+    {
+        let now = tokio::time::Instant::now();
+        let mut map = state.last_request.lock().await;
+        if should_rate_limit(
+            map.get(&channel_str).copied(),
+            now,
+            tokio::time::Duration::from_secs(5),
+        ) {
+            return Ok(());
+        }
+        map.insert(channel_str.clone(), now);
+    }
+
     let user_id = mention.user.to_string();
     let text = mention
         .content
@@ -2403,6 +2451,14 @@ async fn handle_interaction_event(
             .as_ref()
             .map(|u| u.id.to_string())
             .unwrap_or_else(|| "unknown".into());
+
+        // Authorization check: reject interactions from unauthorized channels
+        if let Some(ch) = &channel_id {
+            if !is_authorized(&ch.to_string(), &state.config) {
+                tracing::debug!(channel = %ch, "Ignoring interaction from unauthorized channel");
+                return Ok(());
+            }
+        }
 
         if let Some(actions) = &action_event.actions {
             for action in actions {
@@ -3153,6 +3209,12 @@ mod tests {
     fn escape_mrkdwn_special_chars() {
         assert_eq!(escape_mrkdwn("a & b"), "a &amp; b");
         assert_eq!(escape_mrkdwn("<script>"), "&lt;script&gt;");
+        // Formatting chars should be neutralized
+        let escaped = escape_mrkdwn("*bold* _italic_ ~strike~ `code`");
+        assert!(!escaped.contains('*'));
+        assert!(!escaped.contains('_'));
+        assert!(!escaped.contains('~'));
+        assert!(!escaped.contains('`'));
     }
 
     #[test]
