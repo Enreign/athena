@@ -580,9 +580,134 @@ fn cli_display_name(tool_id: &str) -> String {
 
 // ── Planning action enum ────────────────────────────────────────────
 
+/// Build Block Kit actions for planning constraints step.
+fn planning_constraints_blocks() -> Vec<SlackBlock> {
+    vec![
+        SlackBlock::Section(
+            SlackSectionBlock::new()
+                .with_text(SlackBlockText::MarkDown(SlackBlockMarkDownText::new(
+                    "Any constraints? Pick quick options or type your own:".into(),
+                ))),
+        ),
+        SlackBlock::Actions(SlackActionsBlock::new(vec![
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:timeline:today".into(), pt("Today".into()))
+                    .with_value("today".into()),
+            ),
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:timeline:week".into(), pt("This week".into()))
+                    .with_value("week".into()),
+            ),
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:timeline:none".into(), pt("No deadline".into()))
+                    .with_value("none".into()),
+            ),
+        ])),
+        SlackBlock::Actions(SlackActionsBlock::new(vec![
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:scope:idea".into(), pt("Idea only".into()))
+                    .with_value("idea".into()),
+            ),
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:scope:impl".into(), pt("Implementation".into()))
+                    .with_value("impl".into()),
+            ),
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:scope:full".into(), pt("Full plan".into()))
+                    .with_value("full".into()),
+            ),
+        ])),
+        SlackBlock::Actions(SlackActionsBlock::new(vec![
+            SlackActionBlockElement::Button(
+                SlackBlockButtonElement::new("plan:skip:constraints".into(), pt("Skip".into()))
+                    .with_value("skip".into()),
+            ),
+        ])),
+    ]
+}
+
+/// Build Block Kit actions for planning output format step.
+fn planning_output_blocks() -> Vec<SlackBlock> {
+    vec![SlackBlock::Actions(SlackActionsBlock::new(vec![
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:output:checklist".into(), pt("Checklist".into()))
+                .with_value("checklist".into()),
+        ),
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:output:spec".into(), pt("Spec".into()))
+                .with_value("spec".into()),
+        ),
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:output:draft".into(), pt("Draft".into()))
+                .with_value("draft".into()),
+        ),
+    ]))]
+}
+
+/// Build Block Kit actions for planning confirm step.
+fn planning_confirm_blocks() -> Vec<SlackBlock> {
+    vec![SlackBlock::Actions(SlackActionsBlock::new(vec![
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:confirm:yes".into(), pt("Confirm".into()))
+                .with_value("yes".into()),
+        ),
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:confirm:edit".into(), pt("Edit".into()))
+                .with_value("edit".into()),
+        ),
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:confirm:cancel".into(), pt("Cancel".into()))
+                .with_value("cancel".into()),
+        ),
+    ]))]
+}
+
+/// Build Block Kit actions for post-plan-generation step.
+fn planning_post_generate_blocks() -> Vec<SlackBlock> {
+    vec![SlackBlock::Actions(SlackActionsBlock::new(vec![
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:post:implement".into(), pt("Implement".into()))
+                .with_value("implement".into()),
+        ),
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:post:refine".into(), pt("Refine".into()))
+                .with_value("refine".into()),
+        ),
+        SlackActionBlockElement::Button(
+            SlackBlockButtonElement::new("plan:post:done".into(), pt("Done".into()))
+                .with_value("done".into()),
+        ),
+    ]))]
+}
+
+/// Helper to create a plain_text object for button labels.
+fn pt(text: String) -> SlackBlockPlainTextOnly {
+    SlackBlockPlainTextOnly::from(text)
+}
+
+/// Send a mrkdwn message with Block Kit blocks appended.
+async fn send_mrkdwn_with_blocks(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    text: &str,
+    blocks: Vec<SlackBlock>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let content = SlackMessageContent::new()
+        .with_text(text.to_string())
+        .with_blocks(blocks);
+    let mut req = SlackApiChatPostMessageRequest::new(channel.clone(), content);
+    if let Some(ts) = thread_ts {
+        req = req.with_thread_ts(ts.clone());
+    }
+    session.chat_post_message(&req).await?;
+    Ok(())
+}
+
 enum PlanningAction {
     None,
     Prompt(String),
+    PromptWithBlocks(String, Vec<SlackBlock>),
     Dispatch(String),
     Cancelled,
     Done,
@@ -779,7 +904,9 @@ async fn dispatch_to_core_with_followup(
         .await;
         if let Some(msg) = followup {
             let session = client.open_session(&bot_token);
-            let content = SlackMessageContent::new().with_text(msg);
+            let content = SlackMessageContent::new()
+                .with_text(msg)
+                .with_blocks(planning_post_generate_blocks());
             let mut req = SlackApiChatPostMessageRequest::new(channel, content);
             if let Some(ts) = &thread_ts {
                 req = req.with_thread_ts(ts.clone());
@@ -807,8 +934,9 @@ fn planning_advance_step(
             } else {
                 interview.goal = Some(text.to_string());
                 interview.step = PlanningStep::Constraints;
-                PlanningAction::Prompt(
-                    "Any constraints I should respect? (timeline, budget, stack, scope)".to_string(),
+                PlanningAction::PromptWithBlocks(
+                    "Any constraints I should respect? Pick quick options or type your own:".to_string(),
+                    planning_constraints_blocks(),
                 )
             }
         }
@@ -820,8 +948,9 @@ fn planning_advance_step(
                 interview.constraints = Some(text.to_string());
             }
             interview.step = PlanningStep::Output;
-            PlanningAction::Prompt(
-                "What format do you want the plan in: checklist, spec, or draft?".to_string(),
+            PlanningAction::PromptWithBlocks(
+                "What format do you want the plan in?".to_string(),
+                planning_output_blocks(),
             )
         }
         PlanningStep::Output => {
@@ -831,7 +960,10 @@ fn planning_advance_step(
                 text.to_string()
             });
             interview.step = PlanningStep::Summary;
-            PlanningAction::Prompt(planning_summary_mrkdwn(interview))
+            PlanningAction::PromptWithBlocks(
+                planning_summary_mrkdwn(interview),
+                planning_confirm_blocks(),
+            )
         }
         PlanningStep::Summary => {
             if is_confirm_text(text) {
@@ -844,17 +976,24 @@ fn planning_advance_step(
                     "Send corrections using lines like:\n`Goal: ...`\n`Constraints: ...`\n`Timeline: ...`\n`Scope: ...`\n`Depth: ...`\n`Output: ...`".to_string(),
                 )
             } else if apply_planning_edits(interview, text) {
-                PlanningAction::Prompt(planning_summary_mrkdwn(interview))
+                PlanningAction::PromptWithBlocks(
+                    planning_summary_mrkdwn(interview),
+                    planning_confirm_blocks(),
+                )
             } else {
-                PlanningAction::Prompt(
+                PlanningAction::PromptWithBlocks(
                     "Reply `confirm` to proceed, or send edits like `Goal: ...`.".to_string(),
+                    planning_confirm_blocks(),
                 )
             }
         }
         PlanningStep::Editing => {
             if apply_planning_edits(interview, text) {
                 interview.step = PlanningStep::Summary;
-                PlanningAction::Prompt(planning_summary_mrkdwn(interview))
+                PlanningAction::PromptWithBlocks(
+                    planning_summary_mrkdwn(interview),
+                    planning_confirm_blocks(),
+                )
             } else {
                 PlanningAction::Prompt(
                     "I couldn't read those edits. Try lines like `Goal: ...` or `Constraints: ...`.".to_string(),
@@ -900,8 +1039,9 @@ async fn planning_action_for_message(
             interview.goal = Some(text.to_string());
             interview.step = PlanningStep::Constraints;
             planning.insert(key, interview);
-            PlanningAction::Prompt(
-                "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints I should respect? (timeline, budget, stack, scope)".to_string(),
+            PlanningAction::PromptWithBlocks(
+                "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints?".to_string(),
+                planning_constraints_blocks(),
             )
         } else {
             planning.insert(key, interview);
@@ -936,7 +1076,14 @@ async fn command_help(
         `/athena explain [summary|detailed] [hours]` — Conceptual explanation\n\
         `/athena watch [seconds]` — Real-time activity stream\n\
         `/athena search <query>` — Search across all sessions\n\
-        `/athena alerts` — Manage alert rules\n\n\
+        `/athena alerts` — Manage alert rules\n\
+        `/athena knobs` — Display all runtime knobs\n\
+        `/athena mood` — Detailed mood state\n\
+        `/athena jobs` — List scheduled cron jobs\n\
+        `/athena session` — Current session info\n\
+        `/athena cli` — Switch CLI tool\n\
+        `/athena set <key> <value>` — Modify runtime knob\n\
+        `/athena cli_model [name]` — Show/switch CLI model\n\n\
         Send any message to chat with Athena.";
     send_mrkdwn(session, channel, thread_ts, help).await
 }
@@ -1612,6 +1759,289 @@ fn format_autonomous_entry(entry: &ActivityEntry) -> String {
     text
 }
 
+async fn command_knobs(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let display = {
+        let k = state
+            .handle
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        k.display()
+    };
+    let text = format!("```{}```", escape_mrkdwn(&display));
+    send_mrkdwn(session, channel, thread_ts, &text).await
+}
+
+async fn command_mood(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let desc = state.handle.mood.describe();
+    let energy = state.handle.mood.energy();
+    let modifier = state.handle.mood.modifier();
+    let text = format!(
+        "*Mood*\n\n{}\n*Energy:* `{} {:.0}%`\n*Modifier:* `{}`",
+        escape_mrkdwn(&desc),
+        energy_bar(energy),
+        energy * 100.0,
+        escape_mrkdwn(&modifier),
+    );
+    send_mrkdwn(session, channel, thread_ts, &text).await
+}
+
+async fn command_jobs(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(engine) = &state.handle.cron_engine {
+        match engine.list_jobs() {
+            Ok(jobs) if jobs.is_empty() => {
+                send_mrkdwn(session, channel, thread_ts, "_No scheduled jobs._").await
+            }
+            Ok(jobs) => {
+                let mut out = String::from("*Scheduled Jobs:*\n\n");
+                for j in &jobs {
+                    let status = if j.enabled { "on" } else { "off" };
+                    let next = j
+                        .next_run
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    out.push_str(&format!(
+                        "`[{}]` *{}* ({})\n  next: {} — {}\n",
+                        escape_mrkdwn(&j.id[..8]),
+                        escape_mrkdwn(&j.name),
+                        status,
+                        escape_mrkdwn(&next),
+                        escape_mrkdwn(&j.prompt),
+                    ));
+                    if let Some(ghost) = j.ghost.as_deref() {
+                        out.push_str(&format!("  ghost: {}\n", escape_mrkdwn(ghost)));
+                    }
+                    if j.target != "broadcast" {
+                        out.push_str(&format!("  target: {}\n", escape_mrkdwn(&j.target)));
+                    }
+                }
+                send_mrkdwn(session, channel, thread_ts, &out).await
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to list jobs");
+                send_mrkdwn(session, channel, thread_ts, "_Failed to list jobs._").await
+            }
+        }
+    } else {
+        send_mrkdwn(
+            session,
+            channel,
+            thread_ts,
+            "_Cron engine not initialized._",
+        )
+        .await
+    }
+}
+
+async fn command_session(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    user_id: &str,
+    channel_str: &str,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let session_key = format!("slack:{}:{}", user_id, channel_str);
+    let turns = state
+        .handle
+        .memory
+        .recent_turns(&session_key, 100)
+        .unwrap_or_default();
+
+    let turn_count = turns.len();
+    let total_chars: usize = turns.iter().map(|(_, c)| c.len()).sum();
+    let est_tokens = total_chars / 4;
+    let context_window = state.handle.llm.context_window();
+    let utilization = if context_window > 0 {
+        (est_tokens as f64 / context_window as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let current_model = state.handle.llm.current_model();
+
+    let last_preview = turns
+        .last()
+        .map(|(role, content)| {
+            let preview = if content.len() > 80 {
+                format!("{}...", &content[..content.floor_char_boundary(80)])
+            } else {
+                content.clone()
+            };
+            format!("[{}] {}", role, preview)
+        })
+        .unwrap_or_else(|| "none".to_string());
+
+    let text = format!(
+        "*Session*\n\n\
+         *Key:* `{}`\n\
+         *Model:* `{}`\n\
+         *Turns:* `{}`\n\
+         *Est. tokens:* `~{}`\n\
+         *Context:* `{:.0}%` of `{}`\n\
+         *Last message:*\n_{}_",
+        escape_mrkdwn(&session_key),
+        escape_mrkdwn(&current_model),
+        turn_count,
+        format_tokens(est_tokens as u64),
+        utilization,
+        format_tokens(context_window),
+        escape_mrkdwn(&last_preview),
+    );
+    send_mrkdwn(session, channel, thread_ts, &text).await
+}
+
+async fn command_cli(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let current = state
+        .handle
+        .knobs
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .cli_tool
+        .clone();
+    let label = cli_display_name(&current);
+    let blocks = vec![
+        SlackBlock::Section(
+            SlackSectionBlock::new().with_text(SlackBlockText::MarkDown(
+                SlackBlockMarkDownText::new(format!("*Coding CLI tool:* {}", escape_mrkdwn(&label))),
+            )),
+        ),
+        SlackBlock::Actions(SlackActionsBlock::new(
+            CLI_TOOLS
+                .iter()
+                .map(|(id, name)| {
+                    SlackActionBlockElement::Button(
+                        SlackBlockButtonElement::new(
+                            format!("cli:{}", id).into(),
+                            pt(name.to_string()),
+                        )
+                        .with_value(id.to_string().into()),
+                    )
+                })
+                .collect(),
+        )),
+    ];
+    send_mrkdwn_with_blocks(
+        session,
+        channel,
+        thread_ts,
+        &format!("*Coding CLI tool:* {}", escape_mrkdwn(&label)),
+        blocks,
+    )
+    .await
+}
+
+async fn command_set(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    arg: &str,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.is_empty() {
+        return command_knobs(session, channel, thread_ts, state).await;
+    }
+    if parts.len() == 2 {
+        let result = {
+            let mut k = state
+                .handle
+                .knobs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            k.set(parts[0], parts[1])
+        };
+        match result {
+            Ok(msg) => {
+                state
+                    .handle
+                    .observer
+                    .emit(crate::observer::ObserverEvent::new(
+                        crate::observer::ObserverCategory::KnobChange,
+                        format!("{} = {}", parts[0], parts[1]),
+                    ));
+                let text = format!("*Set:* {}", escape_mrkdwn(&msg));
+                send_mrkdwn(session, channel, thread_ts, &text).await
+            }
+            Err(e) => {
+                let text = format!("_Error: {}_", escape_mrkdwn(&e));
+                send_mrkdwn(session, channel, thread_ts, &text).await
+            }
+        }
+    } else {
+        send_mrkdwn(
+            session,
+            channel,
+            thread_ts,
+            "_Usage:_ `/athena set` _or_ `/athena set <key> <value>`",
+        )
+        .await
+    }
+}
+
+async fn command_cli_model(
+    session: &SlackClientSession<'_, SlackClientHyperHttpsConnector>,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    arg: &str,
+    state: &SlackState,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if arg.is_empty() {
+        let model = state
+            .handle
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cli_model
+            .clone();
+        let label = if model.is_empty() {
+            "default (tool decides)".to_string()
+        } else {
+            model
+        };
+        let text = format!("*CLI tool model:* `{}`", escape_mrkdwn(&label));
+        send_mrkdwn(session, channel, thread_ts, &text).await
+    } else {
+        let result = {
+            let mut k = state
+                .handle
+                .knobs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            k.set("cli_model", arg)
+        };
+        match result {
+            Ok(msg) => {
+                let text = format!("*Set:* {}", escape_mrkdwn(&msg));
+                send_mrkdwn(session, channel, thread_ts, &text).await
+            }
+            Err(e) => {
+                let text = format!("_Error: {}_", escape_mrkdwn(&e));
+                send_mrkdwn(session, channel, thread_ts, &text).await
+            }
+        }
+    }
+}
+
 // ── Slash command dispatch ──────────────────────────────────────────
 
 async fn handle_slash_command(
@@ -1652,6 +2082,15 @@ async fn handle_slash_command(
         "watch" => {
             command_watch(&session, &channel, None, &user_str, arg, &state).await
         }
+        "knobs" => command_knobs(&session, &channel, None, &state).await,
+        "mood" => command_mood(&session, &channel, None, &state).await,
+        "jobs" => command_jobs(&session, &channel, None, &state).await,
+        "session" => {
+            command_session(&session, &channel, None, &user_str, &channel_str, &state).await
+        }
+        "cli" => command_cli(&session, &channel, None, &state).await,
+        "set" => command_set(&session, &channel, None, arg, &state).await,
+        "cli_model" => command_cli_model(&session, &channel, None, arg, &state).await,
         "plan" => {
             if !state.config.planning_enabled {
                 send_mrkdwn(&session, &channel, None, "_Planning interview is disabled in config._")
@@ -1663,18 +2102,29 @@ async fn handle_slash_command(
             } else {
                 let now = tokio::time::Instant::now();
                 let mut interview = PlanningInterview::new(now);
-                let prompt = if arg.is_empty() {
-                    "*Quick planning interview*\n\nWhat does success look like? One sentence is fine."
-                        .to_string()
+                let key = thread_key(&channel_str, None);
+                if arg.is_empty() {
+                    state.planning.lock().await.insert(key, interview);
+                    send_mrkdwn(
+                        &session,
+                        &channel,
+                        None,
+                        "*Quick planning interview*\n\nWhat does success look like? One sentence is fine.",
+                    )
+                    .await
                 } else {
                     interview.goal = Some(arg.to_string());
                     interview.step = PlanningStep::Constraints;
-                    "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints I should respect? (timeline, budget, stack, scope)"
-                        .to_string()
-                };
-                let key = thread_key(&channel_str, None);
-                state.planning.lock().await.insert(key, interview);
-                send_mrkdwn(&session, &channel, None, &prompt).await
+                    state.planning.lock().await.insert(key, interview);
+                    send_mrkdwn_with_blocks(
+                        &session,
+                        &channel,
+                        None,
+                        "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints?",
+                        planning_constraints_blocks(),
+                    )
+                    .await
+                }
             }
         }
         "implement" => {
@@ -1827,6 +2277,18 @@ async fn handle_slack_message(
                 let _ = send_mrkdwn(&session, channel_id, thread_ts.as_ref(), &prompt).await;
                 return Ok(());
             }
+            PlanningAction::PromptWithBlocks(prompt, blocks) => {
+                let session = state.client.open_session(&state.bot_token);
+                let _ = send_mrkdwn_with_blocks(
+                    &session,
+                    channel_id,
+                    thread_ts.as_ref(),
+                    &prompt,
+                    blocks,
+                )
+                .await;
+                return Ok(());
+            }
             PlanningAction::Dispatch(prompt) => {
                 let session_ctx = slack_session(&user_id, &channel_str);
                 dispatch_to_core_with_followup(
@@ -1958,14 +2420,58 @@ async fn handle_interaction_event(
                     ["plan", kind, value] => {
                         if let Some(ch) = &channel_id {
                             let channel_str = ch.to_string();
-                            handle_planning_callback(
-                                &state,
-                                &channel_str,
+                            // Handle quick-select buttons from constraints step
+                            match (*kind, *value) {
+                                ("timeline", v) | ("scope", v) | ("constraints", v) => {
+                                    handle_planning_quick_select(
+                                        &state, &channel_str, ch, None, kind, v,
+                                    )
+                                    .await;
+                                }
+                                ("output", v) => {
+                                    handle_planning_quick_select(
+                                        &state, &channel_str, ch, None, "output", v,
+                                    )
+                                    .await;
+                                }
+                                ("skip", _) => {
+                                    handle_planning_quick_select(
+                                        &state, &channel_str, ch, None, "skip", value,
+                                    )
+                                    .await;
+                                }
+                                _ => {
+                                    handle_planning_callback(
+                                        &state,
+                                        &channel_str,
+                                        ch,
+                                        None,
+                                        &user_id,
+                                        kind,
+                                        value,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                    ["cli", tool_id] => {
+                        {
+                            let mut k = state
+                                .handle
+                                .knobs
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let _ = k.set("cli_tool", tool_id);
+                        }
+                        if let Some(ch) = &channel_id {
+                            let label = cli_display_name(tool_id);
+                            let session = state.client.open_session(&state.bot_token);
+                            let _ = send_mrkdwn(
+                                &session,
                                 ch,
                                 None,
-                                &user_id,
-                                kind,
-                                value,
+                                &format!("*CLI tool switched to:* {}", escape_mrkdwn(&label)),
                             )
                             .await;
                         }
@@ -1976,6 +2482,103 @@ async fn handle_interaction_event(
         }
     }
     Ok(())
+}
+
+/// Handle quick-select button presses from planning constraints/output steps.
+async fn handle_planning_quick_select(
+    state: &SlackState,
+    channel_str: &str,
+    channel: &SlackChannelId,
+    thread_ts: Option<&SlackTs>,
+    kind: &str,
+    value: &str,
+) {
+    let key = thread_key(channel_str, thread_ts);
+    let mut planning = state.planning.lock().await;
+    let Some(interview) = planning.get_mut(&key) else {
+        return;
+    };
+    interview.last_updated = tokio::time::Instant::now();
+
+    match kind {
+        "timeline" => {
+            interview.timeline = Some(value.to_string());
+            // Stay on constraints step, user can add more or skip
+        }
+        "scope" => {
+            interview.scope = Some(value.to_string());
+        }
+        "constraints" if value == "none" => {
+            interview.constraints = Some("none".to_string());
+            // Advance to output step
+            interview.step = PlanningStep::Output;
+            drop(planning);
+            let session = state.client.open_session(&state.bot_token);
+            let _ = send_mrkdwn_with_blocks(
+                &session,
+                channel,
+                thread_ts,
+                "What format do you want the plan in?",
+                planning_output_blocks(),
+            )
+            .await;
+            return;
+        }
+        "skip" => {
+            // Skip current step
+            match interview.step {
+                PlanningStep::Constraints => {
+                    interview.constraints = Some("none".to_string());
+                    interview.step = PlanningStep::Output;
+                    drop(planning);
+                    let session = state.client.open_session(&state.bot_token);
+                    let _ = send_mrkdwn_with_blocks(
+                        &session,
+                        channel,
+                        thread_ts,
+                        "What format do you want the plan in?",
+                        planning_output_blocks(),
+                    )
+                    .await;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        "output" => {
+            interview.output = Some(value.to_string());
+            interview.step = PlanningStep::Summary;
+            let summary = planning_summary_mrkdwn(interview);
+            drop(planning);
+            let session = state.client.open_session(&state.bot_token);
+            let _ = send_mrkdwn_with_blocks(
+                &session,
+                channel,
+                thread_ts,
+                &summary,
+                planning_confirm_blocks(),
+            )
+            .await;
+            return;
+        }
+        _ => {}
+    }
+    drop(planning);
+
+    // For timeline/scope selections, acknowledge and wait for more input or skip
+    let session = state.client.open_session(&state.bot_token);
+    let label = match kind {
+        "timeline" => format!("Timeline: *{}*. ", value),
+        "scope" => format!("Scope: *{}*. ", value),
+        _ => String::new(),
+    };
+    let _ = send_mrkdwn(
+        &session,
+        channel,
+        thread_ts,
+        &format!("{}Anything else? Type constraints or press *Skip*.", label),
+    )
+    .await;
 }
 
 async fn handle_planning_callback(
