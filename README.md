@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/athena-banner.png" alt="Emberloom" width="838" />
-
 <h1>Emberloom</h1>
 
 <p><strong>Self-hosted multi-agent orchestrator with a hardened execution sandbox,<br>
