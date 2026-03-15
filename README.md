@@ -161,6 +161,7 @@ Emberloom's Docker sandbox applies layered hardening beyond a typical `docker ru
 - **Namespaced tool exposure** — discovered tools are exposed as `mcp:<server>:<tool>` with per-server allowlists
 - **Confirmation propagation** — `requires_confirmation` flows through the normal tool approval path
 - **`stdio` transport** — production-ready; `sse`/`websocket` config enum exists, rejected at runtime
+- **[Cartograph](https://github.com/emberloom/cartograph) integration** — add `cartograph` to your MCP registry to give sparks codebase-aware context: blast radius, co-change patterns, and ownership before touching code
 
 ### Safety & Intake Hardening
 
@@ -398,3 +399,9 @@ Real-gate and nightly optimizer workflows are intentionally self-hosted.
 [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [LICENSE](LICENSE) · [CHANGELOG.md](CHANGELOG.md)
 
 Questions and bug reports → [GitHub Issues](https://github.com/emberloom/sparks/issues)
+
+---
+
+## Ecosystem
+
+- **[Emberloom Cartograph](https://github.com/emberloom/cartograph)** — codebase world model: dependency graph, blast radius, co-change patterns, and ownership — queryable via MCP by Sparks agents
